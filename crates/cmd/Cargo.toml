@@ -1,0 +1,8 @@
+[package]
+name = "mauricebarnum-oxia-cmd"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+mauricebarnum-oxia-client = { path = "../client" }
+mauricebarnum-oxia-common = { path = "../common" }
