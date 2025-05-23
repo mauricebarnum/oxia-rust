@@ -5,3 +5,16 @@ publish = false
 edition.workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
+bytes = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+
+[build-dependencies]
+tonic-build = "0.12.3"
+glob = "0.3.2"
+prost-build = "0.13.5"
