@@ -1,7 +1,7 @@
 [package]
 name = "mauricebarnum-oxia-cmd"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
 
 [dependencies]
 mauricebarnum-oxia-client = { path = "../client" }
