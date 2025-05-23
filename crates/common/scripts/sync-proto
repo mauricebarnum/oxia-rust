@@ -1,0 +1,27 @@
+#!/bin/bash
+
+set -e
+set -x
+
+upstream=https://github.com/streamnative/oxia
+
+# Get the directory of the script
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+tmp_dir=$(mktemp -d)
+
+cleanup() {
+	rm -rf "${tmp_dir}"
+}
+trap cleanup EXIT
+
+# Clone only the required directory
+git clone --depth 1 --filter=blob:none --sparse "${upstream}" "$tmp_dir/oxia"
+
+# Enable sparse checkout
+git -C "$tmp_dir/oxia" sparse-checkout set proto
+
+cp -vr "${tmp_dir}"/oxia/proto/*.proto "${script_dir}/proto"
+
+rev=$(git -C "$tmp_dir/oxia" rev-parse HEAD)
+echo "${upstream}/tree/${rev}" >"${script_dir}/proto/UPSTREAM"
