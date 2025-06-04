@@ -5,6 +5,5 @@ pub mod proto {
     pub use oxia_client_client::OxiaClientClient;
 }
 
-fn foo() {
-    let x = proto::ShardAssignment::default();
-}
+
+

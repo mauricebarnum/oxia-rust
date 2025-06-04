@@ -132,11 +132,7 @@ pub enum Error {
 impl Error {
     /// Whether the error is likely transient and worth retrying
     pub fn is_retryable(&self) -> bool {
-        match self {
-            Error::TonicTransport(_) => true,
-            Error::Io(_) => true,
-            _ => false,
-        }
+        matches!(self, Error::TonicTransport(_) | Error::Io(_))
     }
 }
 
