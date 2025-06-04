@@ -39,8 +39,8 @@ impl PutOptions {
         self
     }
 
-    pub fn partition_key(mut self, value: String) -> Self {
-        self.partition_key = Some(value);
+    pub fn partition_key(mut self, value: impl Into<String>) -> Self {
+        self.partition_key = Some(value.into());
         self
     }
 
@@ -151,7 +151,7 @@ impl GetOptions {
         self
     }
 
-    pub fn partition_key(mut self, value: String) -> Self {
+    pub fn partition_key(mut self, value: impl Into<String>) -> Self {
         self.partition_key = Some(value.into());
         self
     }
@@ -229,8 +229,8 @@ impl DeleteOptions {
         self
     }
 
-    pub fn partition_key(mut self, value: String) -> Self {
-        self.partition_key = Some(value);
+    pub fn partition_key(mut self, value: impl Into<String>) -> Self {
+        self.partition_key = Some(value.into());
         self
     }
 }
@@ -254,8 +254,8 @@ impl ListOptions {
         self
     }
 
-    pub fn secondary_index_name(mut self, value: String) -> Self {
-        self.secondary_index_name = Some(value);
+    pub fn secondary_index_name(mut self, value: impl Into<String>) -> Self {
+        self.secondary_index_name = Some(value.into());
         self
     }
 
@@ -269,8 +269,8 @@ impl ListOptions {
         self
     }
 
-    pub fn partition_key(mut self, value: String) -> Self {
-        self.partition_key = Some(value);
+    pub fn partition_key(mut self, value: impl Into<String>) -> Self {
+        self.partition_key = Some(value.into());
         self
     }
 }
@@ -357,13 +357,13 @@ impl RangeScanOptions {
         self
     }
 
-    pub fn secondary_index_name(mut self, value: String) -> Self {
-        self.secondary_index_name = Some(value);
+    pub fn secondary_index_name(mut self, value: impl Into<String>) -> Self {
+        self.secondary_index_name = Some(value.into());
         self
     }
 
-    pub fn partition_key(mut self, value: String) -> Self {
-        self.partition_key = Some(value);
+    pub fn partition_key(mut self, value: impl Into<String>) -> Self {
+        self.partition_key = Some(value.into());
         self
     }
 }
@@ -534,60 +534,74 @@ impl Client {
         Ok(shard)
     }
 
-    pub async fn get_with_options(&self, k: String, options: GetOptions) -> Result<GetResponse> {
+    pub async fn get_with_options(
+        &self,
+        key: impl Into<String>,
+        options: GetOptions,
+    ) -> Result<GetResponse> {
         if options.comparison_type != KeyComparisonType::Equal {
             return Err(ClientError::UnsupportedKeyComparator(options.comparison_type).into());
         }
 
-        let selector = options.partition_key.as_ref().unwrap_or(&k);
-        self.get_shard(selector).await?.get(k, options).await
+        let key = key.into();
+        let selector = options.partition_key.as_deref().unwrap_or(&key);
+        self.get_shard(selector).await?.get(key, options).await
     }
 
-    pub async fn get(&self, k: String) -> Result<GetResponse> {
+    pub async fn get(&self, k: impl Into<String>) -> Result<GetResponse> {
         self.get_with_options(k, GetOptions::default()).await
     }
 
     pub async fn put_with_options(
         &self,
-        key: String,
+        key: impl Into<String>,
         value: Vec<u8>,
         options: PutOptions,
     ) -> Result<PutResponse> {
-        let selector = options.partition_key.as_ref().unwrap_or(&key);
+        let key = key.into();
+        let selector = options.partition_key.as_deref().unwrap_or(&key);
         self.get_shard(selector)
             .await?
             .put(key, value, options)
             .await
     }
 
-    pub async fn put(&self, key: String, value: Vec<u8>) -> Result<PutResponse> {
+    pub async fn put(&self, key: impl Into<String>, value: Vec<u8>) -> Result<PutResponse> {
         self.put_with_options(key, value, PutOptions::default())
             .await
     }
 
-    pub async fn delete_with_options(&self, key: String, options: DeleteOptions) -> Result<()> {
-        let selector = options.partition_key.as_ref().unwrap_or(&key);
+    pub async fn delete_with_options(
+        &self,
+        key: impl Into<String>,
+        options: DeleteOptions,
+    ) -> Result<()> {
+        let key = key.into();
+        let selector = options.partition_key.as_deref().unwrap_or(&key);
         self.get_shard(selector).await?.delete(key, options).await
     }
 
-    pub async fn delete(&self, key: String) -> Result<()> {
+    pub async fn delete(&self, key: impl Into<String>) -> Result<()> {
         self.delete_with_options(key, DeleteOptions::default())
             .await
     }
 
     pub async fn list_with_options(
         &self,
-        start_inclusive: String,
-        end_exclusive: String,
+        start_inclusive: impl Into<String>,
+        end_exclusive: impl Into<String>,
         options: ListOptions,
     ) -> Result<ListResponse> {
-        if let Some(pk) = options.partition_key.as_ref() {
+        if let Some(pk) = options.partition_key.as_deref() {
             return self
                 .get_shard(pk)
                 .await?
                 .list(start_inclusive, end_exclusive, options)
                 .await;
         }
+
+        let start_inclusive = start_inclusive.into();
+        let end_exclusive = end_exclusive.into();
 
         let shards = self.get_shards()?;
 
@@ -635,8 +649,8 @@ impl Client {
 
     pub async fn list(
         &self,
-        start_inclusive: String,
-        end_exclusive: String,
+        start_inclusive: impl Into<String>,
+        end_exclusive: impl Into<String>,
     ) -> Result<ListResponse> {
         self.list_with_options(start_inclusive, end_exclusive, ListOptions::default())
             .await
@@ -644,8 +658,8 @@ impl Client {
 
     pub async fn range_scan_with_options(
         &self,
-        start_inclusive: String,
-        end_exclusive: String,
+        start_inclusive: impl Into<String>,
+        end_exclusive: impl Into<String>,
         options: RangeScanOptions,
     ) -> Result<RangeScanResponse> {
         if let Some(pk) = options.partition_key.as_ref() {
@@ -656,6 +670,8 @@ impl Client {
                 .await;
         }
 
+        let start_inclusive = start_inclusive.into();
+        let end_exclusive = end_exclusive.into();
         let shards = self.get_shards()?;
 
         // Here we need some sort of scatter-gather, but also then to assemble results in order.
@@ -706,8 +722,8 @@ impl Client {
 
     pub async fn range_scan(
         &self,
-        start_inclusive: String,
-        end_exclusive: String,
+        start_inclusive: impl Into<String>,
+        end_exclusive: impl Into<String>,
     ) -> Result<RangeScanResponse> {
         self.range_scan_with_options(start_inclusive, end_exclusive, RangeScanOptions::default())
             .await

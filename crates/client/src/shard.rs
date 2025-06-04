@@ -1,5 +1,6 @@
 use async_once_cell::OnceCell;
 use bytes::Bytes;
+use mauricebarnum_oxia_common::proto as oxia_proto;
 use rand::SeedableRng;
 use rand::distr::Distribution;
 use rand::distr::Uniform;
@@ -11,7 +12,6 @@ use tokio::{task::JoinHandle, time::sleep};
 use tokio_stream::StreamExt as _;
 use tonic::Streaming;
 use tonic::metadata::MetadataValue;
-use mauricebarnum_oxia_common::proto as oxia_proto;
 // use mauricebarnum_oxia_common::proto::ShardAssignments;
 
 use crate::{
@@ -51,14 +51,14 @@ impl ClientData {
         config: Arc<config::Config>,
         grpc: GrpcClient,
         shard_id: i64,
-        leader: String,
+        leader: impl Into<String>,
         meta: tonic::metadata::MetadataMap,
     ) -> Self {
         Self {
             config,
             grpc,
             shard_id,
-            leader,
+            leader: leader.into(),
             meta,
         }
     }
@@ -227,13 +227,13 @@ impl Client {
     }
 
     /// Creates a GetRequest with the appropriate options
-    fn make_get_req(&self, opts: &GetOptions, k: &str) -> oxia_proto::ReadRequest {
+    fn make_get_req(&self, opts: &GetOptions, k: impl Into<String>) -> oxia_proto::ReadRequest {
         let data = &self.data;
         let ct = opts.comparison_type as i32;
         oxia_proto::ReadRequest {
             shard: Some(data.shard_id),
             gets: vec![oxia_proto::GetRequest {
-                key: k.to_string(),
+                key: k.into(),
                 include_value: opts.include_value,
                 comparison_type: ct,
             }],
@@ -245,7 +245,7 @@ impl Client {
         &self,
         session_id: Option<i64>,
         opts: PutOptions,
-        k: &str,
+        k: impl Into<String>,
         v: Bytes,
     ) -> oxia_proto::WriteRequest {
         let data = &self.data;
@@ -267,13 +267,17 @@ impl Client {
     }
 
     /// Creates a DeleteRequest with the appropriate options
-    fn make_delete_req(&self, opts: &DeleteOptions, k: String) -> oxia_proto::WriteRequest {
+    fn make_delete_req(
+        &self,
+        opts: &DeleteOptions,
+        k: impl Into<String>,
+    ) -> oxia_proto::WriteRequest {
         let data = &self.data;
         oxia_proto::WriteRequest {
             shard: Some(data.shard_id),
             puts: vec![],
             deletes: vec![oxia_proto::DeleteRequest {
-                key: k,
+                key: k.into(),
                 expected_version_id: opts.expected_version_id,
             }],
             delete_ranges: vec![],
@@ -284,14 +288,14 @@ impl Client {
     fn make_list_req(
         &self,
         opts: ListOptions,
-        start_inclusive: String,
-        end_exclusive: String,
+        start_inclusive: impl Into<String>,
+        end_exclusive: impl Into<String>,
     ) -> oxia_proto::ListRequest {
         let data = &self.data;
         oxia_proto::ListRequest {
             shard: Some(data.shard_id),
-            start_inclusive,
-            end_exclusive,
+            start_inclusive: start_inclusive.into(),
+            end_exclusive: end_exclusive.into(),
             secondary_index_name: opts.secondary_index_name,
         }
     }
@@ -300,22 +304,24 @@ impl Client {
     fn make_range_scan_req(
         &self,
         opts: RangeScanOptions,
-        start_inclusive: String,
-        end_exclusive: String,
+        start_inclusive: impl Into<String>,
+        end_exclusive: impl Into<String>,
     ) -> oxia_proto::RangeScanRequest {
         let data = &self.data;
 
         // If end key is empty, use the internal key prefix to scan all keys
-        let effective_end = if end_exclusive.is_empty() {
-            // Prefix to ensure all user data is included but no system keys
-            INTERNAL_KEY_PREFIX.to_string()
-        } else {
-            end_exclusive
+        let effective_end = {
+            let s = end_exclusive.into();
+            if s.is_empty() {
+                INTERNAL_KEY_PREFIX.to_string()
+            } else {
+                s
+            }
         };
 
         oxia_proto::RangeScanRequest {
             shard: Some(data.shard_id),
-            start_inclusive,
+            start_inclusive: start_inclusive.into(),
             end_exclusive: effective_end,
             secondary_index_name: opts.secondary_index_name,
         }
@@ -384,8 +390,8 @@ impl Client {
     }
 
     /// Retrieves a key with the given options
-    pub(super) async fn get(&self, k: String, opts: GetOptions) -> Result<GetResponse> {
-        let req = self.create_request(self.make_get_req(&opts, &k));
+    pub(super) async fn get(&self, k: impl Into<String>, opts: GetOptions) -> Result<GetResponse> {
+        let req = self.create_request(self.make_get_req(&opts, k));
         let mut rsp_stream = self.data.grpc.clone().read(req).await?.into_inner();
 
         let rsp = match rsp_stream.next().await {
@@ -473,7 +479,7 @@ impl Client {
     /// Puts a value with the given options
     pub(super) async fn put(
         &mut self,
-        key: String,
+        key: impl Into<String>,
         value: Vec<u8>,
         options: PutOptions,
     ) -> Result<PutResponse> {
@@ -482,7 +488,7 @@ impl Client {
             false => None,
         };
 
-        let req = self.make_put_req(session_id, options, &key, value.into());
+        let req = self.make_put_req(session_id, options, key, value.into());
         let rsp = self.process_write(req).await?;
 
         if let Some(e) = check_put_response(&rsp) {
@@ -494,7 +500,11 @@ impl Client {
     }
 
     /// Deletes a key with the given options
-    pub(super) async fn delete(&self, key: String, options: DeleteOptions) -> Result<()> {
+    pub(super) async fn delete(
+        &self,
+        key: impl Into<String>,
+        options: DeleteOptions,
+    ) -> Result<()> {
         let req = self.make_delete_req(&options, key);
         let rsp = self.process_write(req).await?;
 
@@ -508,8 +518,8 @@ impl Client {
     /// Lists keys in the given range with options
     pub(super) async fn list(
         &self,
-        start_inclusive: String,
-        end_exclusive: String,
+        start_inclusive: impl Into<String>,
+        end_exclusive: impl Into<String>,
         opts: ListOptions,
     ) -> Result<ListResponse> {
         let partial_ok = opts.partial_ok;
@@ -540,8 +550,8 @@ impl Client {
     /// Gets a list with timeout handling
     pub(super) async fn list_with_timeout(
         &self,
-        start_inclusive: String,
-        end_exclusive: String,
+        start_inclusive: impl Into<String>,
+        end_exclusive: impl Into<String>,
         opts: ListOptions,
         timeout: Duration,
     ) -> Result<ListResponse> {
@@ -558,8 +568,8 @@ impl Client {
     /// Scans for records in the given range with options
     pub(super) async fn range_scan(
         &self,
-        start_inclusive: String,
-        end_exclusive: String,
+        start_inclusive: impl Into<String>,
+        end_exclusive: impl Into<String>,
         opts: RangeScanOptions,
     ) -> Result<RangeScanResponse> {
         let partial_ok = opts.partial_ok;
@@ -620,9 +630,9 @@ mod int32_hash_range {
     use crate::UnexpectedServerResponse;
 
     use super::{Result, ShardMapper, ShardMapperBuilder};
+    use mauricebarnum_oxia_common::proto as oxia_proto;
     use std::{cmp::Ordering, collections::HashSet};
     use xxhash_rust::xxh3::xxh3_64;
-    use mauricebarnum_oxia_common::proto as oxia_proto;
 
     #[derive(Debug)]
     struct Range {
@@ -687,7 +697,7 @@ mod int32_hash_range {
             let b = a
                 .shard_boundaries
                 .as_ref()
-                .ok_or_else(|| UnexpectedServerResponse::NoShardBoundaries)?;
+                .ok_or(UnexpectedServerResponse::NoShardBoundaries)?;
 
             match b {
                 Int32HashRange(r) => Ok(r),
@@ -925,11 +935,11 @@ impl Manager {
         self.shards.lock().await.clients.len()
     }
 
-    pub(super) async fn reconnect(&mut self, dest: String) -> Result<()> {
+    pub(super) async fn reconnect(&mut self, dest: impl AsRef<str>) -> Result<()> {
         self.cache
-            .reconnect(&dest, |grpc| {
+            .reconnect(dest.as_ref(), |grpc| {
                 let shards = self.shards.clone();
-                let dest = dest.clone();
+                let dest = dest.as_ref().to_string();
                 let grpc = grpc.clone();
                 async move {
                     // let mut guard = shards.lock().await;
