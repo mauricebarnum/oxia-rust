@@ -626,6 +626,10 @@ impl Client {
             }
         }
 
+        if options.sort {
+            rsp.sort();
+        }
+
         Ok(rsp)
     }
 
@@ -691,6 +695,10 @@ impl Client {
                     }
                 }
             }
+        }
+
+        if options.sort {
+            rsp.sort();
         }
 
         Ok(rsp)
