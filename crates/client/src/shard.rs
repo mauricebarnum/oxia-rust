@@ -850,7 +850,6 @@ impl ShardAssignmentTask {
 
 #[derive(Debug)]
 pub(super) struct Manager {
-    config: Arc<config::Config>,
     cache: GrpcClientCache,
     shards: Arc<Mutex<Shards>>,
     task_handle: JoinHandle<()>,
@@ -867,7 +866,6 @@ impl Manager {
         let task_handle =
             Self::start_shard_assignment_task(config, cluster, cache, &shards).await?;
         Ok(Manager {
-            config: config.clone(),
             cache: cache.clone(),
             shards,
             task_handle,
