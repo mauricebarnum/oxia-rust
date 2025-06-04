@@ -12,6 +12,7 @@ use tonic::transport::{Channel, Endpoint};
 pub mod config;
 pub mod errors;
 mod shard;
+mod util;
 
 use mauricebarnum_oxia_common::proto as oxia_proto;
 
