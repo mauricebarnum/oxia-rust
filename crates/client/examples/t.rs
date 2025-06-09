@@ -5,22 +5,14 @@ fn grpc_to_client(ggr: oxia_proto::GetResponse) -> GetResponse {
     if ggr.status != 0 {
         panic!("oops");
     }
-    GetResponse {
-        value: ggr.value,
-        version: ggr.version.into(),
-        key: ggr.key,
-    }
+    ggr.into()
 }
 
 fn import_read_response(grr: oxia_proto::ReadResponse) -> Vec<Option<GetResponse>> {
     grr.gets
         .into_iter()
         .map(|gr| match gr.status {
-            0 => Some(GetResponse {
-                value: gr.value,
-                version: gr.version.into(),
-                key: gr.key,
-            }),
+            0 => Some(gr.into()),
             _ => None,
         })
         .collect()
@@ -32,6 +24,7 @@ fn main() {
         value: Some("abcd".into()),
         version: None,
         key: None,
+        secondary_index_key: None,
     };
     println!("{:#?}", grpc_to_client(gr));
     let read_response = oxia_proto::ReadResponse {
@@ -44,6 +37,7 @@ fn main() {
                 ..Default::default()
             }),
             key: None,
+            secondary_index_key: None,
         }],
     };
     println!("{:#?}", read_response);

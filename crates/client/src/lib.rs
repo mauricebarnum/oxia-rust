@@ -201,6 +201,7 @@ pub struct GetResponse {
     pub value: Option<Bytes>,
     pub version: RecordVersion,
     pub key: Option<String>,
+    pub secondary_index_key: Option<String>,
 }
 
 impl From<oxia_proto::GetResponse> for GetResponse {
@@ -209,6 +210,7 @@ impl From<oxia_proto::GetResponse> for GetResponse {
             value: x.value,
             version: x.version.into(),
             key: x.key,
+            secondary_index_key: x.secondary_index_key,
         }
     }
 }

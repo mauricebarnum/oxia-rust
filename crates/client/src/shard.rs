@@ -236,6 +236,7 @@ impl Client {
                 key: k.into(),
                 include_value: opts.include_value,
                 comparison_type: ct,
+                secondary_index_name: None,
             }],
         }
     }
@@ -441,6 +442,7 @@ impl Client {
                 key,
                 include_value: opts.include_value,
                 comparison_type: opts.comparison_type as i32,
+                secondary_index_name: None,
             });
         }
 
