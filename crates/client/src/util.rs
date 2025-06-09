@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 
 #[cfg(test)]
-pub fn compare_with_slash(xa: impl AsRef<str>, ya: impl AsRef<str>) -> Ordering {
+pub(crate) fn compare_with_slash(xa: impl AsRef<str>, ya: impl AsRef<str>) -> Ordering {
     let mut x = xa.as_ref();
     let mut y = ya.as_ref();
 
