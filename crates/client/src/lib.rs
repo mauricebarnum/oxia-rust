@@ -20,7 +20,7 @@ pub use errors::*;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct PutOptions {
     expected_version_id: Option<i64>,
     partition_key: Option<String>,
@@ -60,7 +60,7 @@ impl PutOptions {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct PutResponse {
     pub version: RecordVersion,
     pub key: Option<String>,
@@ -120,7 +120,7 @@ impl From<oxia_proto::KeyComparisonType> for KeyComparisonType {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct GetOptions {
     include_value: bool,                // default: true
     comparison_type: KeyComparisonType, // default: Equal
@@ -163,7 +163,7 @@ impl Default for GetOptions {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct RecordVersion {
     pub version_id: i64,
     pub modifications_count: i64,
@@ -196,7 +196,7 @@ impl From<Option<oxia_proto::Version>> for RecordVersion {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct GetResponse {
     pub value: Option<Bytes>,
     pub version: RecordVersion,
@@ -215,7 +215,7 @@ impl From<oxia_proto::GetResponse> for GetResponse {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct DeleteOptions {
     expected_version_id: Option<i64>,
     partition_key: Option<String>, // default: None
@@ -289,7 +289,7 @@ impl Default for ListOptions {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ListResponse {
     pub keys: Vec<String>,
     pub sorted: bool,
@@ -382,7 +382,7 @@ impl Default for RangeScanOptions {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct RangeScanResponse {
     pub records: Vec<GetResponse>,
     pub sorted: bool,
