@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use futures::{StreamExt, stream};
+use std::cmp::Ordering;
 use std::fmt::Display;
 use std::future::Future;
 use std::{
@@ -163,19 +164,41 @@ impl Default for GetOptions {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Eq)]
 pub struct RecordVersion {
     pub version_id: i64,
     pub modifications_count: i64,
     pub created_timestamp: u64,
     pub modified_timestamp: u64,
-    pub session_id: Option<i64>,
-    pub client_identity: Option<String>,
+    pub session_id: Option<i64>,         // ignored by comparision
+    pub client_identity: Option<String>, // ignored by comparison traits
 }
 
 impl RecordVersion {
     fn is_ephemeral(&self) -> bool {
         self.session_id.is_some()
+    }
+}
+
+impl PartialEq for RecordVersion {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl PartialOrd for RecordVersion {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RecordVersion {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.version_id
+            .cmp(&other.version_id)
+            .then_with(|| self.modifications_count.cmp(&other.modifications_count))
+            .then_with(|| self.created_timestamp.cmp(&other.created_timestamp))
+            .then_with(|| self.modified_timestamp.cmp(&other.modified_timestamp))
     }
 }
 
@@ -196,12 +219,37 @@ impl From<Option<oxia_proto::Version>> for RecordVersion {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, Eq)]
 pub struct GetResponse {
     pub value: Option<Bytes>,
     pub version: RecordVersion,
     pub key: Option<String>,
     pub secondary_index_key: Option<String>,
+}
+
+impl PartialEq for GetResponse {
+    fn eq(&self, other: &Self) -> bool {
+        // We want to compare `value` last, hence not using `#[derive(PartialEq)]`.  A manual
+        // implementation might be more efficient, but let's start simple so we don't need to worry
+        // about divergence.
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl PartialOrd for GetResponse {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for GetResponse {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.secondary_index_key
+            .cmp(&other.secondary_index_key)
+            .then_with(|| self.key.cmp(&other.key))
+            .then_with(|| self.version.cmp(&other.version))
+            .then_with(|| self.value.as_ref().cmp(&other.value.as_ref()))
+    }
 }
 
 impl From<oxia_proto::GetResponse> for GetResponse {
