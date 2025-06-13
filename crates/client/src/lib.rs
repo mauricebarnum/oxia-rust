@@ -123,9 +123,10 @@ impl From<oxia_proto::KeyComparisonType> for KeyComparisonType {
 
 #[derive(Clone, Debug)]
 pub struct GetOptions {
-    include_value: bool,                // default: true
-    comparison_type: KeyComparisonType, // default: Equal
-    partition_key: Option<String>,      // default: None
+    include_value: bool,                  // default: true
+    comparison_type: KeyComparisonType,   // default: Equal
+    partition_key: Option<String>,        // default: None
+    secondary_index_name: Option<String>, // default: None
 }
 
 impl GetOptions {
@@ -134,6 +135,7 @@ impl GetOptions {
             include_value: true,
             comparison_type: KeyComparisonType::Equal,
             partition_key: None,
+            secondary_index_name: None,
         }
     }
 
@@ -154,6 +156,11 @@ impl GetOptions {
 
     pub fn partition_key(mut self, value: impl Into<String>) -> Self {
         self.partition_key = Some(value.into());
+        self
+    }
+
+    pub fn secondary_index_name(mut self, value: impl Into<String>) -> Self {
+        self.secondary_index_name = Some(value.into());
         self
     }
 }
