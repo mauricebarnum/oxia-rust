@@ -1,5 +1,6 @@
 use async_once_cell::OnceCell;
 use bytes::Bytes;
+// use futures::{StreamExt, stream};
 use mauricebarnum_oxia_common::proto as oxia_proto;
 use rand::SeedableRng;
 use rand::distr::Distribution;
@@ -9,6 +10,7 @@ use std::time::Duration;
 use std::{str::FromStr, sync::Arc};
 use tokio::sync::{Mutex, oneshot};
 use tokio::{task::JoinHandle, time::sleep};
+use tokio_stream::Stream;
 use tokio_stream::StreamExt as _;
 use tonic::Streaming;
 use tonic::metadata::MetadataValue;
@@ -434,6 +436,54 @@ impl Client {
         }
     }
 
+    // /// Gets multiple keys in a single batch request
+    // pub(super) async fn batch_get(
+    //     &self,
+    //     keys: Vec<String>,
+    //     opts: GetOptions,
+    // ) -> Result<Vec<Result<GetResponse>>> {
+    //     // Create get requests for each key
+    //     let mut gets = Vec::with_capacity(keys.len());
+    //     for key in keys {
+    //         gets.push(oxia_proto::GetRequest {
+    //             key,
+    //             include_value: opts.include_value,
+    //             comparison_type: opts.comparison_type as i32,
+    //             secondary_index_name: None,
+    //         });
+    //     }
+    //
+    //     let data = &self.data;
+    //
+    //     // Create the read request with all gets
+    //     let read_req = oxia_proto::ReadRequest {
+    //         shard: Some(data.shard_id),
+    //         gets,
+    //     };
+    //
+    //     // Send the request
+    //     let req = self.create_request(read_req);
+    //     let mut results = Vec::new();
+    //     let mut rsp_stream = data.grpc.clone().read(req).await?.into_inner();
+    //
+    //     // Process all responses
+    //     while let Some(rsp) = rsp_stream.next().await {
+    //         match rsp {
+    //             Ok(rsp) => {
+    //                 for get in rsp.gets {
+    //                     if get.status != STATUS_OK {
+    //                         results.push(Err(OxiaError::from(get.status).into()));
+    //                     } else {
+    //                         results.push(Ok(get.into()));
+    //                     }
+    //                 }
+    //             }
+    //             Err(err) => return Err(err.into()),
+    //         }
+    //     }
+    //
+    //     Ok(results)
+    // }
 
     /// Puts a value with the given options
     pub(super) async fn put(
@@ -879,13 +929,26 @@ impl Manager {
     where
         F: FnMut(&Client) -> Option<R>,
     {
-        let lock = &self.shards.lock().await;
+        let lock = self.shards.lock().await;
         for s in lock.clients.iter() {
             if let Some(r) = f(&s.1) {
                 return Some(r);
             }
         }
         None
+    }
+
+    /// Returns a stream containing a snapshot of the current clients.  Use `for_each_shard` to
+    /// work on a locked shards.
+    pub(super) async fn shard_stream(&self, _namespace: &str) -> impl Stream<Item = Client> {
+        let clients: Vec<Client> = {
+            let lock = self.shards.lock().await;
+            lock.clients
+                .iter()
+                .map(|(_, client)| client.clone())
+                .collect()
+        };
+        tokio_stream::iter(clients)
     }
 
     /// Returns the number of shards at the moment

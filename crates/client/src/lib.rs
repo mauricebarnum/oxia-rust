@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use futures::{StreamExt, stream};
+use futures::{StreamExt, TryStreamExt as _, stream};
 use std::cmp::Ordering;
 use std::fmt::Display;
 use std::future::Future;
@@ -591,16 +591,48 @@ impl Client {
         Ok(shard)
     }
 
+    async fn get_multi_shard(
+        &self,
+        key: String,
+        options: GetOptions,
+    ) -> Result<Option<GetResponse>> {
+        assert_ne!(options.comparison_type, KeyComparisonType::Equal);
+
+        let stream = self
+            .get_shards()?
+            .shard_stream(&self.config.namespace)
+            .await
+            .map(|shard| {
+                let key = key.clone();
+                let options = options.clone();
+                async move { shard.get(key, options).await }
+            })
+            .buffer_unordered(self.config.max_parallel_requests);
+
+        stream
+            .try_fold(None, |acc, r| async {
+                Ok(match r {
+                    Some(r) => Some(util::select_response(acc, r, options.comparison_type)),
+                    None => acc,
+                })
+            })
+            .await
+    }
+
     pub async fn get_with_options(
         &self,
         key: impl Into<String>,
         options: GetOptions,
     ) -> Result<Option<GetResponse>> {
-        if options.comparison_type != KeyComparisonType::Equal {
-            return Err(ClientError::UnsupportedKeyComparator(options.comparison_type).into());
+        let key = key.into();
+
+        if options.partition_key.is_none()
+            && (options.comparison_type != KeyComparisonType::Equal
+                || options.secondary_index_name.is_some())
+        {
+            return self.get_multi_shard(key, options).await;
         }
 
-        let key = key.into();
         let selector = options.partition_key.as_deref().unwrap_or(&key);
         self.get_shard(selector).await?.get(key, options).await
     }
@@ -660,28 +692,20 @@ impl Client {
         let start_inclusive = start_inclusive.into();
         let end_exclusive = end_exclusive.into();
 
-        let shards = self.get_shards()?;
-
-        // Here we need some sort of scatter-gather, but also then to assemble results in order.
-        // An option would be to allow partial ordering so that list results can be returned as we receive them.
-        // For now, keep this kinda dumb
-        let mut rsp = ListResponse::default();
-        let mut tasks = Vec::with_capacity(shards.num_shards().await);
-
-        shards
-            .for_each_shard("default", |shard| -> Option<()> {
+        let mut result_stream = self
+            .get_shards()?
+            .shard_stream(&self.config.namespace)
+            .await
+            .map(|shard| {
                 let start_inclusive = start_inclusive.clone();
                 let end_exclusive = end_exclusive.clone();
                 let options = options.clone();
                 let shard = shard.clone();
-                tasks
-                    .push(async move { shard.list(start_inclusive, end_exclusive, options).await });
-                None
+                async move { shard.list(start_inclusive, end_exclusive, options).await }
             })
-            .await;
+            .buffer_unordered(self.config.max_parallel_requests);
 
-        let mut result_stream =
-            stream::iter(tasks).buffer_unordered(self.config.max_parallel_requests);
+        let mut rsp = ListResponse::default();
         while let Some(r) = result_stream.next().await {
             match r {
                 Ok(r) => {
@@ -729,31 +753,25 @@ impl Client {
 
         let start_inclusive = start_inclusive.into();
         let end_exclusive = end_exclusive.into();
-        let shards = self.get_shards()?;
 
-        // Here we need some sort of scatter-gather, but also then to assemble results in order.
-        // An option would be to allow partial ordering so that list results can be returned as we receive them.
-        // For now, keep this kinda dumb
-        let mut rsp = RangeScanResponse::default();
-        let mut tasks = Vec::with_capacity(shards.num_shards().await);
-
-        shards
-            .for_each_shard("default", |shard| -> Option<()> {
+        let mut result_stream = self
+            .get_shards()?
+            .shard_stream(&self.config.namespace)
+            .await
+            .map(|shard| {
                 let start_inclusive = start_inclusive.clone();
                 let end_exclusive = end_exclusive.clone();
                 let options = options.clone();
                 let shard = shard.clone();
-                tasks.push(async move {
+                async move {
                     shard
                         .range_scan(start_inclusive, end_exclusive, options)
                         .await
-                });
-                None
+                }
             })
-            .await;
+            .buffer_unordered(self.config.max_parallel_requests);
 
-        let mut result_stream =
-            stream::iter(tasks).buffer_unordered(self.config.max_parallel_requests);
+        let mut rsp = RangeScanResponse::default();
         while let Some(r) = result_stream.next().await {
             match r {
                 // Ok(r) => match r {
