@@ -595,7 +595,7 @@ impl Client {
         &self,
         key: impl Into<String>,
         options: GetOptions,
-    ) -> Result<GetResponse> {
+    ) -> Result<Option<GetResponse>> {
         if options.comparison_type != KeyComparisonType::Equal {
             return Err(ClientError::UnsupportedKeyComparator(options.comparison_type).into());
         }
@@ -605,7 +605,7 @@ impl Client {
         self.get_shard(selector).await?.get(key, options).await
     }
 
-    pub async fn get(&self, k: impl Into<String>) -> Result<GetResponse> {
+    pub async fn get(&self, k: impl Into<String>) -> Result<Option<GetResponse>> {
         self.get_with_options(k, GetOptions::default()).await
     }
 

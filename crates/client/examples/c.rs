@@ -57,24 +57,8 @@ async fn main() -> Result<()> {
     }
 
     // And do another get, this time expecting KeyNotFound
-    let result = client
-        .get_with_options(key.clone(), GetOptions::default())
-        .await;
-
-    match result {
-        Ok(r) => return Err(Error::Custom(format!("unexpected get success: {:?}", r))),
-        Err(e) => match &e {
-            OxiaError(oe) => {
-                if oe == &errors::OxiaError::KeyNotFound {
-                    // exepected
-                } else {
-                    return Err(Error::Custom(format!("unexpected error: {:?}", e)));
-                }
-            }
-            _ => {
-                return Err(Error::Custom(format!("unexpected error: {:?}", e)));
-            }
-        },
+    if let Some(r) = client.get(key.clone()).await? {
+        return Err(Error::Custom(format!("unexpected get success: {:?}", r)));
     }
 
     let result = client

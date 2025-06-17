@@ -391,7 +391,11 @@ impl Client {
     }
 
     /// Retrieves a key with the given options
-    pub(super) async fn get(&self, k: impl Into<String>, opts: GetOptions) -> Result<GetResponse> {
+    pub(super) async fn get(
+        &self,
+        k: impl Into<String>,
+        opts: GetOptions,
+    ) -> Result<Option<GetResponse>> {
         let req = self.create_request(self.make_get_req(&opts, k));
         let mut rsp_stream = self.data.grpc.clone().read(req).await?.into_inner();
 
@@ -422,61 +426,14 @@ impl Client {
         }
 
         let r = rsp.gets.into_iter().next().unwrap();
-        if r.status != 0 {
-            return Err(OxiaError::from(r.status).into());
+        use oxia_proto::Status;
+        match Status::try_from(r.status) {
+            Ok(Status::Ok) => Ok(Some(r.into())),
+            Ok(Status::KeyNotFound) => Ok(None),
+            _ => Err(OxiaError::from(r.status).into()),
         }
-
-        Ok(r.into())
     }
 
-    /// Gets multiple keys in a single batch request
-    pub(super) async fn batch_get(
-        &self,
-        keys: Vec<String>,
-        opts: GetOptions,
-    ) -> Result<Vec<Result<GetResponse>>> {
-        // Create get requests for each key
-        let mut gets = Vec::with_capacity(keys.len());
-        for key in keys {
-            gets.push(oxia_proto::GetRequest {
-                key,
-                include_value: opts.include_value,
-                comparison_type: opts.comparison_type as i32,
-                secondary_index_name: None,
-            });
-        }
-
-        let data = &self.data;
-
-        // Create the read request with all gets
-        let read_req = oxia_proto::ReadRequest {
-            shard: Some(data.shard_id),
-            gets,
-        };
-
-        // Send the request
-        let req = self.create_request(read_req);
-        let mut results = Vec::new();
-        let mut rsp_stream = data.grpc.clone().read(req).await?.into_inner();
-
-        // Process all responses
-        while let Some(rsp) = rsp_stream.next().await {
-            match rsp {
-                Ok(rsp) => {
-                    for get in rsp.gets {
-                        if get.status != STATUS_OK {
-                            results.push(Err(OxiaError::from(get.status).into()));
-                        } else {
-                            results.push(Ok(get.into()));
-                        }
-                    }
-                }
-                Err(err) => return Err(err.into()),
-            }
-        }
-
-        Ok(results)
-    }
 
     /// Puts a value with the given options
     pub(super) async fn put(
