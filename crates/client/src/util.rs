@@ -26,10 +26,8 @@ pub(crate) fn compare_with_slash(xa: impl AsRef<str>, ya: impl AsRef<str>) -> Or
     x.cmp(y)
 }
 
-// #[cfg(test)]
 use crate::{GetResponse, KeyComparisonType};
 
-// #[cfg(test)]
 // Compare the keys of two GetResponse instances, ignoring the value and other metadata.
 // TODO: consider at least looking at the record version, but I don't beleive the Go implementation
 // does this, and that's our reference. See https://github.com/streamnative/oxia/blob/main/oxia/async_client_impl.go
@@ -74,6 +72,8 @@ pub(crate) fn select_response(
 
 #[cfg(test)]
 mod tests {
+    use mauricebarnum_oxia_common::proto::GetResponse;
+
     use super::*;
     use std::cmp::Ordering;
 
