@@ -76,6 +76,7 @@ mod tests {
 
     use super::*;
     use std::cmp::Ordering;
+    use itertools::Itertools;
 
     #[test]
     fn test_compare_with_slash() {
@@ -209,9 +210,9 @@ mod tests {
             }
 
             println!(
-                "--- Test: ({:?}) ---\n  Responses: {:?}\n  Expected: {}\n  Actual:   {}\n--------------------------",
+                "--- Comparision: {:?}\n    Responses: [{}]\n    Expected: {}\n    Actual:   {}\n",
                 tc.comparison,
-                tc.responses.iter().map(format_response).collect::<Vec<_>>(),
+                tc.responses.iter().map(format_response).join(", "),
                 format_response(&tc.expected),
                 format_response(selected.as_ref().unwrap())
             );
