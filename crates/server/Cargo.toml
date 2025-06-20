@@ -1,8 +1,0 @@
-[package]
-name = "mauricebarnum-oxia-server"
-version = "0.1.0"
-edition.workspace = true
-
-[dependencies]
-mauricebarnum-oxia-client = { path = "../client" }
-mauricebarnum-oxia-common = { path = "../common" }
