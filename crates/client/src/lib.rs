@@ -610,6 +610,10 @@ impl Client {
     ) -> Result<Option<GetResponse>> {
         assert_ne!(options.comparison_type, KeyComparisonType::Equal);
 
+        let n = match self.config.max_parallel_requests() {
+            0 => usize::MAX,
+            n => n,
+        };
         let stream = self
             .get_shards()?
             .shard_stream(self.config.namespace())
@@ -619,7 +623,7 @@ impl Client {
                 let options = options.clone();
                 async move { shard.get(key, options).await }
             })
-            .buffer_unordered(self.config.max_parallel_requests());
+            .buffer_unordered(n);
 
         stream
             .try_fold(None, |acc, r| async {
@@ -704,6 +708,10 @@ impl Client {
         let start_inclusive = start_inclusive.into();
         let end_exclusive = end_exclusive.into();
 
+        let n = match self.config.max_parallel_requests() {
+            0 => usize::MAX,
+            n => n,
+        };
         let mut result_stream = self
             .get_shards()?
             .shard_stream(&self.config.namespace())
@@ -715,7 +723,7 @@ impl Client {
                 let shard = shard.clone();
                 async move { shard.list(start_inclusive, end_exclusive, options).await }
             })
-            .buffer_unordered(self.config.max_parallel_requests());
+            .buffer_unordered(n);
 
         let mut rsp = ListResponse::default();
         while let Some(r) = result_stream.next().await {
@@ -766,6 +774,10 @@ impl Client {
         let start_inclusive = start_inclusive.into();
         let end_exclusive = end_exclusive.into();
 
+        let n = match self.config.max_parallel_requests() {
+            0 => usize::MAX,
+            n => n,
+        };
         let mut result_stream = self
             .get_shards()?
             .shard_stream(&self.config.namespace())
@@ -775,18 +787,13 @@ impl Client {
                 let end_exclusive = end_exclusive.clone();
                 let options = options.clone();
                 let shard = shard.clone();
-                async move {
-                    shard
-                        .range_scan(start_inclusive, end_exclusive, options)
-                        .await
-                }
+                async move { shard.range_scan(start_inclusive, end_exclusive, options).await }
             })
-            .buffer_unordered(self.config.max_parallel_requests());
+            .buffer_unordered(n);
 
         let mut rsp = RangeScanResponse::default();
         while let Some(r) = result_stream.next().await {
             match r {
-                // Ok(r) => match r {
                 Ok(r) => {
                     rsp.merge(r);
                 }
@@ -799,7 +806,6 @@ impl Client {
                 }
             }
         }
-
         if options.sort {
             rsp.sort();
         }
