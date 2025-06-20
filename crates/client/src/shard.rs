@@ -1,27 +1,25 @@
-use async_once_cell::OnceCell;
-use bytes::Bytes;
-// use futures::{StreamExt, stream};
-use mauricebarnum_oxia_common::proto as oxia_proto;
-use rand::SeedableRng;
-use rand::distr::Distribution;
-use rand::distr::Uniform;
-use rand::rngs::StdRng;
 use std::time::Duration;
 use std::{str::FromStr, sync::Arc};
+
+use async_once_cell::OnceCell;
+use bytes::Bytes;
+use rand::SeedableRng;
+use rand::distr::{Distribution, Uniform};
+use rand::rngs::StdRng;
 use tokio::sync::{Mutex, oneshot};
 use tokio::{task::JoinHandle, time::sleep};
 use tokio_stream::Stream;
 use tokio_stream::StreamExt as _;
 use tonic::Streaming;
 use tonic::metadata::MetadataValue;
-use tracing::debug;
-// use mauricebarnum_oxia_common::proto::ShardAssignments;
+use tracing::{debug, info, trace, warn};
 
 use crate::{
     DeleteOptions, Error, GetOptions, GetResponse, GrpcClient, GrpcClientCache, ListOptions,
     ListResponse, OxiaError, PutOptions, PutResponse, RangeScanOptions, RangeScanResponse, Result,
     config,
 };
+use mauricebarnum_oxia_common::proto as oxia_proto;
 
 /// Constants for Oxia protocol
 const STATUS_OK: i32 = 0;
@@ -45,6 +43,7 @@ struct ClientData {
     config: Arc<config::Config>,
     grpc: GrpcClient,
     shard_id: i64,
+    #[allow(dead_code)] // this is actually used
     leader: String,
     meta: tonic::metadata::MetadataMap,
 }
@@ -160,11 +159,11 @@ impl Client {
                     oxia_proto::SessionHeartbeat { session_id, shard },
                 );
                 let rsp = grpc.keep_alive(req).await;
-                debug!("grpc.keep_alive", ?rsp);
+                debug!(?rsp, "grpc.keep_alive");
 
                 let sleep_ms = distr.sample(&mut rng);
                 let timeout = Duration::from_millis(sleep_ms.into());
-                info!("sleeping for {} ms", sleep_ms);
+                trace!("sleeping for {} ms", sleep_ms);
                 sleep(timeout).await;
             }
         })
@@ -222,7 +221,7 @@ impl Client {
             .session
             .get_or_try_init(async {
                 let rsp = self.create_session().await;
-                debug!("get_session_id", ?rsp);
+                debug!(?rsp, "get_session_id");
                 rsp.map(Some)
             })
             .await?;
@@ -558,6 +557,7 @@ impl Client {
     }
 
     /// Gets a list with timeout handling
+    #[allow(dead_code)]
     pub(super) async fn list_with_timeout(
         &self,
         start_inclusive: impl Into<String>,
@@ -828,7 +828,7 @@ impl ShardAssignmentTask {
 
     async fn process_assignments_stream(&mut self, mut s: Streaming<oxia_proto::ShardAssignments>) {
         while let Some(r) = s.next().await {
-            debug!("assignment", ?r);
+            debug!(?r, "assignment");
             match r {
                 Ok(r) => {
                     if let Some(a) = r.namespaces.get(self.config.namespace()) {
@@ -862,7 +862,7 @@ impl ShardAssignmentTask {
                 }
             }
             debug!(?self.shards);
-            info!("sleeping in retrieve_shards", ?sleep_time);
+            info!(?sleep_time, "sleeping in retrieve_shards");
             tokio::time::sleep(sleep_time).await;
         }
     }
@@ -870,6 +870,7 @@ impl ShardAssignmentTask {
 
 #[derive(Debug)]
 pub(super) struct Manager {
+    #[allow(dead_code)] // cache is actually used
     cache: GrpcClientCache,
     shards: Arc<Mutex<Shards>>,
     task_handle: JoinHandle<()>,
@@ -926,6 +927,7 @@ impl Manager {
     }
 
     /// Executes a function on each shard client
+    #[allow(dead_code)]
     pub(super) async fn for_each_shard<R, F>(&self, _namespace: &str, mut f: F) -> Option<R>
     where
         F: FnMut(&Client) -> Option<R>,
@@ -954,10 +956,12 @@ impl Manager {
 
     /// Returns the number of shards at the moment
     /// This is mostly usable as hint, as the number of shards may change over time
+    #[allow(dead_code)]
     pub(super) async fn num_shards(&self) -> usize {
         self.shards.lock().await.clients.len()
     }
 
+    #[allow(dead_code)]
     pub(super) async fn reconnect(&mut self, dest: impl AsRef<str>) -> Result<()> {
         self.cache
             .reconnect(dest.as_ref(), |grpc| {

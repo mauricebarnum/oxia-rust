@@ -185,7 +185,7 @@ pub struct RecordVersion {
 }
 
 impl RecordVersion {
-    fn is_ephemeral(&self) -> bool {
+    pub fn is_ephemeral(&self) -> bool {
         self.session_id.is_some()
     }
 }
@@ -448,10 +448,6 @@ pub struct RangeScanResponse {
 }
 
 impl RangeScanResponse {
-    fn new() -> Self {
-        Self::default()
-    }
-
     fn accum(&mut self, x: oxia_proto::RangeScanResponse) {
         if !x.records.is_empty() {
             self.sorted = self.records.is_empty();
@@ -472,10 +468,6 @@ impl RangeScanResponse {
             self.records.sort_unstable_by(|a, b| a.key.cmp(&b.key));
             self.sorted = true;
         }
-    }
-
-    fn ok(self) -> bool {
-        !self.partial
     }
 }
 
@@ -509,10 +501,6 @@ impl GrpcClientCache {
         GrpcClientCache(Arc::new(RwLock::new(HashMap::new())))
     }
 
-    async fn clear(&mut self) {
-        self.0.write().await.clear();
-    }
-
     async fn try_get(&self, dest: &str) -> Option<GrpcClient> {
         // See if we already have the client.  This should be the common case
         let guard = self.0.read().await;
@@ -539,6 +527,7 @@ impl GrpcClientCache {
         Ok(c)
     }
 
+    #[allow(dead_code)]
     async fn reconnect<F, Fut>(&self, dest: &str, callback: F) -> Result<()>
     where
         F: FnOnce(&GrpcClient) -> Fut,
@@ -705,7 +694,7 @@ impl Client {
         };
         let mut result_stream = self
             .get_shards()?
-            .shard_stream(&self.config.namespace())
+            .shard_stream(self.config.namespace())
             .await
             .map(|shard| {
                 let start_inclusive = start_inclusive.clone();
@@ -771,14 +760,18 @@ impl Client {
         };
         let mut result_stream = self
             .get_shards()?
-            .shard_stream(&self.config.namespace())
+            .shard_stream(self.config.namespace())
             .await
             .map(|shard| {
                 let start_inclusive = start_inclusive.clone();
                 let end_exclusive = end_exclusive.clone();
                 let options = options.clone();
                 let shard = shard.clone();
-                async move { shard.range_scan(start_inclusive, end_exclusive, options).await }
+                async move {
+                    shard
+                        .range_scan(start_inclusive, end_exclusive, options)
+                        .await
+                }
             })
             .buffer_unordered(n);
 
