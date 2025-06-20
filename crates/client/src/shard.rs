@@ -124,7 +124,7 @@ const INTERNAL_KEY_PREFIX: &str = "__oxia/";
 /// Helper method to create a fully-formed tonic request with metadata
 impl Client {
     fn start_heartbeat(&self, session_id: i64) -> JoinHandle<()> {
-        let session_timeout_ms = self.data.config.session_timeout.as_millis();
+        let session_timeout_ms = self.data.config.session_timeout().as_millis();
         if session_timeout_ms > u32::MAX as u128 {
             panic!(
                 "bug: time out out of range {} max {}",
@@ -181,7 +181,7 @@ impl Client {
         meta.insert("shard-id", MetadataValue::from(shard_id));
         meta.insert(
             "namespace",
-            MetadataValue::from_str(&config.namespace)
+            MetadataValue::from_str(config.namespace())
                 .map_err(|e| Error::Custom(format!("Invalid metadata value: {}", e)))?,
         );
 
@@ -204,8 +204,8 @@ impl Client {
         // Call create_session
         let rsp = grpc
             .create_session(self.create_request(oxia_proto::CreateSessionRequest {
-                session_timeout_ms: config.session_timeout.as_millis() as u32,
-                client_identity: config.identity.clone(),
+                session_timeout_ms: config.session_timeout().as_millis() as u32,
+                client_identity: config.identity().into(),
                 shard: data.shard_id,
             }))
             .await?
@@ -259,7 +259,7 @@ impl Client {
                 value: v,
                 expected_version_id: opts.expected_version_id,
                 session_id,
-                client_identity: Some(data.config.identity.clone()),
+                client_identity: Some(data.config.identity().into()),
                 partition_key: opts.partition_key,
                 sequence_key_delta: opts.sequence_key_deltas,
                 secondary_indexes: opts.secondary_indexes,
@@ -827,10 +827,10 @@ impl ShardAssignmentTask {
 
     async fn process_assignments_stream(&mut self, mut s: Streaming<oxia_proto::ShardAssignments>) {
         while let Some(r) = s.next().await {
-            dbg!(&r);
+            debug!("assignment", ?r);
             match r {
                 Ok(r) => {
-                    if let Some(a) = r.namespaces.get(&self.config.namespace) {
+                    if let Some(a) = r.namespaces.get(self.config.namespace()) {
                         // TODO: log errors
                         let pr = self.process_assignments(a).await;
                         if let Some(tx) = self.ready.take() {

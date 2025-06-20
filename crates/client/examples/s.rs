@@ -11,7 +11,7 @@ async fn main() -> Result<()> {
     // Replace with your Oxia server address
     let server_address = "localhost:6648";
 
-    let config = crate::config::Builder::new(server_address)?.build();
+    let config = crate::config::Builder::new().service_addr(server_address).build()?;
     let mut client = Client::new(config);
     client.connect().await?;
 

@@ -110,6 +110,9 @@ pub enum Error {
 
     #[error("Client error: {0}")]
     Client(#[from] ClientError),
+    
+    #[error("No service addresss")]
+    NoServiceAddress,
 
     #[error("Unexpected server response: {0}")]
     UnexpectedServerResponse(#[from] UnexpectedServerResponse),

@@ -572,7 +572,7 @@ impl Client {
     }
 
     pub async fn connect(&mut self) -> Result<()> {
-        let grpc = self.grpc_cache.get(&self.config.service_address).await?;
+        let grpc = self.grpc_cache.get(self.config.service_addr()).await?;
         self.shards = Some(shard::Manager::new(&self.config, &grpc, &self.grpc_cache).await?);
         self.cluster = Some(grpc.clone());
         Ok(())
@@ -586,7 +586,7 @@ impl Client {
     }
 
     async fn get_shard(&self, k: &str) -> Result<shard::Client> {
-        let namespace = &self.config.namespace;
+        let namespace = self.config.namespace();
         let shard = self.get_shards()?.get_client(namespace, k).await?;
         Ok(shard)
     }
@@ -600,14 +600,14 @@ impl Client {
 
         let stream = self
             .get_shards()?
-            .shard_stream(&self.config.namespace)
+            .shard_stream(self.config.namespace())
             .await
             .map(|shard| {
                 let key = key.clone();
                 let options = options.clone();
                 async move { shard.get(key, options).await }
             })
-            .buffer_unordered(self.config.max_parallel_requests);
+            .buffer_unordered(self.config.max_parallel_requests());
 
         stream
             .try_fold(None, |acc, r| async {
@@ -694,7 +694,7 @@ impl Client {
 
         let mut result_stream = self
             .get_shards()?
-            .shard_stream(&self.config.namespace)
+            .shard_stream(&self.config.namespace())
             .await
             .map(|shard| {
                 let start_inclusive = start_inclusive.clone();
@@ -703,7 +703,7 @@ impl Client {
                 let shard = shard.clone();
                 async move { shard.list(start_inclusive, end_exclusive, options).await }
             })
-            .buffer_unordered(self.config.max_parallel_requests);
+            .buffer_unordered(self.config.max_parallel_requests());
 
         let mut rsp = ListResponse::default();
         while let Some(r) = result_stream.next().await {
@@ -756,7 +756,7 @@ impl Client {
 
         let mut result_stream = self
             .get_shards()?
-            .shard_stream(&self.config.namespace)
+            .shard_stream(&self.config.namespace())
             .await
             .map(|shard| {
                 let start_inclusive = start_inclusive.clone();
@@ -769,7 +769,7 @@ impl Client {
                         .await
                 }
             })
-            .buffer_unordered(self.config.max_parallel_requests);
+            .buffer_unordered(self.config.max_parallel_requests());
 
         let mut rsp = RangeScanResponse::default();
         while let Some(r) = result_stream.next().await {

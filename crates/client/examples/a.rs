@@ -19,10 +19,11 @@ fn main() -> Result<()> {
         // we shouldn't use it here
         let server_address = "localhost:6648";
 
-        let config = crate::config::Builder::new(server_address)?
+        let config = crate::config::Builder::new()
+            .service_addr(server_address)
             .max_parallel_requests(3)
             .session_timeout(Duration::from_millis(2001))
-            .build();
+            .build()?;
         let mut client = Client::new(config.clone());
 
         client.connect().await?;

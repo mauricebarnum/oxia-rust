@@ -18,10 +18,11 @@ fn main() -> Result<()> {
         // Replace with your Oxia server address
         let server_address = "http://localhost:6648";
 
-        let config = crate::config::Builder::new(server_address)?
+        let config = crate::config::Builder::new()
+            .service_addr(server_address)
             .max_parallel_requests(3)
             .session_timeout(Duration::from_millis(2001))
-            .build();
+            .build()?;
         let mut client = Client::new(config.clone());
         client.connect().await?;
 
@@ -40,7 +41,7 @@ fn main() -> Result<()> {
         drop(client);
 
         println!("waiting for session to expire");
-        tokio::time::sleep(config.session_timeout.checked_mul(2).unwrap()).await;
+        tokio::time::sleep(config.session_timeout().checked_mul(2).unwrap()).await;
 
         println!("new initializing new client");
         let mut client = Client::new(config);
