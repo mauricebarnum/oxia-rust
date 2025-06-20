@@ -1,14 +1,26 @@
-use bytes::Bytes;
-use futures::{StreamExt, TryStreamExt as _, stream};
-use std::cmp::Ordering;
-use std::fmt::Display;
-use std::future::Future;
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    cmp::Ordering,
+    collections::{
+        hash_map::Entry,
+        HashMap,
+    },
+    fmt::Display,
     sync::Arc,
 };
+
+use bytes::Bytes;
+
+use futures::{
+    StreamExt,
+    TryStreamExt,
+};
+
 use tokio::sync::RwLock;
-use tonic::transport::{Channel, Endpoint};
+
+use tonic::transport::{
+    Channel,
+    Endpoint,
+};
 
 pub mod config;
 pub mod errors;
@@ -539,7 +551,7 @@ impl GrpcClientCache {
     async fn reconnect<F, Fut>(&self, dest: &str, callback: F) -> Result<()>
     where
         F: FnOnce(&GrpcClient) -> Fut,
-        Fut: Future<Output = ()>,
+        Fut: std::future::Future<Output = ()>,
     {
         // Connect to the destination without blocking access to the cache.  If there are
         // interleaved calls to this method, it's not deterministic which
