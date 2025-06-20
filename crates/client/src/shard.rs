@@ -14,6 +14,7 @@ use tokio_stream::Stream;
 use tokio_stream::StreamExt as _;
 use tonic::Streaming;
 use tonic::metadata::MetadataValue;
+use tracing::debug;
 // use mauricebarnum_oxia_common::proto::ShardAssignments;
 
 use crate::{
@@ -159,11 +160,11 @@ impl Client {
                     oxia_proto::SessionHeartbeat { session_id, shard },
                 );
                 let rsp = grpc.keep_alive(req).await;
-                dbg!(&rsp);
+                debug!("grpc.keep_alive", ?rsp);
 
                 let sleep_ms = distr.sample(&mut rng);
                 let timeout = Duration::from_millis(sleep_ms.into());
-                println!("sleeping for {} ms", sleep_ms);
+                info!("sleeping for {} ms", sleep_ms);
                 sleep(timeout).await;
             }
         })
@@ -221,7 +222,7 @@ impl Client {
             .session
             .get_or_try_init(async {
                 let rsp = self.create_session().await;
-                dbg!(&rsp);
+                debug!("get_session_id", ?rsp);
                 rsp.map(Some)
             })
             .await?;
@@ -839,7 +840,7 @@ impl ShardAssignmentTask {
                     }
                 }
                 Err(e) => {
-                    dbg!("ERR", &e); // TODO: we'll want to log this an keep going
+                    warn!(?e);
                     if let Some(tx) = self.ready.take() {
                         let _ = tx.send(Err(e.into()));
                     }
@@ -852,16 +853,16 @@ impl ShardAssignmentTask {
         let sleep_time = Duration::from_millis(600);
         loop {
             let req = oxia_proto::ShardAssignmentsRequest {
-                namespace: self.config.namespace.clone(),
+                namespace: self.config.namespace().into(),
             };
             match cluster.get_shard_assignments(req).await {
                 Ok(rsp) => self.process_assignments_stream(rsp.into_inner()).await,
                 Err(err) => {
-                    dbg!(&err);
+                    warn!(?err);
                 }
             }
-            dbg!(&self.shards);
-            println!("sleeping in retrieve_shards {:?}", sleep_time);
+            debug!(?self.shards);
+            info!("sleeping in retrieve_shards", ?sleep_time);
             tokio::time::sleep(sleep_time).await;
         }
     }
