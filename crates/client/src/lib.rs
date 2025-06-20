@@ -1,26 +1,17 @@
 use std::{
     cmp::Ordering,
-    collections::{
-        hash_map::Entry,
-        HashMap,
-    },
+    collections::{HashMap, hash_map::Entry},
     fmt::Display,
     sync::Arc,
 };
 
 use bytes::Bytes;
 
-use futures::{
-    StreamExt,
-    TryStreamExt,
-};
+use futures::{StreamExt, TryStreamExt};
 
 use tokio::sync::RwLock;
 
-use tonic::transport::{
-    Channel,
-    Endpoint,
-};
+use tonic::transport::{Channel, Endpoint};
 
 pub mod config;
 pub mod errors;
