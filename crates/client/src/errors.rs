@@ -1,5 +1,5 @@
 use crate::KeyComparisonType;
-use std::fmt::Display;
+use std::{fmt::Display, time::Duration};
 use thiserror::Error as ThisError;
 
 /// Errors that map directly from the Oxia gRPC service responses (excluding success/OK)
@@ -110,7 +110,7 @@ pub enum Error {
 
     #[error("Client error: {0}")]
     Client(#[from] ClientError),
-    
+
     #[error("No service addresss")]
     NoServiceAddress,
 
@@ -130,6 +130,8 @@ pub enum Error {
     Multiple(Vec<Box<Error>>),
     // #[error("Unknown error")]
     // Unknown,
+    #[error("Request time out")]
+    RequestTimeout(Duration),
 }
 
 impl Error {

@@ -583,17 +583,28 @@ impl Client {
         Ok(shard)
     }
 
-    async fn get_multi_shard(
+    pub async fn get_with_options(
         &self,
-        key: String,
+        key: impl Into<String>,
         options: GetOptions,
     ) -> Result<Option<GetResponse>> {
-        assert_ne!(options.comparison_type, KeyComparisonType::Equal);
+        let key = key.into();
+        let timeout = self.config.request_timeout();
+
+        if options.partition_key.is_some()
+            || (options.comparison_type == KeyComparisonType::Equal
+                && options.secondary_index_name.is_none())
+        {
+            let selector = options.partition_key.as_deref().unwrap_or(&key);
+            let shard = self.get_shard(selector).await?;
+            return util::with_timeout(timeout, shard.get(key, options)).await;
+        }
 
         let n = match self.config.max_parallel_requests() {
             0 => usize::MAX,
             n => n,
         };
+
         let stream = self
             .get_shards()?
             .shard_stream(self.config.namespace())
@@ -601,7 +612,7 @@ impl Client {
             .map(|shard| {
                 let key = key.clone();
                 let options = options.clone();
-                async move { shard.get(key, options).await }
+                async move { util::with_timeout(timeout, shard.get(key, options)).await }
             })
             .buffer_unordered(n);
 
@@ -613,24 +624,6 @@ impl Client {
                 })
             })
             .await
-    }
-
-    pub async fn get_with_options(
-        &self,
-        key: impl Into<String>,
-        options: GetOptions,
-    ) -> Result<Option<GetResponse>> {
-        let key = key.into();
-
-        if options.partition_key.is_none()
-            && (options.comparison_type != KeyComparisonType::Equal
-                || options.secondary_index_name.is_some())
-        {
-            return self.get_multi_shard(key, options).await;
-        }
-
-        let selector = options.partition_key.as_deref().unwrap_or(&key);
-        self.get_shard(selector).await?.get(key, options).await
     }
 
     pub async fn get(&self, k: impl Into<String>) -> Result<Option<GetResponse>> {
@@ -645,10 +638,11 @@ impl Client {
     ) -> Result<PutResponse> {
         let key = key.into();
         let selector = options.partition_key.as_deref().unwrap_or(&key);
-        self.get_shard(selector)
-            .await?
-            .put(key, value, options)
-            .await
+        util::with_timeout(
+            self.config.request_timeout(),
+            self.get_shard(selector).await?.put(key, value, options),
+        )
+        .await
     }
 
     pub async fn put(&self, key: impl Into<String>, value: Vec<u8>) -> Result<PutResponse> {
@@ -663,7 +657,11 @@ impl Client {
     ) -> Result<()> {
         let key = key.into();
         let selector = options.partition_key.as_deref().unwrap_or(&key);
-        self.get_shard(selector).await?.delete(key, options).await
+        util::with_timeout(
+            self.config.request_timeout(),
+            self.get_shard(selector).await?.delete(key, options),
+        )
+        .await
     }
 
     pub async fn delete(&self, key: impl Into<String>) -> Result<()> {
@@ -678,11 +676,13 @@ impl Client {
         options: ListOptions,
     ) -> Result<ListResponse> {
         if let Some(pk) = options.partition_key.as_deref() {
-            return self
-                .get_shard(pk)
-                .await?
-                .list(start_inclusive, end_exclusive, options)
-                .await;
+            return util::with_timeout(
+                self.config.request_timeout(),
+                self.get_shard(pk)
+                    .await?
+                    .list(start_inclusive, end_exclusive, options),
+            )
+            .await;
         }
 
         let start_inclusive = start_inclusive.into();
@@ -701,7 +701,13 @@ impl Client {
                 let end_exclusive = end_exclusive.clone();
                 let options = options.clone();
                 let shard = shard.clone();
-                async move { shard.list(start_inclusive, end_exclusive, options).await }
+                async move {
+                    util::with_timeout(
+                        self.config.request_timeout(),
+                        shard.list(start_inclusive, end_exclusive, options),
+                    )
+                    .await
+                }
             })
             .buffer_unordered(n);
 
@@ -744,11 +750,13 @@ impl Client {
         options: RangeScanOptions,
     ) -> Result<RangeScanResponse> {
         if let Some(pk) = options.partition_key.as_ref() {
-            return self
-                .get_shard(pk)
-                .await?
-                .range_scan(start_inclusive, end_exclusive, options)
-                .await;
+            return util::with_timeout(
+                self.config.request_timeout(),
+                self.get_shard(pk)
+                    .await?
+                    .range_scan(start_inclusive, end_exclusive, options),
+            )
+            .await;
         }
 
         let start_inclusive = start_inclusive.into();
@@ -768,9 +776,11 @@ impl Client {
                 let options = options.clone();
                 let shard = shard.clone();
                 async move {
-                    shard
-                        .range_scan(start_inclusive, end_exclusive, options)
-                        .await
+                    util::with_timeout(
+                        self.config.request_timeout(),
+                        shard.range_scan(start_inclusive, end_exclusive, options),
+                    )
+                    .await
                 }
             })
             .buffer_unordered(n);

@@ -1,4 +1,19 @@
-use std::cmp::Ordering;
+use crate::Result;
+use crate::errors::Error;
+use std::{cmp::Ordering, time::Duration};
+
+pub(crate) async fn with_timeout<T>(
+    timeout: Option<Duration>,
+    fut: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    match timeout {
+        Some(t) => match tokio::time::timeout(t, fut).await {
+            Ok(r) => r,
+            Err(_) => Err(Error::RequestTimeout(t)),
+        },
+        None => fut.await,
+    }
+}
 
 #[cfg(test)]
 pub(crate) fn compare_with_slash(xa: impl AsRef<str>, ya: impl AsRef<str>) -> Ordering {
@@ -75,8 +90,8 @@ mod tests {
     use mauricebarnum_oxia_common::proto::GetResponse;
 
     use super::*;
-    use std::cmp::Ordering;
     use itertools::Itertools;
+    use std::cmp::Ordering;
 
     #[test]
     fn test_compare_with_slash() {
