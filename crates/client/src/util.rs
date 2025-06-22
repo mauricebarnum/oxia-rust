@@ -87,8 +87,6 @@ pub(crate) fn select_response(
 
 #[cfg(test)]
 mod tests {
-    use mauricebarnum_oxia_common::proto::GetResponse;
-
     use super::*;
     use itertools::Itertools;
     use std::cmp::Ordering;

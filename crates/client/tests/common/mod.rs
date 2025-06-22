@@ -1,23 +1,15 @@
 // tests/common/mod.rs
 
-use mauricebarnum_oxia_client::config::Config;
 use mauricebarnum_oxia_client::errors::Error as ClientError;
 use mauricebarnum_oxia_client::{Client, config};
-use mauricebarnum_oxia_common::proto::oxia_client_client;
 use once_cell::sync::OnceCell;
-use socket2::Socket;
 use std::io;
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
-use tempfile::{/*Builder,*/ TempDir};
-// #[cfg(unix)]
-// use nix::sys::signal::{Signal, kill};
-// #[cfg(unix)]
-// use nix::unistd::Pid;
+use tempfile::TempDir;
 
 static OXIA_BIN: OnceCell<PathBuf> = OnceCell::new();
 
@@ -68,15 +60,15 @@ pub fn find_free_ports(n: usize) -> io::Result<Vec<u16>> {
     use std::net::{Ipv4Addr, SocketAddrV4};
     let mut sockets: Vec<Socket> = Vec::with_capacity(n);
     for _ in 0..n {
-        let socket = Socket::new(Domain::IPV4, Type::STREAM, None)?;
-        socket.set_reuse_address(true)?;
-        socket.bind(&SockAddr::from(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)))?;
-        sockets.push(socket);
+        let s = Socket::new(Domain::IPV4, Type::STREAM, None)?;
+        s.set_reuse_address(true)?;
+        s.bind(&SockAddr::from(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)))?;
+        sockets.push(s);
     }
 
     let mut ports: Vec<u16> = Vec::with_capacity(n);
-    for socket in &sockets {
-        let port = socket
+    for s in &sockets {
+        let port = s
             .local_addr()?
             .as_socket_ipv4()
             .expect("Not IPv4 address")
@@ -102,7 +94,6 @@ pub fn wait_for_ready(addr: &str, timeout_secs: u64) -> io::Result<()> {
 
 pub struct TestServer {
     pub service_addr: String,
-    pub metrics_addr: String,
     pub data_dir: TempDir,
     pub process: Child,
 }
@@ -132,23 +123,12 @@ impl TestServer {
         wait_for_ready(&service_addr, 30_000)?;
         Ok(TestServer {
             service_addr,
-            metrics_addr,
             data_dir,
             process,
         })
     }
 
     pub fn shutdown(&mut self) -> io::Result<()> {
-        // #[cfg(unix)]
-        // {
-        //     let pid = self.process.id();
-        //     let nix_pid = Pid::from_raw(pid as i32);
-        //     // Send SIGTERM to the process
-        //     if let Err(e) = kill(nix_pid, Signal::SIGTERM) {
-        //         eprintln!("Failed to send signal: {}", e);
-        //     }
-        // }
-        //
         self.process.kill()
     }
 
@@ -159,7 +139,6 @@ impl TestServer {
         let mut client = Client::new(builder.build()?);
         client.connect().await?;
         Ok(client)
-        // Err(ClientError::NoServiceAddress)
     }
 }
 
