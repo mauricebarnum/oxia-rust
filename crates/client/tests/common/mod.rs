@@ -132,10 +132,16 @@ impl TestServer {
         self.process.kill()
     }
 
+    pub fn restart(&mut self) -> io::Result<()> {
+        self.shutdown()?;
+        self.process = self.args.start()?;
+        Ok(())
+    }
+
     pub async fn connect(&self, optc: Option<config::Builder>) -> Result<Client, ClientError> {
         let builder = optc
-            .unwrap_or_else(|| config::Builder::new())
-            .service_addr(self.service_addr.clone()); //.service_address(self.service_addr.clone());
+            .unwrap_or_default()
+            .service_addr(self.args.service_addr.clone());
         let mut client = Client::new(builder.build()?);
         client.connect().await?;
         Ok(client)

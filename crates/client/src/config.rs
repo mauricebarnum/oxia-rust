@@ -133,3 +133,9 @@ impl Builder {
         Ok(Arc::new(self.c))
     }
 }
+
+impl Default for Builder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
