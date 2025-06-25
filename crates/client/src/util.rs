@@ -1,16 +1,41 @@
-use crate::Result;
+use crate::{Error, Result, config};
 use std::{cmp::Ordering, time::Duration};
+use tokio_retry::RetryIf;
+use tokio_retry::strategy::{ExponentialBackoff, jitter};
 
-pub(crate) async fn with_timeout<T>(
+pub(crate) async fn with_timeout<T, FutGen, Fut>(
     timeout: Option<Duration>,
-    fut: impl Future<Output = Result<T>>,
-) -> Result<T> {
+    fgen: FutGen,
+) -> Result<T>
+where
+    FutGen: FnOnce() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    let fut = fgen();
     match timeout {
         Some(t) => match tokio::time::timeout(t, fut).await {
             Ok(r) => r,
             Err(elapsed) => Err(elapsed.into()),
         },
         None => fut.await,
+    }
+}
+
+pub(crate) async fn with_retry<T, FutGen, Fut>(
+    retry_config: Option<config::RetryConfig>,
+    mut fgen: FutGen,
+) -> Result<T>
+where
+    FutGen: FnMut() -> Fut + Send + 'static,
+    Fut: Future<Output = Result<T>> + Send + 'static,
+{
+    if let Some(rc) = retry_config {
+        let strategy = ExponentialBackoff::from_millis(rc.initial_delay.as_millis() as u64)
+            .map(jitter)
+            .take(rc.attempts);
+        RetryIf::spawn(strategy, fgen, |e: &Error| e.is_retryable()).await
+    } else {
+        fgen().await
     }
 }
 

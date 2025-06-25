@@ -491,7 +491,7 @@ impl Client {
 
     /// Puts a value with the given options
     pub(super) async fn put(
-        &mut self,
+        &self,
         key: impl Into<String>,
         value: Bytes,
         options: PutOptions,

@@ -4,6 +4,21 @@ use std::time::Duration;
 use crate::{Error, Result};
 use tonic::transport::ClientTlsConfig;
 
+#[derive(Clone, Copy, Debug)]
+pub struct RetryConfig {
+    pub(crate) attempts: usize,
+    pub(crate) initial_delay: Duration,
+}
+
+impl RetryConfig {
+    pub fn new(attempts: usize, initial_delay: Duration) -> Self {
+        Self {
+            attempts,
+            initial_delay,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     service_addr: String,         // must not be empty
@@ -13,6 +28,7 @@ pub struct Config {
     max_parallel_requests: usize, // maximum number of parallel requests if non-zero
     tls_config: ClientTlsConfig,
     request_timeout: Option<Duration>, // timeout if non-zero
+    retry: Option<RetryConfig>,
 }
 
 impl Config {
@@ -37,6 +53,9 @@ impl Config {
     pub fn request_timeout(&self) -> Option<Duration> {
         self.request_timeout
     }
+    pub fn retry(&self) -> Option<RetryConfig> {
+        self.retry
+    }
 }
 
 #[derive(Clone)]
@@ -55,6 +74,7 @@ impl Builder {
                 max_parallel_requests: 0,
                 tls_config: Default::default(),
                 request_timeout: None,
+                retry: None,
             },
         }
     }
@@ -95,6 +115,11 @@ impl Builder {
 
     pub fn request_timeout(mut self, x: Duration) -> Self {
         self.c.request_timeout = if x.is_zero() { None } else { Some(x) };
+        self
+    }
+
+    pub fn retry(mut self, x: RetryConfig) -> Self {
+        self.c.retry = Some(x);
         self
     }
 
