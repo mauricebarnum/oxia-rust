@@ -97,13 +97,13 @@ pub enum UnexpectedServerResponse {
 #[non_exhaustive]
 pub enum Error {
     #[error("gRPC error: {0}")]
-    TonicStatus(Box<tonic::Status>),
+    TonicStatus(tonic::Status),
 
     #[error("gRPC transport error: {0}")]
     TonicTransport(#[from] tonic::transport::Error),
 
     #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(std::io::Error),
 
     #[error("Oxia protocol error: {0}")]
     OxiaError(#[from] OxiaError),
@@ -131,7 +131,9 @@ pub enum Error {
     // #[error("Unknown error")]
     // Unknown,
     #[error("Request time out")]
-    RequestTimeout(Duration),
+    RequestTimeout{
+        source : Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 impl Error {
@@ -139,10 +141,41 @@ impl Error {
     pub fn is_retryable(&self) -> bool {
         matches!(self, Error::TonicTransport(_) | Error::Io(_))
     }
+
+    pub fn as_io_error<'a, T>(err: &'a T) -> Option<&'a std::io::Error>
+    where T: std::error::Error + 'a {
+        let mut source = Some(err as &dyn Error);
+        while let Some(err) = source {
+            if let Some(io_err) = err.downcast_ref::<io::Error>() {
+                return Some(io_err);
+            }
+            source = err.source();
+        }
+        None
 }
 
 impl From<tonic::Status> for Error {
     fn from(value: tonic::Status) -> Self {
-        Error::TonicStatus(Box::new(value))
+        if value.code() == tonic::Code::DeadlineExceeded {
+            Error::RequestTimeout{source: Box::new(value)}
+        } else {
+            Error::TonicStatus(value)
+        }
+    }
+}
+
+impl From<tokio::time::error::Elapsed> for Error {
+    fn from(value: tokio::time::error::Elapsed) -> Self {
+        Error::RequestTimeout{source: Box::new(value)}
+    }
+}
+
+impl From<io::Error> for Error {
+    fn from(value: io::Error) -> Self {
+        if value.kind() == std::io::ErrorKind::TimedOut {
+            Error::RequestTimeout{source: Box::new(value)}
+        } else {
+            Error::Io(value)
+        }
     }
 }

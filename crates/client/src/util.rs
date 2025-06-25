@@ -9,7 +9,7 @@ pub(crate) async fn with_timeout<T>(
     match timeout {
         Some(t) => match tokio::time::timeout(t, fut).await {
             Ok(r) => r,
-            Err(_) => Err(Error::RequestTimeout(t)),
+            Err(elapsed) => Err(elapsed.into()),
         },
         None => fut.await,
     }
