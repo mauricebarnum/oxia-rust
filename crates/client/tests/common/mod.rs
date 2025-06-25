@@ -40,7 +40,7 @@ pub fn oxia_cli_path() -> &'static Path {
                 .args([
                     "install",
                     "-v",
-                    &format!("github.com/streamnative/oxia/cmd@{}", version),
+                    &format!("github.com/oxia-db/oxia/cmd@{}", version),
                 ])
                 .env("GOBIN", &dir)
                 .status()
