@@ -1,5 +1,4 @@
 use crate::Result;
-use crate::errors::Error;
 use std::{cmp::Ordering, time::Duration};
 
 pub(crate) async fn with_timeout<T>(
