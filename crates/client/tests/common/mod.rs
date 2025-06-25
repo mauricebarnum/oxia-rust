@@ -3,12 +3,12 @@
 use mauricebarnum_oxia_client::errors::Error as ClientError;
 use mauricebarnum_oxia_client::{Client, config};
 use once_cell::sync::OnceCell;
-use std::io;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
+use std::{io, path};
 use tempfile::TempDir;
 
 static OXIA_BIN: OnceCell<PathBuf> = OnceCell::new();
@@ -92,10 +92,36 @@ pub fn wait_for_ready(addr: &str, timeout_secs: u64) -> io::Result<()> {
     ))
 }
 
+struct TestServerArgs {
+    service_addr: String,
+    metrics_addr: String,
+    db_dir: path::PathBuf,
+    wal_dir: path::PathBuf,
+}
+
+impl TestServerArgs {
+    fn start(&self) -> io::Result<Child> {
+        let mut cmd = Command::new(oxia_cli_path());
+        cmd.arg("standalone")
+            .arg("--data-dir")
+            .arg(self.db_dir.as_path())
+            .arg("--wal-dir")
+            .arg(self.wal_dir.as_path())
+            .arg("-p")
+            .arg(self.service_addr.clone())
+            .arg("-m")
+            .arg(self.metrics_addr.clone())
+            .stdin(Stdio::null());
+        let child = cmd.spawn()?;
+        wait_for_ready(&self.service_addr, 30_000)?;
+        Ok(child)
+    }
+}
+
 pub struct TestServer {
-    pub service_addr: String,
     pub data_dir: TempDir,
-    pub process: Child,
+    args: TestServerArgs,
+    process: Child,
 }
 
 impl TestServer {
@@ -103,27 +129,17 @@ impl TestServer {
         let [service_port, metrics_port] = find_free_ports(2)?[..] else {
             unreachable!("wrong number of ports")
         };
-        let service_addr = format!("127.0.0.1:{service_port}");
-        let metrics_addr = format!("127.0.0.1:{metrics_port}");
         let data_dir = tempfile::Builder::new().disable_cleanup(true).tempdir()?;
-        let process = {
-            let mut cmd = Command::new(oxia_cli_path());
-            cmd.arg("standalone")
-                .arg("--data-dir")
-                .arg(data_dir.path().join("db"))
-                .arg("--wal-dir")
-                .arg(data_dir.path().join("wal"))
-                .arg("-p")
-                .arg(service_addr.clone())
-                .arg("-m")
-                .arg(metrics_addr.clone())
-                .stdin(Stdio::null());
-            cmd.spawn()?
+        let args = TestServerArgs {
+            service_addr: format!("127.0.0.1:{service_port}"),
+            metrics_addr: format!("127.0.0.1:{metrics_port}"),
+            db_dir: data_dir.path().join("db"),
+            wal_dir: data_dir.path().join("wal"),
         };
-        wait_for_ready(&service_addr, 30_000)?;
+        let process = args.start()?;
         Ok(TestServer {
-            service_addr,
             data_dir,
+            args,
             process,
         })
     }
