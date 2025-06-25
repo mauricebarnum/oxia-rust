@@ -16,7 +16,7 @@ fn main() -> Result<()> {
         //     .init();
 
         // Replace with your Oxia server address
-        let server_address = "http://localhost:6648";
+        let server_address = "localhost:6648";
 
         let config = crate::config::Builder::new()
             .service_addr(server_address)
