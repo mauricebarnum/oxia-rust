@@ -331,11 +331,15 @@ impl Client {
     }
 
     fn create_request<T>(&self, payload: T) -> tonic::Request<T> {
-        tonic::Request::from_parts(
+        let mut req = tonic::Request::from_parts(
             self.data.meta.clone(),
             tonic::Extensions::default(),
             payload,
-        )
+        );
+        if let Some(timeout) = self.data.config.request_timeout() {
+            req.set_timeout(timeout);
+        }
+        req
     }
 
     /// Processes a write request through the gRPC stream
