@@ -13,8 +13,8 @@ async fn test_basic() -> Result<(), Box<dyn std::error::Error>> {
     //     .session_timeout(Duration::from_millis(2001))
     let server = common::TestServer::start()?;
     let builder = config::Builder::new()
-        // .max_parallel_requests(3)
         .retry(config::RetryConfig::new(3, Duration::from_millis(23)))
+        .max_parallel_requests(3)
         .session_timeout(Duration::from_millis(2001));
     let client = server.connect(Some(builder)).await?;
 
