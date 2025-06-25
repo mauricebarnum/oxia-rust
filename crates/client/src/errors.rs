@@ -1,5 +1,5 @@
 use crate::KeyComparisonType;
-use std::{fmt::Display,io};
+use std::{fmt::Display, io};
 use thiserror::Error as ThisError;
 
 /// Errors that map directly from the Oxia gRPC service responses (excluding success/OK)
@@ -97,7 +97,7 @@ pub enum UnexpectedServerResponse {
 #[non_exhaustive]
 pub enum Error {
     #[error("gRPC error: {0}")]
-    TonicStatus(#[source]tonic::Status),
+    TonicStatus(#[source] Box<tonic::Status>),
 
     #[error("gRPC transport error: {0}")]
     TonicTransport(#[from] tonic::transport::Error),
@@ -128,11 +128,11 @@ pub enum Error {
 
     #[error("Multiple errors")]
     Multiple(Vec<Box<Error>>),
-    
+
     #[error("Request time out")]
-    RequestTimeout{
+    RequestTimeout {
         #[source]
-        source : Box<dyn std::error::Error + Send + Sync>,
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
 }
 
@@ -140,34 +140,38 @@ impl Error {
     /// Whether the error is likely transient and worth retrying
     pub fn is_retryable(&self) -> bool {
         if let Error::TonicStatus(e) = self {
-            if matches!(e.code(),tonic::Code::Unavailable| tonic::Code::Unknown| tonic::Code::Internal) {
+            if matches!(
+                e.code(),
+                tonic::Code::Unavailable | tonic::Code::Unknown | tonic::Code::Internal
+            ) {
                 return true;
             }
         }
-        
-        if let Error::RequestTimeout{..} = self {
-            return false
+
+        if let Error::RequestTimeout { .. } = self {
+            return false;
         }
-        
+
         if let Some(e) = self.as_io_error() {
             use io::ErrorKind;
-            return matches!(e.kind(),
-                ErrorKind::ConnectionReset |
-                ErrorKind::BrokenPipe |
-                ErrorKind::ConnectionAborted |
-                ErrorKind::NotConnected |
-                ErrorKind::WouldBlock
+            return matches!(
+                e.kind(),
+                ErrorKind::ConnectionReset
+                    | ErrorKind::BrokenPipe
+                    | ErrorKind::ConnectionAborted
+                    | ErrorKind::NotConnected
+                    | ErrorKind::WouldBlock
             );
         }
-        
+
         false
     }
 
     fn as_io_error(&self) -> Option<&io::Error> {
         if let Error::Multiple(errs) = self {
-            return errs.iter().find_map(|boxed_error| {
-                boxed_error.as_io_error()
-            });
+            return errs
+                .iter()
+                .find_map(|boxed_error| boxed_error.as_io_error());
         }
 
         let mut source = Some(self as &dyn std::error::Error);
@@ -183,24 +187,30 @@ impl Error {
 
 impl From<tonic::Status> for Error {
     fn from(value: tonic::Status) -> Self {
-        if value.code() == tonic::Code::DeadlineExceeded {
-            Error::RequestTimeout{source: Box::new(value)}
+        let as_timeout = value.code() == tonic::Code::DeadlineExceeded;
+        let boxed = Box::new(value);
+        if as_timeout {
+            Error::RequestTimeout { source: boxed }
         } else {
-            Error::TonicStatus(value)
+            Error::TonicStatus(boxed)
         }
     }
 }
 
 impl From<tokio::time::error::Elapsed> for Error {
     fn from(value: tokio::time::error::Elapsed) -> Self {
-        Error::RequestTimeout{source: Box::new(value)}
+        Error::RequestTimeout {
+            source: Box::new(value),
+        }
     }
 }
 
 impl From<io::Error> for Error {
     fn from(value: io::Error) -> Self {
         if value.kind() == io::ErrorKind::TimedOut {
-            Error::RequestTimeout{source: Box::new(value)}
+            Error::RequestTimeout {
+                source: Box::new(value),
+            }
         } else {
             Error::Io(value)
         }
