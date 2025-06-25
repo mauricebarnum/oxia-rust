@@ -139,7 +139,28 @@ pub enum Error {
 impl Error {
     /// Whether the error is likely transient and worth retrying
     pub fn is_retryable(&self) -> bool {
-        matches!(self, Error::TonicTransport(_) | Error::Io(_))
+        let ioError = match &self {
+            Error::TonicStatus(e) => {
+                if matches!(e.code(),tonic::Code::Unavailable| tonic::Code::Unknown| tonic::Code::Internal) {
+                    return true;
+                }
+                Self::as_io_error(e)
+            },
+            Error::Io(e) => Some(e),
+            _ => Self::as_io_error(self),
+        };
+
+        match ioError {
+            Some(e) => {
+                use std::io::ErrorKind;
+                matches!(e.kind(), ErrorKind::ConnectionReset
+                    | ErrorKind::BrokenPipe
+                    | ErrorKind::ConnectionAborted
+                    | ErrorKind::NotConnected
+                    | ErrorKind::WouldBlock)
+            },
+            None => false,
+        }
     }
 
     pub fn as_io_error<'a, T>(err: &'a T) -> Option<&'a std::io::Error>
@@ -152,6 +173,7 @@ impl Error {
             source = err.source();
         }
         None
+    }
 }
 
 impl From<tonic::Status> for Error {
