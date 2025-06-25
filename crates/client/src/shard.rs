@@ -493,7 +493,7 @@ impl Client {
     pub(super) async fn put(
         &mut self,
         key: impl Into<String>,
-        value: Vec<u8>,
+        value: Bytes,
         options: PutOptions,
     ) -> Result<PutResponse> {
         let session_id = match options.ephemeral {

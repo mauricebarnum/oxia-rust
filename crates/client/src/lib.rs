@@ -633,10 +633,11 @@ impl Client {
     pub async fn put_with_options(
         &self,
         key: impl Into<String>,
-        value: Vec<u8>,
+        value: impl Into<Bytes>,
         options: PutOptions,
     ) -> Result<PutResponse> {
         let key = key.into();
+        let value = value.into();
         let selector = options.partition_key.as_deref().unwrap_or(&key);
         util::with_timeout(
             self.config.request_timeout(),
@@ -645,7 +646,11 @@ impl Client {
         .await
     }
 
-    pub async fn put(&self, key: impl Into<String>, value: Vec<u8>) -> Result<PutResponse> {
+    pub async fn put(
+        &self,
+        key: impl Into<String>,
+        value: impl Into<Bytes>,
+    ) -> Result<PutResponse> {
         self.put_with_options(key, value, PutOptions::default())
             .await
     }
