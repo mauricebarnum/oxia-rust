@@ -28,8 +28,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct PutOptions {
     expected_version_id: Option<i64>,
     partition_key: Option<String>,
-    sequence_key_deltas: Vec<u64>,
-    secondary_indexes: Vec<oxia_proto::SecondaryIndex>,
+    sequence_key_deltas: Option<Arc<[u64]>>,
+    secondary_indexes: Option<Arc<[oxia_proto::SecondaryIndex]>>,
     ephemeral: bool,
 }
 
@@ -48,13 +48,16 @@ impl PutOptions {
         self
     }
 
-    pub fn sequence_key_deltas(mut self, value: Vec<u64>) -> Self {
-        self.sequence_key_deltas = value;
+    pub fn sequence_key_deltas(mut self, value: impl Into<Arc<[u64]>>) -> Self {
+        self.sequence_key_deltas = Some(value.into());
         self
     }
 
-    pub fn secondary_indexes(mut self, value: Vec<oxia_proto::SecondaryIndex>) -> Self {
-        self.secondary_indexes = value;
+    pub fn secondary_indexes(
+        mut self,
+        value: impl Into<Arc<[oxia_proto::SecondaryIndex]>>,
+    ) -> Self {
+        self.secondary_indexes = Some(value.into());
         self
     }
 

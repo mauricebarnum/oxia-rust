@@ -261,8 +261,12 @@ impl Client {
                 session_id,
                 client_identity: Some(data.config.identity().into()),
                 partition_key: opts.partition_key,
-                sequence_key_delta: opts.sequence_key_deltas,
-                secondary_indexes: opts.secondary_indexes,
+                sequence_key_delta: opts
+                    .sequence_key_deltas
+                    .map_or_else(Vec::new, |x| (*x).to_vec()),
+                secondary_indexes: opts
+                    .secondary_indexes
+                    .map_or_else(Vec::new, |x| (*x).to_vec()),
             }],
             deletes: vec![],
             delete_ranges: vec![],
