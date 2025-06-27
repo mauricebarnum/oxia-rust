@@ -2,6 +2,7 @@ use crate::{Error, Result, config};
 use std::{cmp::Ordering, time::Duration};
 use tokio_retry::RetryIf;
 use tokio_retry::strategy::{FibonacciBackoff, jitter};
+use tracing::debug;
 
 pub(crate) async fn with_timeout<T, FutGen, Fut>(
     timeout: Option<Duration>,
@@ -117,8 +118,62 @@ pub(crate) fn select_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::RetryConfig;
     use itertools::Itertools;
     use std::cmp::Ordering;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+
+    #[tokio::test]
+    async fn test_with_timeout() -> Result<()> {
+        let r = with_timeout(Some(Duration::from_millis(1)), || async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            Ok(())
+        })
+        .await;
+        match r {
+            Err(Error::RequestTimeout { .. }) => Ok(()),
+            _ => Err(Error::Custom(format!("unexpected result {:?}", r))),
+        }
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_with_retry() -> Result<()> {
+        const RETRIES: usize = 3;
+        let retry = Some(RetryConfig::new(RETRIES, Duration::from_millis(1)));
+        let count = Arc::new(AtomicUsize::new(0));
+
+        let funcs = [
+            || -> Result<()> {
+                // called once + RETRIES times
+                Err(Error::Io(std::io::ErrorKind::ConnectionReset.into()))
+            },
+            || -> Result<()> {
+                // called once
+                Err(Error::RequestTimeout {
+                    source: "timed out".into(),
+                })
+            },
+        ];
+        const EXPECTED: usize = RETRIES + 2;
+
+        for f in funcs {
+            let r = with_retry(retry, {
+                let count = count.clone();
+                move || {
+                    let count = count.clone();
+                    async move {
+                        count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        f()
+                    }
+                }
+            })
+            .await;
+            assert!(r.is_err());
+        }
+        assert_eq!(EXPECTED, count.load(std::sync::atomic::Ordering::Relaxed));
+        Ok(())
+    }
 
     #[test]
     fn test_compare_with_slash() {
