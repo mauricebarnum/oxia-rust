@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::{Error, Result};
-use tonic::transport::ClientTlsConfig;
 
 #[derive(Clone, Copy, Debug)]
 pub struct RetryConfig {
@@ -27,12 +26,11 @@ impl RetryConfig {
 
 #[derive(Clone, Debug)]
 pub struct Config {
-    service_addr: String,         // must not be empty
-    namespace: String,            // may Option<be empty
-    identity: String,             // used for ephemeral records, may be empty
-    session_timeout: Duration,    // if non-zero, create a session with the specified timeout
-    max_parallel_requests: usize, // maximum number of parallel requests if non-zero
-    tls_config: ClientTlsConfig,
+    service_addr: String,              // must not be empty
+    namespace: String,                 // may Option<be empty
+    identity: String,                  // used for ephemeral records, may be empty
+    session_timeout: Duration,         // if non-zero, create a session with the specified timeout
+    max_parallel_requests: usize,      // maximum number of parallel requests if non-zero
     request_timeout: Option<Duration>, // timeout if non-zero
     retry: Option<RetryConfig>,
 }
@@ -52,9 +50,6 @@ impl Config {
     }
     pub fn max_parallel_requests(&self) -> usize {
         self.max_parallel_requests
-    }
-    pub fn tls_config(&self) -> &ClientTlsConfig {
-        &self.tls_config
     }
     pub fn request_timeout(&self) -> Option<Duration> {
         self.request_timeout
@@ -78,7 +73,6 @@ impl Builder {
                 identity: String::new(),
                 session_timeout: Default::default(),
                 max_parallel_requests: 0,
-                tls_config: Default::default(),
                 request_timeout: None,
                 retry: None,
             },
@@ -111,11 +105,6 @@ impl Builder {
 
     pub fn max_parallel_requests(mut self, x: usize) -> Self {
         self.c.max_parallel_requests = x;
-        self
-    }
-
-    pub fn tls_config(mut self, x: ClientTlsConfig) -> Self {
-        self.c.tls_config = x;
         self
     }
 

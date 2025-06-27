@@ -8,13 +8,16 @@ edition = "2024"
 [workspace.dependencies]
 anyhow = "1.0.98"
 bytes = "1.10.1"
-prost = "0.13.4" # If using Protobuf
-prost-types = "0.13.4"
+prost = "0.13.5" # If using Protobuf
+prost-build = "0.13.5"
+prost-types = "0.13.5"
 serde = { version = "1.0.219", features = ["derive"] }
 thiserror = "2.0.12"
 tokio = { version = "1.44.2", features = ["full"] }
-tonic = { version = "0.12.3", features = ["gzip", "tls", "zstd"] }
 tokio-stream = "0.1.17"
+tonic = { version = "0.13.1", features = ["gzip", "channel", "zstd"] }
+tonic-build = "0.13.1"
+tonic-tls = { version = "0.4.0", features = ["rustls"] }
 tracing = "0.1.39"
 tracing-subscriber = { version = "0.3.16", features = [
   "env-filter",
