@@ -30,9 +30,14 @@ where
     Fut: Future<Output = Result<T>> + Send + 'static,
 {
     if let Some(rc) = retry_config {
-        let strategy = ExponentialBackoff::from_millis(rc.initial_delay.as_millis() as u64)
-            .map(jitter)
-            .take(rc.attempts);
+        let strategy = {
+            let mut s = ExponentialBackoff::from_millis(rc.initial_delay.as_millis() as u64);
+            if !rc.max_delay.is_zero() {
+                s = s.max_delay(rc.max_delay);
+            }
+            s.map(jitter).take(rc.attempts)
+        };
+
         RetryIf::spawn(strategy, fgen, |e: &Error| e.is_retryable()).await
     } else {
         fgen().await

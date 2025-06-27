@@ -8,6 +8,7 @@ use tonic::transport::ClientTlsConfig;
 pub struct RetryConfig {
     pub(crate) attempts: usize,
     pub(crate) initial_delay: Duration,
+    pub(crate) max_delay: Duration,
 }
 
 impl RetryConfig {
@@ -15,7 +16,12 @@ impl RetryConfig {
         Self {
             attempts,
             initial_delay,
+            max_delay: initial_delay.saturating_mul(10),
         }
+    }
+    pub fn max(mut self, x: Duration) -> Self {
+        self.max_delay = x;
+        self
     }
 }
 
