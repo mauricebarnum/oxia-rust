@@ -3,7 +3,7 @@
 set -e
 set -x
 
-upstream=https://github.com/streamnative/oxia
+upstream=https://github.com/oxia-db/oxia
 
 # Get the directory of the script
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
