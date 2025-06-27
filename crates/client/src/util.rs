@@ -1,7 +1,7 @@
 use crate::{Error, Result, config};
 use std::{cmp::Ordering, time::Duration};
 use tokio_retry::RetryIf;
-use tokio_retry::strategy::{ExponentialBackoff, jitter};
+use tokio_retry::strategy::{FibonacciBackoff, jitter};
 
 pub(crate) async fn with_timeout<T, FutGen, Fut>(
     timeout: Option<Duration>,
@@ -31,7 +31,7 @@ where
 {
     if let Some(rc) = retry_config {
         let strategy = {
-            let mut s = ExponentialBackoff::from_millis(rc.initial_delay.as_millis() as u64);
+            let mut s = FibonacciBackoff::from_millis(rc.initial_delay.as_millis() as u64);
             if !rc.max_delay.is_zero() {
                 s = s.max_delay(rc.max_delay);
             }
