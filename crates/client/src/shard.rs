@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use std::{str::FromStr, sync::Arc};
 
@@ -848,7 +849,6 @@ impl ShardAssignmentTask {
                     }
                 }
                 Err(e) => {
-                    warn!(?e);
                     if let Some(tx) = self.ready.take() {
                         let _ = tx.send(Err(e.into()));
                     }
@@ -857,20 +857,25 @@ impl ShardAssignmentTask {
         }
     }
 
-    async fn run(&mut self, mut cluster: GrpcClient) {
+    async fn run(&mut self, mut cluster: GrpcClient, shutdown_requested: Arc<AtomicBool>) {
         let sleep_time = Duration::from_millis(600);
         loop {
+            if shutdown_requested.load(Ordering::Relaxed) {
+                info!("ShardAssignmentTask exiting");
+                return;
+            }
+
             let req = oxia_proto::ShardAssignmentsRequest {
                 namespace: self.config.namespace().into(),
             };
             match cluster.get_shard_assignments(req).await {
                 Ok(rsp) => self.process_assignments_stream(rsp.into_inner()).await,
                 Err(err) => {
-                    warn!(?err);
+                    warn!(?err, "get_shard_assignments");
                 }
             }
             debug!(?self.shards);
-            info!(?sleep_time, "sleeping in retrieve_shards");
+            trace!(?sleep_time, "sleeping in retrieve_shards");
             tokio::time::sleep(sleep_time).await;
         }
     }
@@ -881,6 +886,7 @@ pub(super) struct Manager {
     #[allow(dead_code)] // cache is actually used
     cache: GrpcClientCache,
     shards: Arc<Mutex<Shards>>,
+    shutdown_requested: Arc<AtomicBool>,
     task_handle: JoinHandle<()>,
 }
 
@@ -892,11 +898,14 @@ impl Manager {
         cache: &GrpcClientCache,
     ) -> Result<Self> {
         let shards = Arc::new(Mutex::new(Shards::default()));
+        let shutdown_requested = Arc::new(AtomicBool::new(false));
         let task_handle =
-            Self::start_shard_assignment_task(config, cluster, cache, &shards).await?;
+            Self::start_shard_assignment_task(config, cluster, cache, &shards, &shutdown_requested)
+                .await?;
         Ok(Manager {
             cache: cache.clone(),
             shards,
+            shutdown_requested,
             task_handle,
         })
     }
@@ -1002,12 +1011,14 @@ impl Manager {
         cluster: &GrpcClient,
         cache: &GrpcClientCache,
         shards: &Arc<Mutex<Shards>>,
+        shutdown_requested: &Arc<AtomicBool>,
     ) -> Result<JoinHandle<()>> {
         let (tx, rx) = oneshot::channel();
         let cluster = cluster.clone();
         let mut task = ShardAssignmentTask::new(config.clone(), cache.clone(), shards.clone(), tx);
+        let shutdown_requested = shutdown_requested.clone();
         let handle = tokio::spawn(async move {
-            task.run(cluster).await;
+            task.run(cluster, shutdown_requested).await;
         });
 
         // TODO: time this out
@@ -1018,6 +1029,7 @@ impl Manager {
 
 impl Drop for Manager {
     fn drop(&mut self) {
+        self.shutdown_requested.store(true, Ordering::Relaxed);
         self.task_handle.abort();
     }
 }
