@@ -10,7 +10,6 @@ use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt};
 
 use tokio::sync::RwLock;
-
 use tonic::transport::{Channel, Endpoint};
 
 pub mod config;

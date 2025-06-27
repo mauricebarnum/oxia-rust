@@ -12,11 +12,13 @@ use std::{io, path};
 use tempfile::TempDir;
 
 pub trait TestResultExt<T> {
+    #[allow(dead_code)]
     fn trace_err(self) -> Self;
     fn trace_err_at(self, target: &'static str, file: &'static str, line: u32) -> Self;
 }
 
 impl<T, E: std::fmt::Debug> TestResultExt<T> for Result<T, E> {
+    #[allow(dead_code)]
     fn trace_err(self) -> Self {
         if let Err(ref e) = self {
             tracing::error!(?e, "Operation failed");
