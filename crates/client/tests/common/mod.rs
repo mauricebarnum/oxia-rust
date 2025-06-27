@@ -11,6 +11,33 @@ use std::time::{Duration, Instant};
 use std::{io, path};
 use tempfile::TempDir;
 
+pub trait TestResultExt<T> {
+    fn trace_err(self) -> Self;
+    fn trace_err_at(self, target: &'static str, file: &'static str, line: u32) -> Self;
+}
+
+impl<T, E: std::fmt::Debug> TestResultExt<T> for Result<T, E> {
+    fn trace_err(self) -> Self {
+        if let Err(ref e) = self {
+            tracing::error!(?e, "Operation failed");
+        }
+        self
+    }
+
+    fn trace_err_at(self, target: &'static str, file: &'static str, line: u32) -> Self {
+        if let Err(ref e) = self {
+            tracing::error!(target, file, line, ?e, "Operation failed");
+        }
+        self
+    }
+}
+
+macro_rules! trace_err {
+    ($expr:expr) => {{ $expr.trace_err_at(module_path!(), file!(), line!()) }};
+}
+
+pub(crate) use trace_err; // Make it available to other modules in the crate
+
 static OXIA_BIN: OnceCell<PathBuf> = OnceCell::new();
 
 pub fn oxia_cli_path() -> &'static Path {
@@ -60,16 +87,15 @@ pub fn find_free_ports(n: usize) -> io::Result<Vec<u16>> {
     use std::net::{Ipv4Addr, SocketAddrV4};
     let mut sockets: Vec<Socket> = Vec::with_capacity(n);
     for _ in 0..n {
-        let s = Socket::new(Domain::IPV4, Type::STREAM, None)?;
-        s.set_reuse_address(true)?;
-        s.bind(&SockAddr::from(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)))?;
+        let s = trace_err!(Socket::new(Domain::IPV4, Type::STREAM, None))?;
+        trace_err!(s.set_reuse_address(true))?;
+        trace_err!(s.bind(&SockAddr::from(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))))?;
         sockets.push(s);
     }
 
     let mut ports: Vec<u16> = Vec::with_capacity(n);
     for s in &sockets {
-        let port = s
-            .local_addr()?
+        let port = trace_err!(s.local_addr())?
             .as_socket_ipv4()
             .expect("Not IPv4 address")
             .port();
@@ -112,8 +138,8 @@ impl TestServerArgs {
             .arg("-m")
             .arg(self.metrics_addr.clone())
             .stdin(Stdio::null());
-        let child = cmd.spawn()?;
-        wait_for_ready(&self.service_addr, 30_000)?;
+        let child = trace_err!(cmd.spawn())?;
+        trace_err!(wait_for_ready(&self.service_addr, 30_000))?;
         Ok(child)
     }
 }
@@ -126,17 +152,15 @@ pub struct TestServer {
 
 impl TestServer {
     pub fn start() -> io::Result<Self> {
-        let [service_port, metrics_port] = find_free_ports(2)?[..] else {
-            unreachable!("wrong number of ports")
-        };
-        let data_dir = tempfile::Builder::new().disable_cleanup(true).tempdir()?;
+        let [service_port, metrics_port] = trace_err!(find_free_ports(2))?.try_into().unwrap();
+        let data_dir = trace_err!(tempfile::Builder::new().disable_cleanup(true).tempdir())?;
         let args = TestServerArgs {
             service_addr: format!("127.0.0.1:{service_port}"),
             metrics_addr: format!("127.0.0.1:{metrics_port}"),
             db_dir: data_dir.path().join("db"),
             wal_dir: data_dir.path().join("wal"),
         };
-        let process = args.start()?;
+        let process = trace_err!(args.start())?;
         Ok(TestServer {
             data_dir,
             args,
@@ -149,8 +173,8 @@ impl TestServer {
     }
 
     pub fn restart(&mut self) -> io::Result<()> {
-        self.shutdown()?;
-        self.process = self.args.start()?;
+        trace_err!(self.shutdown())?;
+        self.process = trace_err!(self.args.start())?;
         Ok(())
     }
 
@@ -158,8 +182,8 @@ impl TestServer {
         let builder = optc
             .unwrap_or_default()
             .service_addr(self.args.service_addr.clone());
-        let mut client = Client::new(builder.build()?);
-        client.connect().await?;
+        let mut client = Client::new(trace_err!(builder.build())?);
+        trace_err!(client.connect().await)?;
         Ok(client)
     }
 }
