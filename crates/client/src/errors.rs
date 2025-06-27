@@ -220,3 +220,45 @@ impl From<io::Error> for Error {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use tracing::info;
+    use super::*;
+    
+    #[test_log::test]
+    fn test_error_is_retryable_true() {
+        let errs = [
+            Error::TonicStatus(tonic::Status::new(tonic::Code::Internal, "").into()),
+            Error::TonicStatus(tonic::Status::new(tonic::Code::Unavailable, "").into()),
+            Error::TonicStatus(tonic::Status::new(tonic::Code::Unknown, "").into()),
+            Error::Io(std::io::ErrorKind::BrokenPipe.into()),
+            Error::Io(std::io::ErrorKind::ConnectionAborted.into()),
+            Error::Io(std::io::ErrorKind::ConnectionReset.into()),
+            Error::Io(std::io::ErrorKind::NotConnected.into()),
+            Error::Io(std::io::ErrorKind::WouldBlock.into()),
+        ];
+        for e in &errs {
+            info!(?e);
+            assert!(e.is_retryable());
+        }
+    }
+    
+    #[test_log::test]
+    fn test_error_is_retryable_false() {
+        let errs = [
+            Error::Custom("not retriable".into()),
+            Error::NoShardMapping(-1),
+            Error::NoServiceAddress,
+            Error::Client(crate::ClientError::Internal("client error".into())),
+            Error::Multiple(vec![]),
+            Error::RequestTimeout {
+                source: Box::new(std::io::Error::new(std::io::ErrorKind::TimedOut, "")),
+            },
+        ];
+        for e in &errs {
+            info!(?e);
+            assert!(!e.is_retryable());
+        }
+    }
+}
