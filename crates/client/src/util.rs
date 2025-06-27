@@ -2,7 +2,6 @@ use crate::{Error, Result, config};
 use std::{cmp::Ordering, time::Duration};
 use tokio_retry::RetryIf;
 use tokio_retry::strategy::{FibonacciBackoff, jitter};
-use tracing::debug;
 
 pub(crate) async fn with_timeout<T, FutGen, Fut>(
     timeout: Option<Duration>,
