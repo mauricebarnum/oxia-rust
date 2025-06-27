@@ -80,3 +80,44 @@ async fn test_basic() -> Result<(), Box<dyn std::error::Error>> {
     trace_err!(fs::remove_dir_all(server.data_dir.path()))?;
     Ok(())
 }
+
+async fn do_test_disconnect(retry: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let mut server = common::TestServer::start()?;
+    let builder = config::Builder::new()
+        .max_parallel_requests(3)
+        .request_timeout(Duration::from_millis(300))
+        .session_timeout(Duration::from_millis(2001));
+    let builder = if retry {
+        builder.retry(config::RetryConfig::new(3, Duration::from_millis(100)))
+    } else {
+        builder
+    };
+
+    let client = server.connect(Some(builder)).await?;
+    assert_eq!(None, trace_err!(client.get("foo").await)?);
+
+    trace_err!(client.put("foo", "bar").await)?;
+    assert!(trace_err!(client.get("foo").await)?.is_some());
+
+    info!("restarting test server");
+    trace_err!(server.restart())?;
+
+    let r = trace_err!(client.get("foo").await)?;
+    info!(op = "get", ?r);
+    assert!(r.is_some());
+
+    trace_err!(fs::remove_dir_all(server.data_dir.path()))?;
+
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn test_disconnect() -> Result<(), Box<dyn std::error::Error>> {
+    do_test_disconnect(true).await
+}
+
+#[test_log::test(tokio::test)]
+async fn test_disconnect_fail() {
+    let r = do_test_disconnect(false).await;
+    assert!(r.is_err());
+}
