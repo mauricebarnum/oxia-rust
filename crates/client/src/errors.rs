@@ -187,7 +187,11 @@ impl Error {
 
 impl From<tonic::Status> for Error {
     fn from(value: tonic::Status) -> Self {
-        let as_timeout = value.code() == tonic::Code::DeadlineExceeded;
+        let as_timeout = match value.code() {
+            tonic::Code::DeadlineExceeded => true,
+            tonic::Code::Cancelled => value.message() == "Timeout expired",
+            _ => false,
+        }; 
         let boxed = Box::new(value);
         if as_timeout {
             Error::RequestTimeout { source: boxed }
