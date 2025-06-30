@@ -584,14 +584,34 @@ impl Client {
         Ok(shard)
     }
 
+    async fn execute_with_retry<F, Fut, Args, R>(&self, op: F, args: Args) -> Result<R>
+    where
+        F: Fn(Args) -> Fut + Clone + Send + 'static,
+        Fut: std::future::Future<Output = Result<R>> + Send,
+        Args: Clone + Send + 'static,
+        R: Send,
+    {
+        let timeout = self.config.request_timeout();
+        let do_with_timeout = move || {
+            let args = args.clone();
+            let op = op.clone();
+            async move {
+                let fut = async move { op(args).await };
+                util::with_timeout(timeout, fut).await
+            }
+        };
+        util::with_retry(self.config.retry(), do_with_timeout).await
+    }
+
     pub async fn get_with_options(
         &self,
         key: impl Into<String>,
         options: GetOptions,
     ) -> Result<Option<GetResponse>> {
+        type Args = (shard::Client, String, GetOptions);
+        let do_get = |(shard, key, options): Args| async move { shard.get(key, options).await };
+
         let key = key.into();
-        let timeout = self.config.request_timeout();
-        let retry = self.config.retry();
 
         if options.partition_key.is_some()
             || (options.comparison_type == KeyComparisonType::Equal
@@ -599,21 +619,7 @@ impl Client {
         {
             let selector = options.partition_key.as_deref().unwrap_or(&key);
             let shard = self.get_shard(selector).await?;
-            let do_get_timeout = move || {
-                let key = key.clone();
-                let options = options.clone();
-                let shard = shard.clone();
-                let do_get = move || {
-                    let key = key.clone();
-                    let options = options.clone();
-                    let shard = shard.clone();
-                    async move { shard.get(key, options).await }
-                };
-
-                async move { util::with_timeout(timeout, do_get).await }
-            };
-
-            return util::with_retry(retry, do_get_timeout).await;
+            return self.execute_with_retry(do_get, (shard, key, options)).await;
         }
 
         let n = match self.config.max_parallel_requests() {
@@ -626,23 +632,8 @@ impl Client {
             .shard_stream(self.config.namespace())
             .await
             .map(|shard| {
-                let key = key.clone();
-                let options = options.clone();
-                let do_get_timeout = move || {
-                    let key = key.clone();
-                    let options = options.clone();
-                    let shard = shard.clone();
-                    let do_get = move || {
-                        let key = key.clone();
-                        let options = options.clone();
-                        let shard = shard.clone();
-                        async move { shard.get(key, options).await }
-                    };
-
-                    async move { util::with_timeout(timeout, do_get).await }
-                };
-
-                async move { util::with_retry(retry, do_get_timeout).await }
+                let args: Args = (shard, key.clone(), options.clone());
+                async move { self.execute_with_retry(do_get, args).await }
             })
             .buffer_unordered(n);
 
@@ -666,28 +657,15 @@ impl Client {
         value: impl Into<Bytes>,
         options: PutOptions,
     ) -> Result<PutResponse> {
+        type Args = (shard::Client, String, Bytes, PutOptions);
+        let do_put = |(shard, key, value, options): Args| async move {
+            shard.put(key, value, options).await
+        };
         let key = key.into();
-        let value = value.into();
         let selector = options.partition_key.as_deref().unwrap_or(&key);
         let shard = self.get_shard(selector).await?;
-
-        let retry = self.config.retry();
-        let timeout = self.config.request_timeout();
-
-        let do_put_timeout = move || {
-            let key = key.clone();
-            let options = options.clone();
-            let shard = shard.clone();
-            let value = value.clone();
-            let do_put = move || {
-                let key = key.clone();
-                let options = options.clone();
-                let value = value.clone();
-                async move { shard.put(key, value, options).await }
-            };
-            async move { util::with_timeout(timeout, do_put).await }
-        };
-        util::with_retry(retry, do_put_timeout).await
+        self.execute_with_retry(do_put, (shard, key, value.into(), options))
+            .await
     }
 
     pub async fn put(
@@ -704,23 +682,15 @@ impl Client {
         key: impl Into<String>,
         options: DeleteOptions,
     ) -> Result<()> {
-        let timeout = self.config.request_timeout();
-        let retry = self.config.retry();
+        type Args = (shard::Client, String, DeleteOptions);
+        let do_delete =
+            |(shard, key, options): Args| async move { shard.delete(key, options).await };
+
         let key = key.into();
         let selector = options.partition_key.as_deref().unwrap_or(&key);
         let shard = self.get_shard(selector).await?;
-        let do_delete_timeout = move || {
-            let key = key.clone();
-            let options = options.clone();
-            let shard = shard.clone();
-            let do_delete = move || {
-                let key = key.clone();
-                let options = options.clone();
-                async move { shard.delete(key, options).await }
-            };
-            async move { util::with_timeout(timeout, do_delete).await }
-        };
-        util::with_retry(retry, do_delete_timeout).await
+        self.execute_with_retry(do_delete, (shard, key, options))
+            .await
     }
 
     pub async fn delete(&self, key: impl Into<String>) -> Result<()> {
@@ -734,74 +704,44 @@ impl Client {
         end_exclusive: impl Into<String>,
         options: ListOptions,
     ) -> Result<ListResponse> {
-        let timeout = self.config.request_timeout();
-        let retry = self.config.retry();
-        let start_inclusive = start_inclusive.into();
-        let end_exclusive = end_exclusive.into();
+        type Args = (shard::Client, String, String, ListOptions);
+        let do_list = |(shard, start, end, options): Args| async move {
+            shard.list(start, end, options).await
+        };
+
+        let start = start_inclusive.into();
+        let end = end_exclusive.into();
 
         if let Some(pk) = options.partition_key.as_deref() {
             let shard = self.get_shard(pk).await?;
-            let do_list_timeout = move || {
-                let start_inclusive = start_inclusive.clone();
-                let end_exclusive = end_exclusive.clone();
-                let options = options.clone();
-                let shard = shard.clone();
-                let do_list = move || {
-                    let start_inclusive = start_inclusive.clone();
-                    let end_exclusive = end_exclusive.clone();
-                    let options = options.clone();
-                    async move { shard.list(start_inclusive, end_exclusive, options).await }
-                };
-                async move { util::with_timeout(timeout, do_list).await }
-            };
-            return util::with_retry(retry, do_list_timeout).await;
+            return self
+                .execute_with_retry(do_list, (shard, start, end, options))
+                .await;
         }
 
         let n = match self.config.max_parallel_requests() {
             0 => usize::MAX,
             n => n,
         };
+
         let mut result_stream = self
             .get_shards()?
             .shard_stream(self.config.namespace())
             .await
             .map(|shard| {
-                let start_inclusive = start_inclusive.clone();
-                let end_exclusive = end_exclusive.clone();
-                let options = options.clone();
-                let shard = shard.clone();
-                let do_list_timeout = move || {
-                    let start_inclusive = start_inclusive.clone();
-                    let end_exclusive = end_exclusive.clone();
-                    let options = options.clone();
-                    let shard = shard.clone();
-                    let do_list = move || {
-                        let start_inclusive = start_inclusive.clone();
-                        let end_exclusive = end_exclusive.clone();
-                        let options = options.clone();
-                        let shard = shard.clone();
-                        async move { shard.list(start_inclusive, end_exclusive, options).await }
-                    };
-                    async move { util::with_timeout(timeout, do_list).await }
-                };
-
-                async move { util::with_retry(retry, do_list_timeout).await }
+                let args: Args = (shard, start.clone(), end.clone(), options.clone());
+                async move { self.execute_with_retry(do_list, args).await }
             })
             .buffer_unordered(n);
 
         let mut rsp = ListResponse::default();
-        while let Some(r) = result_stream.next().await {
-            match r {
-                Ok(r) => {
-                    rsp.merge(r);
-                }
-                Err(e) => {
-                    if options.partial_ok {
-                        rsp.partial = true;
-                    } else {
-                        return Err(e);
-                    }
-                }
+        while let Some(s) = result_stream.next().await {
+            if let Ok(r) = s {
+                rsp.merge(r);
+            } else if options.partial_ok {
+                rsp.partial = true;
+            } else {
+                return s;
             }
         }
 
@@ -827,84 +767,47 @@ impl Client {
         end_exclusive: impl Into<String>,
         options: RangeScanOptions,
     ) -> Result<RangeScanResponse> {
-        let timeout = self.config.request_timeout();
-        let retry = self.config.retry();
-        let start_inclusive = start_inclusive.into();
-        let end_exclusive = end_exclusive.into();
+        type Args = (shard::Client, String, String, RangeScanOptions);
+        let do_range_scan = |(shard, start, end, options): Args| async move {
+            shard.range_scan(start, end, options).await
+        };
 
-        if let Some(pk) = options.partition_key.as_ref() {
+        let start = start_inclusive.into();
+        let end = end_exclusive.into();
+
+        if let Some(pk) = options.partition_key.as_deref() {
             let shard = self.get_shard(pk).await?;
-            let do_range_scan_timeout = move || {
-                let start_inclusive = start_inclusive.clone();
-                let end_exclusive = end_exclusive.clone();
-                let options = options.clone();
-                let shard = shard.clone();
-                let do_range_scan = move || {
-                    let start_inclusive = start_inclusive.clone();
-                    let end_exclusive = end_exclusive.clone();
-                    let options = options.clone();
-                    async move {
-                        shard
-                            .range_scan(start_inclusive, end_exclusive, options)
-                            .await
-                    }
-                };
-                async move { util::with_timeout(timeout, do_range_scan).await }
-            };
-            return util::with_retry(retry, do_range_scan_timeout).await;
+            return self
+                .execute_with_retry(do_range_scan, (shard, start, end, options))
+                .await;
         }
 
         let n = match self.config.max_parallel_requests() {
             0 => usize::MAX,
             n => n,
         };
+
         let mut result_stream = self
             .get_shards()?
             .shard_stream(self.config.namespace())
             .await
             .map(|shard| {
-                let start_inclusive = start_inclusive.clone();
-                let end_exclusive = end_exclusive.clone();
-                let options = options.clone();
-                let shard = shard.clone();
-                let do_range_scan_timeout = move || {
-                    let start_inclusive = start_inclusive.clone();
-                    let end_exclusive = end_exclusive.clone();
-                    let options = options.clone();
-                    let shard = shard.clone();
-                    let do_range_scan = move || {
-                        let start_inclusive = start_inclusive.clone();
-                        let end_exclusive = end_exclusive.clone();
-                        let options = options.clone();
-                        let shard = shard.clone();
-                        async move {
-                            shard
-                                .range_scan(start_inclusive, end_exclusive, options)
-                                .await
-                        }
-                    };
-                    async move { util::with_timeout(timeout, do_range_scan).await }
-                };
-
-                async move { util::with_retry(retry, do_range_scan_timeout).await }
+                let args: Args = (shard, start.clone(), end.clone(), options.clone());
+                async move { self.execute_with_retry(do_range_scan, args).await }
             })
             .buffer_unordered(n);
 
         let mut rsp = RangeScanResponse::default();
-        while let Some(r) = result_stream.next().await {
-            match r {
-                Ok(r) => {
-                    rsp.merge(r);
-                }
-                Err(e) => {
-                    if options.partial_ok {
-                        rsp.partial = true;
-                    } else {
-                        return Err(e);
-                    }
-                }
+        while let Some(s) = result_stream.next().await {
+            if let Ok(r) = s {
+                rsp.merge(r);
+            } else if options.partial_ok {
+                rsp.partial = true;
+            } else {
+                return s;
             }
         }
+
         if options.sort {
             rsp.sort();
         }

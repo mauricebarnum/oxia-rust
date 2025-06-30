@@ -1,46 +1,37 @@
 use crate::{Error, Result, config};
+use std::future::Future;
 use std::{cmp::Ordering, time::Duration};
 use tokio_retry::RetryIf;
 use tokio_retry::strategy::{FibonacciBackoff, jitter};
 
-pub(crate) async fn with_timeout<T, FutGen, Fut>(
-    timeout: Option<Duration>,
-    fgen: FutGen,
-) -> Result<T>
+pub(crate) async fn with_timeout<T, Fut>(timeout: Option<Duration>, fut: Fut) -> Result<T>
 where
-    FutGen: FnOnce() -> Fut,
     Fut: Future<Output = Result<T>>,
 {
-    let fut = fgen();
     match timeout {
-        Some(t) => match tokio::time::timeout(t, fut).await {
-            Ok(r) => r,
-            Err(elapsed) => Err(elapsed.into()),
-        },
+        Some(t) => tokio::time::timeout(t, fut).await.map_err(Error::from)?,
         None => fut.await,
     }
 }
 
-pub(crate) async fn with_retry<T, FutGen, Fut>(
+pub(crate) async fn with_retry<T, F, Fut>(
     retry_config: Option<config::RetryConfig>,
-    mut fgen: FutGen,
+    mut f: F,
 ) -> Result<T>
 where
-    FutGen: FnMut() -> Fut + Send + 'static,
-    Fut: Future<Output = Result<T>> + Send + 'static,
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
 {
-    if let Some(rc) = retry_config {
-        let strategy = {
-            let mut s = FibonacciBackoff::from_millis(rc.initial_delay.as_millis() as u64);
-            if !rc.max_delay.is_zero() {
-                s = s.max_delay(rc.max_delay);
-            }
-            s.map(jitter).take(rc.attempts)
-        };
+    match retry_config {
+        Some(rc) => {
+            let strategy = FibonacciBackoff::from_millis(rc.initial_delay.as_millis() as u64)
+                .max_delay(rc.max_delay)
+                .map(jitter)
+                .take(rc.attempts);
 
-        RetryIf::spawn(strategy, fgen, |e: &Error| e.is_retryable()).await
-    } else {
-        fgen().await
+            RetryIf::spawn(strategy, f, |e: &Error| e.is_retryable()).await
+        }
+        None => f().await,
     }
 }
 
@@ -125,11 +116,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_with_timeout() -> Result<()> {
-        let r = with_timeout(Some(Duration::from_millis(1)), || async move {
+        let r = with_timeout(Some(Duration::from_millis(1)), async {
             tokio::time::sleep(Duration::from_millis(10)).await;
             Ok(())
         })
         .await;
+
         match r {
             Err(Error::RequestTimeout { .. }) => Ok(()),
             _ => Err(Error::Custom(format!("unexpected result {:?}", r))),
@@ -143,12 +135,8 @@ mod tests {
         let count = Arc::new(AtomicUsize::new(0));
 
         let funcs = [
+            || -> Result<()> { Err(Error::Io(std::io::ErrorKind::ConnectionReset.into())) },
             || -> Result<()> {
-                // called once + RETRIES times
-                Err(Error::Io(std::io::ErrorKind::ConnectionReset.into()))
-            },
-            || -> Result<()> {
-                // called once
                 Err(Error::RequestTimeout {
                     source: "timed out".into(),
                 })
@@ -345,3 +333,4 @@ mod tests {
         );
     }
 }
+
