@@ -2,7 +2,6 @@ use chrono::Utc;
 use mauricebarnum_oxia_client as client;
 use mauricebarnum_oxia_client::config;
 use std::fs;
-use std::thread::sleep;
 use std::time::Duration;
 use tracing::info;
 

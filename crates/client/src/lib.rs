@@ -572,11 +572,10 @@ impl Client {
         Ok(())
     }
 
-    // TODO: consider connecting to the shard manager
     fn get_shards(&self) -> Result<&shard::Manager> {
-        self.shards.as_ref().ok_or(crate::Error::Custom(
-            "Shard manager not initialized".to_string(),
-        ))
+        self.shards
+            .as_ref()
+            .ok_or_else(|| crate::Error::Custom("Shard manager not initialized".to_string()))
     }
 
     async fn get_shard(&self, k: &str) -> Result<shard::Client> {
