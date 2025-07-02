@@ -1,5 +1,6 @@
 // tests/common/mod.rs
 
+use cargo_metadata::MetadataCommand;
 use mauricebarnum_oxia_client::errors::Error as ClientError;
 use mauricebarnum_oxia_client::{Client, config};
 use once_cell::sync::OnceCell;
@@ -10,6 +11,7 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 use std::{io, path};
 use tempfile::TempDir;
+use tracing::info;
 
 pub trait TestResultExt<T> {
     #[allow(dead_code)]
@@ -42,43 +44,58 @@ pub(crate) use trace_err; // Make it available to other modules in the crate
 
 static OXIA_BIN: OnceCell<PathBuf> = OnceCell::new();
 
+fn get_workspace_root() -> Option<PathBuf> {
+    let metadata = MetadataCommand::new().exec().ok()?;
+    Some(PathBuf::from(metadata.workspace_root))
+}
+
 pub fn oxia_cli_path() -> &'static Path {
     OXIA_BIN.get_or_init(|| {
         // Get workspace target dir
-        let target_dir = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| {
-            let crate_dir =
-                std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
-            let workspace_target = Path::new(&crate_dir)
-                .ancestors()
-                .nth(2)
-                .expect("Failed to find workspace root")
-                .join("target");
-            workspace_target.to_string_lossy().into_owned()
-        });
+        let workspace_root = get_workspace_root().expect("failed to get workspace root");
+        let target_dir = workspace_root.join("target");
+        let go_tools_target = target_dir.join("go-tools");
+        let go_bin_dir = go_tools_target.join("bin");
+        let cmd_path = go_bin_dir.join("cmd");
 
-        // Use absolute path for oxia-cli directory inside workspace target
-        let dir = Path::new(&target_dir).join("oxia-cli");
-        std::fs::create_dir_all(&dir).expect("failed to create oxia-cli dir");
+        if !cmd_path.exists() {
+            let dirs = [
+                ("GOBIN", go_bin_dir),
+                ("GOCACHE", go_tools_target.join("cache")),
+                ("GOMODCACHE", go_tools_target.join("mod")),
+            ];
 
-        let bin_path = dir.join("cmd");
-        if !bin_path.exists() {
+            let srcdir = workspace_root.join("go-tools");
+
+            dirs.iter().for_each(|(_, d)| {
+                std::fs::create_dir_all(d).unwrap_or_else(|_| panic!("unable to create {:?}", d))
+            });
+
             let version =
-                std::env::var("OXIA_CLI_VERSION").unwrap_or_else(|_| "latest".to_string());
+                std::env::var("OXIA_CLI_VERSION").unwrap_or_else(|_| "v0.14.1".to_string());
 
+            let vendor_path = srcdir.join("vendor/github.com/oxia-db/oxia/cmd");
+            let mut install_args = vec!["install".to_string()];
+            if vendor_path.exists() {
+                install_args.extend(
+                    ["-mod=vendor", "./vendor/github.com/oxia-db/oxia/cmd"].map(|x| x.to_string()),
+                );
+            } else {
+                install_args.push(format!("github.com/oxia-db/oxia/cmd@{version}"));
+            }
+            info!(?version, ?vendor_path, ?install_args, "building oxia cmd");
             let status = Command::new("go")
-                .args([
-                    "install",
-                    "-v",
-                    &format!("github.com/oxia-db/oxia/cmd@{}", version),
-                ])
-                .env("GOBIN", &dir)
+                .args(install_args)
+                .current_dir(srcdir)
+                .envs(dirs)
                 .status()
                 .expect("failed to run `go install` for oxia CLI");
+            info!(?status);
 
             assert!(status.success(), "oxia CLI installation failed");
         }
 
-        bin_path
+        cmd_path
     })
 }
 
