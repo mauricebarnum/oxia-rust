@@ -2,12 +2,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use std::{str::FromStr, sync::Arc};
 
-use async_once_cell::OnceCell;
 use bytes::Bytes;
 use rand::SeedableRng;
 use rand::distr::{Distribution, Uniform};
 use rand::rngs::StdRng;
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, OnceCell, oneshot};
 use tokio::{task::JoinHandle, time::sleep};
 use tokio_stream::Stream;
 use tokio_stream::StreamExt as _;
@@ -220,7 +219,7 @@ impl Client {
     async fn get_session_id(&self) -> Result<Option<i64>> {
         let s = self
             .session
-            .get_or_try_init(async {
+            .get_or_try_init(|| async {
                 let rsp = self.create_session().await;
                 debug!(?rsp, "get_session_id");
                 rsp.map(Some)

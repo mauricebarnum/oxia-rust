@@ -3,10 +3,10 @@
 use cargo_metadata::MetadataCommand;
 use mauricebarnum_oxia_client::errors::Error as ClientError;
 use mauricebarnum_oxia_client::{Client, config};
-use once_cell::sync::OnceCell;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::OnceLock;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 use std::{io, path};
@@ -42,7 +42,7 @@ macro_rules! trace_err {
 
 pub(crate) use trace_err; // Make it available to other modules in the crate
 
-static OXIA_BIN: OnceCell<PathBuf> = OnceCell::new();
+static OXIA_BIN: OnceLock<PathBuf> = OnceLock::new();
 
 fn get_workspace_root() -> Option<PathBuf> {
     let metadata = MetadataCommand::new().exec().ok()?;

@@ -98,12 +98,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e16d2d3311acee920a9eb8d33b8cbc1787ce4a264e85f964c2404b969bdcd487"
 
 [[package]]
-name = "async-once-cell"
-version = "0.5.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4288f83726785267c6f2ef073a3d83dc3f9b81464e9f99898240cced85fce35a"
-
-[[package]]
 name = "async-stream"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -968,7 +962,6 @@ name = "mauricebarnum-oxia-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-once-cell",
  "async-trait",
  "bytes",
  "cargo_metadata",
@@ -979,7 +972,6 @@ dependencies = [
  "itertools",
  "lazy_static",
  "mauricebarnum-oxia-common",
- "once_cell",
  "prost",
  "rand 0.9.1",
  "serde",
