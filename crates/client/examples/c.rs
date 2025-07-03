@@ -24,26 +24,26 @@ async fn main() -> Result<()> {
 
     let mut key = String::new();
     for i in 0..11 {
-        key = format!("foo-{}", i);
+        key = format!("foo-{i}");
         for j in 0..7 {
             let result = client
                 .put(
                     key.clone(),
-                    format!("value-{}-{}", i, j).as_bytes().to_vec(),
+                    format!("value-{i}-{j}").as_bytes().to_vec(),
                 )
                 .await?;
-            println!("put result: {:?}", result);
+            println!("put result: {result:?}");
         }
     }
 
     // And do a get
     let result = client.get(key.clone()).await?;
-    println!("get result: {:?}", result);
+    println!("get result: {result:?}");
 
     // Let's list all of the keys
     let result = client.list("".to_string(), "".to_string()).await?;
     for (i, v) in result.keys.iter().enumerate() {
-        println!("list {} {}", i, v);
+        println!("list {i} {v}");
     }
 
     // Delete the last key inserted
@@ -58,7 +58,7 @@ async fn main() -> Result<()> {
 
     // And do another get, this time expecting KeyNotFound
     if let Some(r) = client.get(key.clone()).await? {
-        return Err(Error::Custom(format!("unexpected get success: {:?}", r)));
+        return Err(Error::Custom(format!("unexpected get success: {r:?}")));
     }
 
     let result = client
@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
             crate::PutOptions::new().ephemeral(),
         )
         .await?;
-    println!("put result: {:?}", result);
+    println!("put result: {result:?}");
 
     tokio::time::sleep(Duration::from_secs(5)).await;
     println!("done");

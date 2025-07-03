@@ -32,12 +32,12 @@ fn main() -> Result<()> {
         let result = client
             .put_with_options(key.clone(), val, PutOptions::new().ephemeral())
             .await?;
-        println!("put result: {:?}", result);
+        println!("put result: {result:?}");
 
         tokio::time::sleep(Duration::from_secs(5)).await;
 
         let result = client.get(key.clone()).await?;
-        println!("get result: {:?}", result);
+        println!("get result: {result:?}");
         drop(client);
 
         println!("waiting for session to expire");
@@ -47,9 +47,9 @@ fn main() -> Result<()> {
         let mut client = Client::new(config);
         client.connect().await?;
 
-        println!("re-reading key {}", key);
+        println!("re-reading key {key}");
         let result = client.get(key).await?;
-        println!("get result: {:?}", result);
+        println!("get result: {result:?}");
 
         Ok(())
     })

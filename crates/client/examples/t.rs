@@ -40,6 +40,6 @@ fn main() {
             secondary_index_key: None,
         }],
     };
-    println!("{:#?}", read_response);
+    println!("{read_response:#?}");
     println!("{:#?}", import_read_response(read_response));
 }

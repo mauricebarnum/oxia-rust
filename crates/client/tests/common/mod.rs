@@ -68,7 +68,7 @@ pub fn oxia_cli_path() -> &'static Path {
             let srcdir = workspace_root.join("go-tools");
 
             dirs.iter().for_each(|(_, d)| {
-                std::fs::create_dir_all(d).unwrap_or_else(|_| panic!("unable to create {:?}", d))
+                std::fs::create_dir_all(d).unwrap_or_else(|_| panic!("unable to create {d:?}"))
             });
 
             let version =

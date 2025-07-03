@@ -183,7 +183,7 @@ impl Client {
         meta.insert(
             "namespace",
             MetadataValue::from_str(config.namespace())
-                .map_err(|e| Error::Custom(format!("Invalid metadata value: {}", e)))?,
+                .map_err(|e| Error::Custom(format!("Invalid metadata value: {e}")))?,
         );
 
         Ok(Client {
@@ -365,7 +365,7 @@ impl Client {
         // Send the request
         tx.send(write_req)
             .await
-            .map_err(|e| Error::Custom(format!("Failed to send write request: {}", e)))?;
+            .map_err(|e| Error::Custom(format!("Failed to send write request: {e}")))?;
 
         // Create stream from the receiver
         let write_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -393,8 +393,7 @@ impl Client {
         // Verify we received only one response
         if let Some(response) = resp_stream.next().await {
             return Err(Error::Custom(format!(
-                "Expected exactly one response, but got additional response: {:?}",
-                response
+                "Expected exactly one response, but got additional response: {response:?}"
             )));
         }
 
@@ -423,8 +422,7 @@ impl Client {
         // Verify we received only one response
         if let Some(response) = rsp_stream.next().await {
             return Err(Error::Custom(format!(
-                "Expected only one ReadResponse, but got additional response: {:?}",
-                response
+                "Expected only one ReadResponse, but got additional response: {response:?}"
             )));
         }
 
@@ -506,7 +504,7 @@ impl Client {
             false => None,
         };
 
-        let req = self.make_put_req(session_id, options, key, value.into());
+        let req = self.make_put_req(session_id, options, key, value);
         let rsp = self.process_write(req).await?;
 
         if let Some(e) = check_put_response(&rsp) {
@@ -578,8 +576,7 @@ impl Client {
         match tokio::time::timeout(timeout, self.list(start_inclusive, end_exclusive, opts)).await {
             Ok(result) => result,
             Err(_) => Err(Error::Custom(format!(
-                "List request timed out after {:?}",
-                timeout
+                "List request timed out after {timeout:?}"
             ))),
         }
     }
@@ -681,8 +678,7 @@ mod int32_hash_range {
 
             if r != oxia_proto::ShardKeyRouter::Xxhash3 {
                 return Err(UnexpectedServerResponse::BadShardKeyRouter(format!(
-                    "unsupported shard_key_router {:?}",
-                    r
+                    "unsupported shard_key_router {r:?}"
                 ))
                 .into());
             }

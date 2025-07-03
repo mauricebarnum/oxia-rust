@@ -124,7 +124,7 @@ mod tests {
 
         match r {
             Err(Error::RequestTimeout { .. }) => Ok(()),
-            _ => Err(Error::Custom(format!("unexpected result {:?}", r))),
+            _ => Err(Error::Custom(format!("unexpected result {r:?}"))),
         }
     }
 
@@ -185,7 +185,7 @@ mod tests {
             (Ordering::Less, "aaaaa", "zzzzz"),
         ];
         for (i, &(expected, x, y)) in data.iter().enumerate() {
-            println!("{}: '{}' '{}' => {:?}", i, x, y, expected);
+            println!("{i}: '{x}' '{y}' => {expected:?}");
             assert_eq!(expected, compare_with_slash(x, y));
         }
     }

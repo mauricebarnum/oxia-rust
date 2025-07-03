@@ -21,13 +21,13 @@ async fn test_basic() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut key = String::new();
     for i in 0..11 {
-        key = format!("foo-{}", i);
+        key = format!("foo-{i}");
         for j in 0..7 {
             let result = trace_err!(
                 client
                     .put(
                         key.clone(),
-                        format!("value-{}-{}", i, j).as_bytes().to_vec(),
+                        format!("value-{i}-{j}").as_bytes().to_vec(),
                     )
                     .await
             )?;
@@ -57,7 +57,7 @@ async fn test_basic() -> Result<(), Box<dyn std::error::Error>> {
 
     // And do another get, this time expecting KeyNotFound
     if let Some(r) = client.get(key.clone()).await? {
-        return Err(format!("unexpected get success: {:?}", r).into());
+        return Err(format!("unexpected get success: {r:?}").into());
     }
 
     let result = client
