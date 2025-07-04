@@ -1,33 +1,43 @@
 #!/bin/bash
+# Fetches and replaces the .proto files from upstream and writes the revision used.
 
-set -e
-set -x
+set -euo pipefail
 
-upstream=https://github.com/oxia-db/oxia
+# Config
+# ------
 
-# Get the directory of the script
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-crate_dir="${script_dir}/.."
-proto_dir="${crate_dir}/proto"
+upstream_repo="https://github.com/oxia-db/oxia"
+upstream_dir="proto"
+src_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+local_proto_dir="${src_dir}/proto"
 
-tmp_dir=$(mktemp -d)
-
+# Temporary location
+# ------------------
+#
+tmp_dir="$(mktemp -d)"
 cleanup() {
-	local st=$?
-	set +e
-	rm -rf "${tmp_dir}"
-	exit $st
+    rm -rf "${tmp_dir}"
 }
 trap cleanup EXIT
 
-# Clone only the required directory
-git clone --depth 1 --filter=blob:none --sparse "${upstream}" "$tmp_dir/oxia"
 
-# Enable sparse checkout
-git -C "$tmp_dir/oxia" sparse-checkout set proto
+echo "[update_proto] Cloning ${upstream_repo}..."
+git clone --depth=1 --filter=blob:none --sparse "${upstream_repo}" "${tmp_dir}/oxia"
+git -C "${tmp_dir}/oxia" sparse-checkout set "${upstream_dir}"
 
-cp -vr "${tmp_dir}"/oxia/proto/*.proto "${proto_dir}"
+echo "[update_proto] Copying proto files..."
+cp -v "${tmp_dir}/oxia/${upstream_dir}/"*.proto "${local_proto_dir}/"
 
+#upstream=https://github.com/oxia-db/oxia
+
+echo "[update_proto] Saving upstream info..."
 rev=$(git -C "$tmp_dir/oxia" rev-parse HEAD)
-echo "${upstream}/tree/${rev}" >"${proto_dir}/UPSTREAM"
-git add -u "${proto_dir}"
+echo "${upstream_repo}/tree/${rev}" > "${local_proto_dir}/UPSTREAM"
+
+echo "[update_proto] Building with new proto file..."
+cargo build --all-targets
+
+echo "[update_proto] Staging changes..."
+cd "${src_dir}"
+git add -A "${local_proto_dir}"
+
