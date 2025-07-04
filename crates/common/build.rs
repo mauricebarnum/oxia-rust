@@ -1,6 +1,6 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let proto_dir = "proto";
-    let proto_files = vec![
+    const PROTO_DIR: &str = "proto";
+    const PROTO_FILES: &[&str] = &[
         "proto/client.proto",
         // "proto/replication.proto",
         // "proto/storage.proto",
@@ -8,23 +8,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Configure tonic to use Bytes for all protobuf bytes fields
     tonic_build::configure()
-        // Use `Bytes` for binary fields
         .bytes(["."])
-        // Protoc optimizations
         .protoc_arg("--experimental_allow_proto3_optional")
         .protoc_arg("--cpp_opt=speed")
         .build_client(true)
-        .build_server(false) // maybe? are going to implement a mock server?
+        .build_server(false)
         .emit_rerun_if_changed(true)
-        .compile_well_known_types(false)
-        .compile_protos(&proto_files, &[proto_dir])?;
+        .compile_protos(PROTO_FILES, &[PROTO_DIR])?;
 
     // Recompile if proto files change
-    proto_files
-        .iter()
-        .for_each(|f| println!("cargo:rerun-if-changed={f}"));
+    for file in PROTO_FILES {
+        println!("cargo:rerun-if-changed={file}");
+    }
 
-    println!("cargo:rerun-if-changed={proto_dir}");
+    println!("cargo:rerun-if-changed={PROTO_DIR}");
     println!("cargo:rerun-if-changed=Cargo.toml");
 
     Ok(())
