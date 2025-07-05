@@ -51,50 +51,44 @@ fn get_workspace_root() -> Option<PathBuf> {
 
 pub fn oxia_cli_path() -> &'static Path {
     OXIA_BIN.get_or_init(|| {
+        const OXIA_MOD: &str = "github.com/oxia-db/oxia";
         // Get workspace target dir
         let workspace_root = get_workspace_root().expect("failed to get workspace root");
-        let target_dir = workspace_root.join("target");
-        let go_tools_target = target_dir.join("go-tools");
+        let go_tools_target = workspace_root.join("target/go-tools");
         let go_bin_dir = go_tools_target.join("bin");
         let cmd_path = go_bin_dir.join("cmd");
 
         if !cmd_path.exists() {
+            let tools_dir = workspace_root.join("go-tools");
+            let vendor_path = tools_dir.join(format!("vendor/{OXIA_MOD}/cmd"));
+            info!(?cmd_path, ?vendor_path, "compile from vendored source");
+
             let dirs = [
                 ("GOBIN", go_bin_dir),
                 ("GOCACHE", go_tools_target.join("cache")),
                 ("GOMODCACHE", go_tools_target.join("mod")),
             ];
-
-            let srcdir = workspace_root.join("go-tools");
-
-            dirs.iter().for_each(|(_, d)| {
-                std::fs::create_dir_all(d).unwrap_or_else(|_| panic!("unable to create {d:?}"))
+            dirs.iter().enumerate().for_each(|(i, (_, d))| {
+                info!(i, ?d);
+                std::fs::create_dir_all(d).unwrap();
             });
 
-            let version =
-                std::env::var("OXIA_CLI_VERSION").unwrap_or_else(|_| "v0.14.1".to_string());
+            let envs = {
+                let mut envs = vec![("GOPROXY", "off")];
+                envs.extend(dirs.iter().map(|(k, d)| (*k, d.to_str().unwrap())));
+                envs
+            };
 
-            let vendor_path = srcdir.join("vendor/github.com/oxia-db/oxia/cmd");
-            let mut install_args = vec!["install".to_string()];
-            if vendor_path.exists() {
-                install_args.extend(
-                    ["-mod=vendor", "./vendor/github.com/oxia-db/oxia/cmd"].map(|x| x.to_string()),
-                );
-            } else {
-                install_args.push(format!("github.com/oxia-db/oxia/cmd@{version}"));
-            }
-            info!(?version, ?vendor_path, ?install_args, "building oxia cmd");
             let status = Command::new("go")
-                .args(install_args)
-                .current_dir(srcdir)
-                .envs(dirs)
+                .current_dir(tools_dir)
+                .envs(envs)
+                .arg("install")
+                .arg("-mod=vendor")
+                .arg(format!("./vendor/{OXIA_MOD}/cmd"))
                 .status()
                 .expect("failed to run `go install` for oxia CLI");
-            info!(?status);
-
             assert!(status.success(), "oxia CLI installation failed");
         }
-
         cmd_path
     })
 }
