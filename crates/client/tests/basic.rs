@@ -11,7 +11,7 @@ use common::TestResultExt;
 use common::trace_err;
 
 #[test_log::test(tokio::test)]
-async fn test_basic() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_basic() -> anyhow::Result<()> {
     let session_timeout = Duration::from_secs(2);
     let nshards = NonZeroU32::new(3).unwrap();
     let server = trace_err!(common::TestServer::start_nshards(nshards))?;
@@ -27,10 +27,7 @@ async fn test_basic() -> Result<(), Box<dyn std::error::Error>> {
         for j in 0..7 {
             let result = trace_err!(
                 client
-                    .put(
-                        key.clone(),
-                        format!("value-{i}-{j}").as_bytes().to_vec(),
-                    )
+                    .put(key.clone(), format!("value-{i}-{j}").as_bytes().to_vec(),)
                     .await
             )?;
             info!(op = "put", ?result);
@@ -59,7 +56,7 @@ async fn test_basic() -> Result<(), Box<dyn std::error::Error>> {
 
     // And do another get, this time expecting KeyNotFound
     if let Some(r) = client.get(key.clone()).await? {
-        return Err(format!("unexpected get success: {r:?}").into());
+        return Err(anyhow::anyhow!("unexpected get success: {r:?}"));
     }
 
     let result = client
@@ -84,7 +81,7 @@ async fn test_basic() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn do_test_disconnect(retry: bool) -> Result<(), Box<dyn std::error::Error>> {
+async fn do_test_disconnect(retry: bool) -> anyhow::Result<()> {
     let mut server = common::TestServer::start()?;
     let builder = config::Builder::new()
         .max_parallel_requests(3)
@@ -115,7 +112,7 @@ async fn do_test_disconnect(retry: bool) -> Result<(), Box<dyn std::error::Error
 }
 
 #[test_log::test(tokio::test)]
-async fn test_disconnect() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_disconnect() -> anyhow::Result<()> {
     do_test_disconnect(true).await
 }
 
