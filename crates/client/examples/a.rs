@@ -1,5 +1,5 @@
 use std::time::Duration;
-
+use tracing::metadata::LevelFilter;
 use mauricebarnum_oxia_client::*;
 use tracing_subscriber::{EnvFilter, fmt};
 // use tracing::{debug, error, info, span, warn};
@@ -11,8 +11,11 @@ fn main() -> Result<()> {
     }
     tokio::runtime::Runtime::new()?.block_on(async {
         fmt()
-            .with_env_filter(EnvFilter::new("tonic=trace,hyper=trace,h2=trace"))
+            .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(
+                |_| EnvFilter::new("info")))
             .init();
+        //     .with_env_filter(EnvFilter::new("tonic=trace,hyper=trace,h2=trace"))
+        //     .init();
 
         // Replace with your Oxia server address.
         // TODO: what's with the scheme?  It's not in the shard assignments return, so I guess

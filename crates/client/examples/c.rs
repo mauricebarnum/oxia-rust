@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use chrono::Utc;
+use tracing_subscriber::{fmt, EnvFilter};
 use mauricebarnum_oxia_client::*;
 // use tracing::{debug, error, info, span, warn};
 // use tracing_subscriber::{EnvFilter, fmt};
@@ -10,6 +11,11 @@ async fn main() -> Result<()> {
     // fmt()
     //     .with_env_filter(EnvFilter::new("tonic=trace,hyper=trace,h2=trace"))
     //     .init();
+    fmt()
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(
+            |_| EnvFilter::new("info")))
+        .init();
+
 
     // Replace with your Oxia server address
     let server_address = "localhost:6648";
