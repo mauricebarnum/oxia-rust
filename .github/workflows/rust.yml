@@ -35,6 +35,9 @@ jobs:
           go-version: "1.24"
           cache: false
 
+      - name: enable-build-cache
+        uses: Swatinem/rust-cache@v2
+
       - name: detect-vendored-build
         id: vendored
         run: |
