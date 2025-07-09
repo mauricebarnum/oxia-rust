@@ -33,7 +33,7 @@ cargo_metadata = { workspace = true }
 
 [dev-dependencies]
 chrono = "0.4.41"
-socket2 = "0.5.10"
+socket2 = "0.6.0"
 test-log = { version = "0.2.18", features = ["trace", "color"] }
 
 # [target.'cfg(unix)'.dependencies]
