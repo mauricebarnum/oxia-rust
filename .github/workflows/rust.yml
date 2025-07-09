@@ -45,18 +45,12 @@ jobs:
 
       - name: fetch-dependencies
         if: steps.vendored.outputs.vendored == 'false'
-        run: cargo fetch --locked
-
-      - name: check-vendored-dependencies
-        if: steps.vendored.outputs.vendored == 'true'
-        run: cargo fetch --frozen
-
-      - name: enable-build-cache
-        if: steps.vendored.outputs.vendored == 'false'
-        uses: Swatinem/rust-cache@v2
+        run: |
+          cargo update --dry-run # update crate index
+          cargo fetch --locked   # fetch dependencies: last network dependency
 
       - name: build
-        run: cargo build --offline --locked --all-targets
+        run: cargo build --frozen --all-targets
 
       - name: test
         run: cargo test --frozen --verbose
