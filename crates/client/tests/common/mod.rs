@@ -1,18 +1,15 @@
 // tests/common/mod.rs
 
-use cargo_metadata::MetadataCommand;
 use mauricebarnum_oxia_client::errors::Error as ClientError;
 use mauricebarnum_oxia_client::{Client, config};
 use std::net::TcpStream;
 use std::num::NonZeroU32;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::OnceLock;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 use std::{io, path};
 use tempfile::TempDir;
-use tracing::info;
 
 pub trait TestResultExt<T> {
     #[allow(dead_code)]
@@ -43,55 +40,14 @@ macro_rules! trace_err {
 
 pub(crate) use trace_err; // Make it available to other modules in the crate
 
-static OXIA_BIN: OnceLock<PathBuf> = OnceLock::new();
-
-fn get_workspace_root() -> Option<PathBuf> {
-    let metadata = MetadataCommand::new().exec().ok()?;
-    Some(PathBuf::from(metadata.workspace_root))
-}
-
-pub fn oxia_cli_path() -> &'static Path {
-    OXIA_BIN.get_or_init(|| {
-        const OXIA_MOD: &str = "github.com/oxia-db/oxia";
-        // Get workspace target dir
-        let workspace_root = get_workspace_root().expect("failed to get workspace root");
-        let go_tools_target = workspace_root.join("target/go-tools");
-        let go_bin_dir = go_tools_target.join("bin");
-        let cmd_path = go_bin_dir.join("cmd");
-
-        if !cmd_path.exists() {
-            let tools_dir = workspace_root.join("go-tools");
-            let vendor_path = tools_dir.join(format!("vendor/{OXIA_MOD}/cmd"));
-            info!(?cmd_path, ?vendor_path, "compile from vendored source");
-
-            let dirs = [
-                ("GOBIN", go_bin_dir),
-                ("GOCACHE", go_tools_target.join("cache")),
-                ("GOMODCACHE", go_tools_target.join("mod")),
-            ];
-            dirs.iter().enumerate().for_each(|(i, (_, d))| {
-                info!(i, ?d);
-                std::fs::create_dir_all(d).unwrap();
-            });
-
-            let envs = {
-                let mut envs = vec![("GOPROXY", "off")];
-                envs.extend(dirs.iter().map(|(k, d)| (*k, d.to_str().unwrap())));
-                envs
-            };
-
-            let status = Command::new("go")
-                .current_dir(tools_dir)
-                .envs(envs)
-                .arg("install")
-                .arg("-mod=vendor")
-                .arg(format!("./vendor/{OXIA_MOD}/cmd"))
-                .status()
-                .expect("failed to run `go install` for oxia CLI");
-            assert!(status.success(), "oxia CLI installation failed");
-        }
-        cmd_path
-    })
+pub fn oxia_cli_path() -> PathBuf {
+    let p = oxia_bin_util::path();
+    assert!(
+        p.exists(),
+        "oxia binary not found, re-build oxia-bin-util. expected: {}",
+        p.display()
+    );
+    p
 }
 
 // Attempt to find `n` unallocated ports.  This function is racy:
