@@ -689,12 +689,13 @@ mod int32_hash_range {
 
         fn get_shard_id(&self, key: &str) -> Option<i64> {
             let h = Self::hash(key);
-            self.ranges
-                .binary_search_by(|x| match h {
-                    _ if h < x.min => Ordering::Less,
-                    _ if h > x.max => Ordering::Greater,
-                    _ => Ordering::Equal,
-                })
+            let found = self.ranges
+                .binary_search_by(|x|
+                    if x.max < h { Ordering::Less }
+                    else if x.min > h { Ordering::Greater }
+                    else { Ordering::Equal }
+                );
+            found
                 .ok()
                 .map(|i| self.ranges[i].id)
         }
@@ -770,6 +771,55 @@ mod int32_hash_range {
             Ok(Mapper {
                 ranges: self.ranges,
             })
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        #[should_panic]
+        fn test_builder_overlaps() {
+            Builder {
+                ranges: vec![
+                    Range{ min: 0, max: 2, id: 0 },
+                    Range{ min: 1, max: 3, id: 1 },
+                ]
+            }.build().unwrap();
+        }
+
+        #[test]
+        #[should_panic]
+        fn test_builder_duplicate_shard_id() {
+            Builder{
+                ranges: vec![
+                    Range{ min: 0, max: 1431655765u32, id: 0 },
+                    Range{ min: 1431655766, max: 2863311531, id: 1 },
+                    Range { min: 2863311532, max: 3015596446, id: 2 },
+                    // hole! [3015596447, 3015596448]
+                    Range { min: 3015596449, max: 4294967295, id: 2 },
+                ],
+            }.build().unwrap();
+        }
+
+        #[test]
+        fn test_get_shard_id() {
+            let mapper = Builder{
+                ranges: vec![
+                    Range{ min: 0, max: 1431655765u32, id: 0 },
+                    Range{ min: 1431655766, max: 2863311531, id: 1 },
+                    Range { min: 2863311532, max: 3015596446, id: 2 },
+                    // hole! [3015596447, 3015596448]
+                    Range { min: 3015596449, max: 4294967295, id: 3 },
+                ],
+            }.build().unwrap();
+
+            assert_eq!(1, mapper.get_shard_id("foo-0").unwrap());
+            assert_eq!(3, mapper.get_shard_id("foo-4").unwrap());
+            assert_eq!(0, mapper.get_shard_id("foo-5").unwrap());
+            assert_eq!(2, mapper.get_shard_id("e199").unwrap());
+            assert!(mapper.get_shard_id("foo-3").is_none());
         }
     }
 } // mod int32_hash_range
