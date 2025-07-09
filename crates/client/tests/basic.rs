@@ -2,6 +2,7 @@ use chrono::Utc;
 use mauricebarnum_oxia_client as client;
 use mauricebarnum_oxia_client::config;
 use std::fs;
+use std::num::NonZeroU32;
 use std::time::Duration;
 use tracing::info;
 
@@ -12,7 +13,8 @@ use common::trace_err;
 #[test_log::test(tokio::test)]
 async fn test_basic() -> Result<(), Box<dyn std::error::Error>> {
     let session_timeout = Duration::from_secs(2);
-    let server = trace_err!(common::TestServer::start())?;
+    let nshards = NonZeroU32::new(3).unwrap();
+    let server = trace_err!(common::TestServer::start_nshards(nshards))?;
     let builder = config::Builder::new()
         .retry(config::RetryConfig::new(3, Duration::from_millis(23)))
         .max_parallel_requests(3)
@@ -74,7 +76,7 @@ async fn test_basic() -> Result<(), Box<dyn std::error::Error>> {
     info!(op = "put", ?result);
 
     let sleep_time = session_timeout.mul_f32(2.01);
-    info!(?sleep_time, "sleepging to let session epire");
+    info!(?sleep_time, "sleepging to let session exkjjpire");
     tokio::time::sleep(sleep_time).await;
     drop(client);
 

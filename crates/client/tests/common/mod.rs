@@ -4,6 +4,7 @@ use cargo_metadata::MetadataCommand;
 use mauricebarnum_oxia_client::errors::Error as ClientError;
 use mauricebarnum_oxia_client::{Client, config};
 use std::net::TcpStream;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
@@ -136,6 +137,7 @@ struct TestServerArgs {
     metrics_addr: String,
     db_dir: path::PathBuf,
     wal_dir: path::PathBuf,
+    nshards: NonZeroU32,
 }
 
 impl TestServerArgs {
@@ -150,6 +152,8 @@ impl TestServerArgs {
             .arg(self.service_addr.clone())
             .arg("-m")
             .arg(self.metrics_addr.clone())
+            .arg("-s")
+            .arg(self.nshards.get().to_string())
             .stdin(Stdio::null());
         let child = trace_err!(cmd.spawn())?;
         trace_err!(wait_for_ready(&self.service_addr, 30_000))?;
@@ -164,7 +168,7 @@ pub struct TestServer {
 }
 
 impl TestServer {
-    pub fn start() -> io::Result<Self> {
+    pub fn start_nshards(nshards: NonZeroU32) -> io::Result<Self> {
         let [service_port, metrics_port] = trace_err!(find_free_ports(2))?.try_into().unwrap();
         let data_dir = trace_err!(tempfile::Builder::new().disable_cleanup(true).tempdir())?;
         let args = TestServerArgs {
@@ -172,6 +176,7 @@ impl TestServer {
             metrics_addr: format!("127.0.0.1:{metrics_port}"),
             db_dir: data_dir.path().join("db"),
             wal_dir: data_dir.path().join("wal"),
+            nshards,
         };
         let process = trace_err!(args.start())?;
         Ok(TestServer {
@@ -179,6 +184,10 @@ impl TestServer {
             args,
             process,
         })
+    }
+
+    pub fn start() -> io::Result<Self> {
+        Self::start_nshards(NonZeroU32::new(1).unwrap())
     }
 
     pub fn shutdown(&mut self) -> io::Result<()> {
