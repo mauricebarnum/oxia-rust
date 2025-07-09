@@ -867,6 +867,7 @@ impl ShardAssignmentTask {
         // Now potentially make network calls to connect clients.
         let mut clients = Vec::with_capacity(ns.assignments.len());
         for a in &ns.assignments {
+            info!(?a, "processing assignments");
             let grpc = self.cache.get(&a.leader).await?;
             let client = Client::new(grpc, self.config.clone(), a.shard, &a.leader)?;
             clients.push((a.shard, client));
