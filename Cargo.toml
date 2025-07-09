@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/cmd", "crates/client", "crates/common"]
+members = ["crates/oxia-bin-util", "crates/cmd", "crates/client", "crates/common"]
 resolver = "2"
 
 [workspace.package]
