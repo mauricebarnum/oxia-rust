@@ -41,11 +41,11 @@ jobs:
       - name: detect-vendored-build
         id: vendored
         run: |
+          vendored=false
           if [ -f .cargo/config.toml ] && grep -q 'vendored-sources' .cargo/config.toml; then
-            echo "vendored=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "vendored=false" >> "$GITHUB_OUTPUT"
+            vendored=true
           fi
+          echo "vendored=${vendored}" >> "$GITHUB_OUTPUT"
 
       - name: fetch-dependencies
         if: steps.vendored.outputs.vendored == 'false'
