@@ -38,6 +38,12 @@ jobs:
       - name: enable-build-cache
         uses: Swatinem/rust-cache@v2
 
+      - name: prepare go cache
+        run: |
+          cache="$PWD/target/.gocache"
+          test -d $cache || mkdir -p $cache
+          echo "GOCACHE=$cache" >> $GITHUB_ENV
+
       - name: detect-vendored-build
         id: vendored
         run: |
