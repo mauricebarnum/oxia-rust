@@ -25,17 +25,13 @@ async fn test_basic() -> anyhow::Result<()> {
     for i in 0..11 {
         key = format!("foo-{i}");
         for j in 0..7 {
-            let result = trace_err!(
-                client
-                    .put(key.clone(), format!("value-{i}-{j}").as_bytes().to_vec(),)
-                    .await
-            )?;
+            let result = trace_err!(client.put(&key, format!("value-{i}-{j}")).await)?;
             info!(op = "put", ?result);
         }
     }
 
     // And do a get
-    let result = client.get(key.clone()).await?;
+    let result = client.get(&key).await?;
     info!(op = "get", ?result);
 
     // Let's list all of the keys
@@ -45,7 +41,7 @@ async fn test_basic() -> anyhow::Result<()> {
     }
 
     // Delete the last key inserted
-    trace_err!(client.delete(key.clone()).await)?;
+    trace_err!(client.delete(&key).await)?;
 
     // Scan for all of the keys
 
@@ -55,18 +51,14 @@ async fn test_basic() -> anyhow::Result<()> {
     }
 
     // And do another get, this time expecting KeyNotFound
-    if let Some(r) = client.get(key.clone()).await? {
+    if let Some(r) = client.get(&key).await? {
         return Err(anyhow::anyhow!("unexpected get success: {r:?}"));
     }
 
     let result = client
         .put_with_options(
             "ephemeral_key",
-            Utc::now()
-                .format("%Y-%m-%dT%H:%M:%SZ")
-                .to_string()
-                .as_bytes()
-                .to_vec(),
+            Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
             client::PutOptions::new().ephemeral(),
         )
         .await?;
