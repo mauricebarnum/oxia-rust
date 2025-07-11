@@ -5,6 +5,12 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      extra_env:
+        description: 'Extra environment variables (e.g., FOO=bar BAZ=qux)'
+        required: false
+        default: ''
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,6 +20,16 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
+      - name: set-extra-env
+        if: github.event.inputs.extra_env != ''
+        run: |
+          echo "Setting extra environment variables: ${{ github.event.inputs.extra_env }}"
+          # Export each variable for subsequent steps
+          for pair in ${{ github.event.inputs.extra_env }}; do
+            echo "Exporting $pair"
+            echo "$pair" >> $GITHUB_ENV
+          done
+
       - name: checkout
         uses: actions/checkout@v4
 
