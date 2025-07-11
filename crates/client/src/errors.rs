@@ -191,7 +191,7 @@ impl From<tonic::Status> for Error {
             tonic::Code::DeadlineExceeded => true,
             tonic::Code::Cancelled => value.message() == "Timeout expired",
             _ => false,
-        }; 
+        };
         let boxed = Box::new(value);
         if as_timeout {
             Error::RequestTimeout { source: boxed }
@@ -223,9 +223,9 @@ impl From<io::Error> for Error {
 
 #[cfg(test)]
 mod tests {
-    use tracing::info;
     use super::*;
-    
+    use tracing::info;
+
     #[test_log::test]
     fn test_error_is_retryable_true() {
         let errs = [
@@ -243,7 +243,7 @@ mod tests {
             assert!(e.is_retryable());
         }
     }
-    
+
     #[test_log::test]
     fn test_error_is_retryable_false() {
         let errs = [
