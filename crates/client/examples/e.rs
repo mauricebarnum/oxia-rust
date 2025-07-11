@@ -28,15 +28,14 @@ fn main() -> Result<()> {
 
         let now_str = Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
         let key = format!("{}-{}", "ephemeral_key", now_str);
-        let val = key.as_bytes().to_vec();
         let result = client
-            .put_with_options(key.clone(), val, PutOptions::new().ephemeral())
+            .put_with_options(&key, key.clone(), PutOptions::new().ephemeral())
             .await?;
         println!("put result: {result:?}");
 
         tokio::time::sleep(Duration::from_secs(5)).await;
 
-        let result = client.get(key.clone()).await?;
+        let result = client.get(&key).await?;
         println!("get result: {result:?}");
         drop(client);
 
@@ -48,7 +47,7 @@ fn main() -> Result<()> {
         client.connect().await?;
 
         println!("re-reading key {key}");
-        let result = client.get(key).await?;
+        let result = client.get(&key).await?;
         println!("get result: {result:?}");
 
         Ok(())
