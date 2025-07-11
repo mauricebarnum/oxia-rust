@@ -1,0 +1,32 @@
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-check
+        name: cargo check
+        entry: cargo check
+        language: system
+        types: [rust]
+        args: ["--all-targets", "--all-features", "--frozen"]
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy
+        language: system
+        types: [rust]
+        args: ["--all-targets", "--all-features", "--frozen"]
+        pass_filenames: false
+
+      - id: cargo-fmt
+        name: carog fmt
+        entry: cargo fmt
+        language: system
+        types: [rust]
+        args: ["--check"]
+        pass_filenames: false
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=1000"]
