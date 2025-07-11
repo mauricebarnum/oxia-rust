@@ -689,15 +689,16 @@ mod int32_hash_range {
 
         fn get_shard_id(&self, key: &str) -> Option<i64> {
             let h = Self::hash(key);
-            let found = self.ranges
-                .binary_search_by(|x|
-                    if x.max < h { Ordering::Less }
-                    else if x.min > h { Ordering::Greater }
-                    else { Ordering::Equal }
-                );
-            found
-                .ok()
-                .map(|i| self.ranges[i].id)
+            let found = self.ranges.binary_search_by(|x| {
+                if x.max < h {
+                    Ordering::Less
+                } else if x.min > h {
+                    Ordering::Greater
+                } else {
+                    Ordering::Equal
+                }
+            });
+            found.ok().map(|i| self.ranges[i].id)
         }
     }
 
@@ -783,37 +784,83 @@ mod int32_hash_range {
         fn test_builder_overlaps() {
             Builder {
                 ranges: vec![
-                    Range{ min: 0, max: 2, id: 0 },
-                    Range{ min: 1, max: 3, id: 1 },
-                ]
-            }.build().unwrap();
+                    Range {
+                        min: 0,
+                        max: 2,
+                        id: 0,
+                    },
+                    Range {
+                        min: 1,
+                        max: 3,
+                        id: 1,
+                    },
+                ],
+            }
+            .build()
+            .unwrap();
         }
 
         #[test]
         #[should_panic]
         fn test_builder_duplicate_shard_id() {
-            Builder{
+            Builder {
                 ranges: vec![
-                    Range{ min: 0, max: 1431655765u32, id: 0 },
-                    Range{ min: 1431655766, max: 2863311531, id: 1 },
-                    Range { min: 2863311532, max: 3015596446, id: 2 },
+                    Range {
+                        min: 0,
+                        max: 1431655765u32,
+                        id: 0,
+                    },
+                    Range {
+                        min: 1431655766,
+                        max: 2863311531,
+                        id: 1,
+                    },
+                    Range {
+                        min: 2863311532,
+                        max: 3015596446,
+                        id: 2,
+                    },
                     // hole! [3015596447, 3015596448]
-                    Range { min: 3015596449, max: 4294967295, id: 2 },
+                    Range {
+                        min: 3015596449,
+                        max: 4294967295,
+                        id: 2,
+                    },
                 ],
-            }.build().unwrap();
+            }
+            .build()
+            .unwrap();
         }
 
         #[test]
         fn test_get_shard_id() {
-            let mapper = Builder{
+            let mapper = Builder {
                 ranges: vec![
-                    Range{ min: 0, max: 1431655765u32, id: 0 },
-                    Range{ min: 1431655766, max: 2863311531, id: 1 },
-                    Range { min: 2863311532, max: 3015596446, id: 2 },
+                    Range {
+                        min: 0,
+                        max: 1431655765u32,
+                        id: 0,
+                    },
+                    Range {
+                        min: 1431655766,
+                        max: 2863311531,
+                        id: 1,
+                    },
+                    Range {
+                        min: 2863311532,
+                        max: 3015596446,
+                        id: 2,
+                    },
                     // hole! [3015596447, 3015596448]
-                    Range { min: 3015596449, max: 4294967295, id: 3 },
+                    Range {
+                        min: 3015596449,
+                        max: 4294967295,
+                        id: 3,
+                    },
                 ],
-            }.build().unwrap();
+            }
+            .build()
+            .unwrap();
 
             assert_eq!(1, mapper.get_shard_id("foo-0").unwrap());
             assert_eq!(3, mapper.get_shard_id("foo-4").unwrap());
