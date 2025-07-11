@@ -66,4 +66,5 @@ jobs:
         run: cargo build --frozen --all-targets
 
       - name: test
+        timeout-minutes: 10
         run: cargo nextest run --frozen --no-fail-fast --verbose
