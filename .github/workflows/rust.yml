@@ -37,6 +37,7 @@ jobs:
         uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: 1.88
+          components: clippy, rustfmt
 
       - name: install cargo nextest
         uses: taiki-e/install-action@nextest
@@ -77,6 +78,28 @@ jobs:
         run: |
           cargo update --dry-run # update crate index
           cargo fetch --locked   # fetch dependencies: last network dependency
+
+      - name: install pre-commit
+        run: pipx install pre-commit
+
+      - name: cache pre-commit
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+
+      - name: run pre-commit hooks (non-blocking)
+        id: precommit
+        continue-on-error: true
+        run: |
+          echo "::group::pre-commit"
+          pre-commit run --all-files
+          echo "::endgroup::"
+
+      - name: flag pre-commit status if failed
+        if: steps.precommit.outcome == 'failure'
+        run: |
+          echo "::warning file=.pre-commit-config.yaml::Pre-commit checks failed. Run \`pre-commit run --all-files\` locally to fix."
 
       - name: build
         run: cargo build --frozen --all-targets
