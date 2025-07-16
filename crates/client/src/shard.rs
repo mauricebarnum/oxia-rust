@@ -14,17 +14,16 @@ use tonic::Streaming;
 use tonic::metadata::MetadataValue;
 use tracing::{debug, info, trace, warn};
 
+use crate::pool::ChannelPool;
 use crate::{
-    DeleteOptions, Error, GetOptions, GetResponse, GrpcClient, GrpcClientCache, ListOptions,
-    ListResponse, OxiaError, PutOptions, PutResponse, RangeScanOptions, RangeScanResponse, Result,
-    config,
+    DeleteOptions, Error, GetOptions, GetResponse, GrpcClient, ListOptions, ListResponse,
+    OxiaError, PutOptions, PutResponse, RangeScanOptions, RangeScanResponse, Result, config,
+    create_grpc_client,
 };
 use mauricebarnum_oxia_common::proto as oxia_proto;
 
 /// Constants for Oxia protocol
 const STATUS_OK: i32 = 0;
-
-// ============= Concrete Implementations =============
 
 #[derive(Debug)]
 struct Session {
@@ -879,7 +878,7 @@ struct Shards {
 
 struct ShardAssignmentTask {
     config: Arc<config::Config>,
-    cache: GrpcClientCache,
+    channel_pool: ChannelPool,
     shards: Arc<Mutex<Shards>>,
     ready: Option<oneshot::Sender<Result<()>>>,
 }
@@ -887,13 +886,13 @@ struct ShardAssignmentTask {
 impl ShardAssignmentTask {
     fn new(
         config: Arc<config::Config>,
-        cache: GrpcClientCache,
+        channel_pool: ChannelPool,
         shards: Arc<Mutex<Shards>>,
         ready: oneshot::Sender<Result<()>>,
     ) -> Self {
         Self {
             config,
-            cache,
+            channel_pool,
             shards,
             ready: Some(ready),
         }
@@ -915,7 +914,7 @@ impl ShardAssignmentTask {
         let mut clients = Vec::with_capacity(ns.assignments.len());
         for a in &ns.assignments {
             info!(?a, "processing assignments");
-            let grpc = self.cache.get(&a.leader).await?;
+            let grpc = create_grpc_client(&a.leader, &self.channel_pool).await?;
             let client = Client::new(grpc, self.config.clone(), a.shard, &a.leader)?;
             clients.push((a.shard, client));
         }
@@ -977,7 +976,8 @@ impl ShardAssignmentTask {
 #[derive(Debug)]
 pub(super) struct Manager {
     #[allow(dead_code)] // cache is actually used
-    cache: GrpcClientCache,
+    // cache: GrpcClientCache,
+    channel_pool: ChannelPool,
     shards: Arc<Mutex<Shards>>,
     shutdown_requested: Arc<AtomicBool>,
     task_handle: JoinHandle<()>,
@@ -988,15 +988,20 @@ impl Manager {
     pub(super) async fn new(
         config: &Arc<config::Config>,
         cluster: &GrpcClient,
-        cache: &GrpcClientCache,
+        channel_pool: &ChannelPool,
     ) -> Result<Self> {
         let shards = Arc::new(Mutex::new(Shards::default()));
         let shutdown_requested = Arc::new(AtomicBool::new(false));
-        let task_handle =
-            Self::start_shard_assignment_task(config, cluster, cache, &shards, &shutdown_requested)
-                .await?;
+        let task_handle = Self::start_shard_assignment_task(
+            config,
+            cluster,
+            channel_pool,
+            &shards,
+            &shutdown_requested,
+        )
+        .await?;
         Ok(Manager {
-            cache: cache.clone(),
+            channel_pool: channel_pool.clone(),
             shards,
             shutdown_requested,
             task_handle,
@@ -1005,15 +1010,7 @@ impl Manager {
 
     /// Gets a client for the shard that handles the given key
     pub(super) async fn get_client(&self, _namespace: &str, key: &str) -> Result<Client> {
-        // TODO: figure out if this is worth the trouble. I suspect not until the Rust gets smarter about eliding the state machine from unnecessary
-        // paths. But leave it here to ponder and play with.
-
-        let guard = if let Ok(guard) = self.shards.try_lock() {
-            guard
-        } else {
-            self.shards.lock().await
-        };
-
+        let guard = self.shards.lock().await;
         let shard_id = guard
             .mapper
             .get_shard_id(key)
@@ -1071,44 +1068,17 @@ impl Manager {
         self.shards.lock().await.clients.len()
     }
 
-    #[allow(dead_code)]
-    pub(super) async fn reconnect(&mut self, dest: impl AsRef<str>) -> Result<()> {
-        self.cache
-            .reconnect(dest.as_ref(), |grpc| {
-                let shards = self.shards.clone();
-                let dest = dest.as_ref().to_string();
-                let grpc = grpc.clone();
-                async move {
-                    // let mut guard = shards.lock().await;
-                    for c in shards.lock().await.clients.iter_mut() {
-                        let data = &mut c.1.data;
-                        if data.leader == dest {
-                            *data = Arc::new(ClientData::new(
-                                data.config.clone(),
-                                grpc.clone(),
-                                data.shard_id,
-                                data.leader.clone(),
-                                data.meta.clone(),
-                            ))
-                        }
-                    }
-                }
-            })
-            .await?;
-        Ok(())
-    }
-
-    /// blah
     async fn start_shard_assignment_task(
         config: &Arc<config::Config>,
         cluster: &GrpcClient,
-        cache: &GrpcClientCache,
+        channel_pool: &ChannelPool,
         shards: &Arc<Mutex<Shards>>,
         shutdown_requested: &Arc<AtomicBool>,
     ) -> Result<JoinHandle<()>> {
         let (tx, rx) = oneshot::channel();
         let cluster = cluster.clone();
-        let mut task = ShardAssignmentTask::new(config.clone(), cache.clone(), shards.clone(), tx);
+        let mut task =
+            ShardAssignmentTask::new(config.clone(), channel_pool.clone(), shards.clone(), tx);
         let shutdown_requested = shutdown_requested.clone();
         let handle = tokio::spawn(async move {
             task.run(cluster, shutdown_requested).await;
