@@ -1,5 +1,5 @@
 use crate::KeyComparisonType;
-use std::{fmt::Display, io};
+use std::{fmt::Display, io, sync::Arc};
 use thiserror::Error as ThisError;
 
 /// Errors that map directly from the Oxia gRPC service responses (excluding success/OK)
@@ -134,6 +134,12 @@ pub enum Error {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+
+    #[error("Shared error: {0}")]
+    Shared(#[source] Arc<Error>),
+
+    #[error("Cancelled")]
+    Cancelled,
 }
 
 impl Error {
@@ -218,6 +224,12 @@ impl From<io::Error> for Error {
         } else {
             Error::Io(value)
         }
+    }
+}
+
+impl From<Arc<Error>> for Error {
+    fn from(value: Arc<Error>) -> Self {
+        Error::Shared(value)
     }
 }
 

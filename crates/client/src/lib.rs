@@ -1,25 +1,22 @@
-use std::{
-    cmp::Ordering,
-    collections::{HashMap, hash_map::Entry},
-    fmt::Display,
-    sync::Arc,
-};
+use std::{cmp::Ordering, fmt::Display, sync::Arc};
 
 use bytes::Bytes;
 
 use futures::{StreamExt, TryStreamExt};
 
-use tokio::sync::RwLock;
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::Channel;
 
 pub mod config;
 pub mod errors;
+mod pool;
 mod shard;
 mod util;
 
 use mauricebarnum_oxia_common::proto as oxia_proto;
 
 pub use errors::*;
+
+use crate::pool::ChannelPool;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -495,61 +492,25 @@ impl From<oxia_proto::RangeScanResponse> for RangeScanResponse {
 
 type GrpcClient = oxia_proto::OxiaClientClient<Channel>;
 
-#[derive(Clone, Debug, Default)]
-struct GrpcClientCache(Arc<RwLock<HashMap<String, GrpcClient>>>);
-
-impl GrpcClientCache {
-    fn new() -> Self {
-        GrpcClientCache(Arc::new(RwLock::new(HashMap::new())))
-    }
-
-    async fn try_get(&self, dest: &str) -> Option<GrpcClient> {
-        // See if we already have the client.  This should be the common case
-        let guard = self.0.read().await;
-        guard.get(dest).cloned()
-    }
-
-    async fn new_client(dest: &str) -> Result<GrpcClient> {
-        let endpoint = Endpoint::from_shared(dest.to_string())?;
-        let channel = endpoint.connect().await?;
-        Ok(GrpcClient::new(channel))
-    }
-
-    async fn get(&self, dest: &str) -> Result<GrpcClient> {
-        let url = "http://".to_string() + dest;
-        if let Some(c) = self.try_get(&url).await {
-            return Ok(c);
-        }
-
-        let mut guard = self.0.write().await;
-        let c = match guard.entry(url.clone()) {
-            Entry::Occupied(e) => e.get().clone(),
-            Entry::Vacant(e) => e.insert(Self::new_client(&url).await?).clone(),
-        };
-        Ok(c)
-    }
-
-    #[allow(dead_code)]
-    async fn reconnect<F, Fut>(&self, dest: &str, callback: F) -> Result<()>
-    where
-        F: FnOnce(&GrpcClient) -> Fut,
-        Fut: std::future::Future<Output = ()>,
-    {
-        // Connect to the destination without blocking access to the cache.  If there are
-        // interleaved calls to this method, it's not deterministic which
-        let c = Self::new_client(dest).await?;
-
-        // Update the cache for future lookups to get the new client
-        let mut guard = self.0.write().await;
-        guard.insert(dest.to_string(), c.clone());
-        callback(&c).await;
-        Ok(())
-    }
+pub(crate) async fn create_grpc_client(
+    dest: &str,
+    channel_pool: &ChannelPool,
+) -> Result<GrpcClient> {
+    let url = {
+        // TODO: http v https
+        const SCHEME: &str = "http://";
+        let mut url = String::with_capacity(SCHEME.len() + dest.len());
+        url.push_str(SCHEME);
+        url.push_str(dest);
+        url
+    };
+    let channel = channel_pool.get(&url).await?;
+    Ok(GrpcClient::new(channel))
 }
 
 #[derive(Debug)]
 pub struct Client {
-    grpc_cache: GrpcClientCache,
+    channel_pool: ChannelPool,
     cluster: Option<GrpcClient>,
     shards: Option<shard::Manager>,
     config: Arc<config::Config>,
@@ -558,7 +519,7 @@ pub struct Client {
 impl Client {
     pub fn new(config: Arc<config::Config>) -> Self {
         Self {
-            grpc_cache: GrpcClientCache::new(),
+            channel_pool: ChannelPool::new(&config),
             cluster: None,
             shards: None,
             config,
@@ -566,8 +527,8 @@ impl Client {
     }
 
     pub async fn connect(&mut self) -> Result<()> {
-        let grpc = self.grpc_cache.get(self.config.service_addr()).await?;
-        self.shards = Some(shard::Manager::new(&self.config, &grpc, &self.grpc_cache).await?);
+        let grpc = create_grpc_client(self.config.service_addr(), &self.channel_pool).await?;
+        self.shards = Some(shard::Manager::new(&self.config, &grpc, &self.channel_pool).await?);
         self.cluster = Some(grpc.clone());
         Ok(())
     }
