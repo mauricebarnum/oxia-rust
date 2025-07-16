@@ -16,9 +16,9 @@ use tracing::{debug, info, trace, warn};
 
 use crate::pool::ChannelPool;
 use crate::{
-    DeleteOptions, Error, GetOptions, GetResponse, GrpcClient, ListOptions, ListResponse,
-    OxiaError, PutOptions, PutResponse, RangeScanOptions, RangeScanResponse, Result, config,
-    create_grpc_client,
+    DeleteOptions, DeleteRangeOptions, Error, GetOptions, GetResponse, GrpcClient, ListOptions,
+    ListResponse, OxiaError, PutOptions, PutResponse, RangeScanOptions, RangeScanResponse, Result,
+    config, create_grpc_client,
 };
 use mauricebarnum_oxia_common::proto as oxia_proto;
 
@@ -75,7 +75,7 @@ pub struct Client {
 enum ExpectedWriteResponse {
     Put,
     Delete,
-    // DeleteRange,
+    DeleteRange,
 }
 
 /// Checks if a write response matches expectations
@@ -83,7 +83,7 @@ fn check_write_response(r: &oxia_proto::WriteResponse, x: ExpectedWriteResponse)
     let (nputs, ndeletes, nranges): (usize, usize, usize) = match x {
         ExpectedWriteResponse::Put => (1, 0, 0),
         ExpectedWriteResponse::Delete => (0, 1, 0),
-        // ExpectedWriteResponse::DeleteRange => (0, 0, 1),
+        ExpectedWriteResponse::DeleteRange => (0, 0, 1),
     };
     if r.puts.len() != nputs || r.deletes.len() != ndeletes || r.delete_ranges.len() != nranges {
         return Some(Error::Custom(format!(
@@ -111,6 +111,19 @@ fn check_delete_response(r: &oxia_proto::WriteResponse) -> Option<Error> {
     }
 
     if let Some(d) = r.deletes.first() {
+        if d.status != STATUS_OK {
+            return Some(OxiaError::from(d.status).into());
+        }
+    }
+    None
+}
+
+fn check_delete_range_response(r: &oxia_proto::WriteResponse) -> Option<Error> {
+    if let Some(e) = check_write_response(r, ExpectedWriteResponse::DeleteRange) {
+        return Some(e);
+    }
+
+    if let Some(d) = r.delete_ranges.first() {
         if d.status != STATUS_OK {
             return Some(OxiaError::from(d.status).into());
         }
@@ -194,6 +207,10 @@ impl Client {
             )),
             session: Arc::new(OnceCell::new()),
         })
+    }
+
+    pub(super) fn shard_id(&self) -> i64 {
+        self.data.shard_id
     }
 
     async fn create_session(&self) -> Result<Session> {
@@ -287,6 +304,25 @@ impl Client {
                 expected_version_id: opts.expected_version_id,
             }],
             delete_ranges: vec![],
+        }
+    }
+
+    /// Creates a DeleteRangeRequest with the appropriate options
+    fn make_delete_range_req(
+        &self,
+        _opts: &DeleteRangeOptions,
+        start_inclusive: impl Into<String>,
+        end_exclusive: impl Into<String>,
+    ) -> oxia_proto::WriteRequest {
+        let data = &self.data;
+        oxia_proto::WriteRequest {
+            shard: Some(data.shard_id),
+            puts: vec![],
+            deletes: vec![],
+            delete_ranges: vec![oxia_proto::DeleteRangeRequest {
+                start_inclusive: start_inclusive.into(),
+                end_exclusive: end_exclusive.into(),
+            }],
         }
     }
 
@@ -527,6 +563,19 @@ impl Client {
         }
 
         Ok(())
+    }
+
+    /// Deletes a range of keys with the given options
+    pub(super) async fn delete_range(
+        &self,
+        start_inclusive: impl Into<String>,
+        end_exclusive: impl Into<String>,
+        options: DeleteRangeOptions,
+    ) -> Result<()> {
+        let req = self.make_delete_range_req(&options, start_inclusive, end_exclusive);
+        let rsp = self.process_write(req).await?;
+
+        check_delete_range_response(&rsp).map_or_else(|| Ok(()), Err)
     }
 
     /// Lists keys in the given range with options
@@ -876,6 +925,32 @@ struct Shards {
     mapper: int32_hash_range::Mapper,
 }
 
+impl Shards {
+    fn find_by_id(&self, id: i64) -> Result<Client> {
+        // Linear or binary search?  It depends.  Since it's easy let's just code up both and make
+        // it someone else's problem to pick the crossover
+        const BINARY_SEARCH_CROSSOVER: usize = 16;
+        let c = if self.clients.len() > BINARY_SEARCH_CROSSOVER {
+            self.clients
+                .binary_search_by_key(&id, |(k, _)| *k)
+                .ok()
+                .map(|i| &self.clients[i])
+        } else {
+            self.clients.iter().find(|x| x.0 == id)
+        };
+        c.map(|c| c.1.clone())
+            .ok_or_else(|| Error::NoShardMapping(id))
+    }
+
+    fn find_by_key(&self, key: &str) -> Result<Client> {
+        let id = self
+            .mapper
+            .get_shard_id(key)
+            .ok_or_else(|| Error::Custom(format!("unable to map {key} to shard")))?;
+        self.find_by_id(id)
+    }
+}
+
 struct ShardAssignmentTask {
     config: Arc<config::Config>,
     channel_pool: ChannelPool,
@@ -1008,29 +1083,14 @@ impl Manager {
         })
     }
 
+    /// Gets a client by shard id
+    pub(super) async fn get_client_by_shard_id(&self, _namespace: &str, id: i64) -> Result<Client> {
+        self.shards.lock().await.find_by_id(id)
+    }
+
     /// Gets a client for the shard that handles the given key
     pub(super) async fn get_client(&self, _namespace: &str, key: &str) -> Result<Client> {
-        let guard = self.shards.lock().await;
-        let shard_id = guard
-            .mapper
-            .get_shard_id(key)
-            .ok_or_else(|| Error::Custom(format!("unable to map {key} to shard")))?;
-
-        // Linear or binary search?  It depends.  Since it's easy let's just code up both and make
-        // it someone else's problem to pick the crossover
-        const BINARY_SEARCH_CROSSOVER: usize = 16;
-        let c = if guard.clients.len() > BINARY_SEARCH_CROSSOVER {
-            guard
-                .clients
-                .binary_search_by_key(&shard_id, |(k, _)| *k)
-                .ok()
-                .map(|i| &guard.clients[i])
-        } else {
-            guard.clients.iter().find(|x| x.0 == shard_id)
-        }
-        .ok_or_else(|| Error::NoShardMapping(shard_id))?;
-
-        Ok(c.1.clone())
+        self.shards.lock().await.find_by_key(key)
     }
 
     /// Executes a function on each shard client
