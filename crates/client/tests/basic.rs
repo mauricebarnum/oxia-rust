@@ -10,11 +10,14 @@ mod common;
 use common::TestResultExt;
 use common::trace_err;
 
+fn non_zero(x: u32) -> NonZeroU32 {
+    NonZeroU32::new(x).unwrap()
+}
+
 #[test_log::test(tokio::test)]
 async fn test_basic() -> anyhow::Result<()> {
     let session_timeout = Duration::from_secs(2);
-    let nshards = NonZeroU32::new(3).unwrap();
-    let server = trace_err!(common::TestServer::start_nshards(nshards))?;
+    let server = trace_err!(common::TestServer::start_nshards(non_zero(4)))?;
     let builder = config::Builder::new()
         .retry(config::RetryConfig::new(3, Duration::from_millis(23)))
         .max_parallel_requests(3)
@@ -112,4 +115,45 @@ async fn test_disconnect() -> anyhow::Result<()> {
 async fn test_disconnect_fail() {
     let r = do_test_disconnect(false).await;
     assert!(r.is_err());
+}
+
+#[test_log::test(tokio::test)]
+async fn test_range_delete() -> anyhow::Result<()> {
+    let nshards = non_zero(3);
+    let server = trace_err!(common::TestServer::start_nshards(nshards))?;
+
+    let builder = config::Builder::new();
+    let client = trace_err!(server.connect(Some(builder)).await)?;
+
+    const N: usize = 8;
+    let keys: Vec<String> = (0..N * 2).map(|i| format!("k{i:04}")).collect();
+    for key in &keys {
+        let r = trace_err!(client.put(key, "").await)?;
+        info!(key, ?r, "put");
+    }
+
+    let result = trace_err!(client.list("", "").await)?;
+    for k in result.keys.iter().filter(|k| keys.contains(k)) {
+        info!(op = "list -- BEFORE RANGE DELETE", key = ?k);
+    }
+
+    trace_err!(client.delete_range(&keys[0], &keys[N]).await)?;
+
+    let result = trace_err!(client.list("", "").await)?;
+    for k in result.keys.iter().filter(|k| keys.contains(k)) {
+        info!(op = "list -- AFTER RANGE DELETE", key = ?k);
+    }
+
+    for key in &keys[0..N] {
+        let r = trace_err!(client.get(key).await)?;
+        info!(key, ?r, "get");
+        assert!(r.is_none());
+    }
+    for key in &keys[N + 1..] {
+        let r = trace_err!(client.get(key).await)?;
+        info!(key, ?r, "get");
+        assert!(r.is_some());
+    }
+
+    Ok(())
 }

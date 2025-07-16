@@ -93,6 +93,12 @@ pub enum UnexpectedServerResponse {
     OverlappingRanges(Box<OverlappingRangesData>),
 }
 
+#[derive(Debug)]
+pub struct ShardError {
+    pub shard: i64,
+    pub err: Error,
+}
+
 #[derive(Debug, ThisError)]
 #[non_exhaustive]
 pub enum Error {
@@ -126,8 +132,11 @@ pub enum Error {
     #[error("Unknown boxed error: {0}")]
     Boxed(#[from] Box<dyn std::error::Error + Send + Sync>),
 
-    #[error("Multiple errors")]
-    Multiple(Vec<Box<Error>>),
+    #[error("Multiple shard errors")]
+    MultipleShardError(Vec<ShardError>),
+
+    #[error("Shard error")]
+    ShardError(Box<crate::ShardError>),
 
     #[error("Request time out")]
     RequestTimeout {
@@ -174,10 +183,10 @@ impl Error {
     }
 
     fn as_io_error(&self) -> Option<&io::Error> {
-        if let Error::Multiple(errs) = self {
+        if let Error::MultipleShardError(errs) = self {
             return errs
                 .iter()
-                .find_map(|boxed_error| boxed_error.as_io_error());
+                .find_map(|boxed_error| boxed_error.err.as_io_error());
         }
 
         let mut source = Some(self as &dyn std::error::Error);
@@ -263,7 +272,7 @@ mod tests {
             Error::NoShardMapping(-1),
             Error::NoServiceAddress,
             Error::Client(crate::ClientError::Internal("client error".into())),
-            Error::Multiple(vec![]),
+            Error::MultipleShardError(vec![]),
             Error::RequestTimeout {
                 source: Box::new(std::io::Error::new(std::io::ErrorKind::TimedOut, "")),
             },

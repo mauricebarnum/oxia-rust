@@ -416,6 +416,16 @@ impl RangeScanOptions {
         self
     }
 
+    pub fn sort(mut self, value: bool) -> Self {
+        self.sort = value;
+        self
+    }
+
+    pub fn partial_ok(mut self, value: bool) -> Self {
+        self.partial_ok = value;
+        self
+    }
+
     pub fn secondary_index_name(mut self, value: impl Into<String>) -> Self {
         self.secondary_index_name = Some(value.into());
         self
@@ -490,6 +500,28 @@ impl From<oxia_proto::RangeScanResponse> for RangeScanResponse {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct DeleteRangeOptions {
+    shard: Option<i64>,
+    partition_key: Option<String>,
+}
+
+impl DeleteRangeOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn shard(mut self, value: i64) -> Self {
+        self.shard = Some(value);
+        self
+    }
+
+    pub fn partition_key(mut self, value: impl Into<String>) -> Self {
+        self.partition_key = Some(value.into());
+        self
+    }
+}
+
 type GrpcClient = oxia_proto::OxiaClientClient<Channel>;
 
 pub(crate) async fn create_grpc_client(
@@ -542,6 +574,15 @@ impl Client {
     async fn get_shard(&self, k: &str) -> Result<shard::Client> {
         let namespace = self.config.namespace();
         let shard = self.get_shards()?.get_client(namespace, k).await?;
+        Ok(shard)
+    }
+
+    async fn get_shard_by_id(&self, id: i64) -> Result<shard::Client> {
+        let namespace = self.config.namespace();
+        let shard = self
+            .get_shards()?
+            .get_client_by_shard_id(namespace, id)
+            .await?;
         Ok(shard)
     }
 
@@ -657,6 +698,89 @@ impl Client {
     pub async fn delete(&self, key: impl Into<String>) -> Result<()> {
         self.delete_with_options(key, DeleteOptions::default())
             .await
+    }
+
+    pub async fn delete_range_with_options(
+        &self,
+        start_inclusive: impl Into<String>,
+        end_exclusive: impl Into<String>,
+        options: DeleteRangeOptions,
+    ) -> Result<()> {
+        type Args = (shard::Client, String, String, DeleteRangeOptions);
+        let do_delete_range = |(shard, start, end, options): Args| async move {
+            shard.delete_range(start, end, options).await
+        };
+
+        let start = start_inclusive.into();
+        let end = end_exclusive.into();
+
+        if let Some(shard) = {
+            if let Some(pk) = options.partition_key.as_deref() {
+                Some(self.get_shard(pk).await?)
+            } else if let Some(id) = options.shard {
+                Some(self.get_shard_by_id(id).await?)
+            } else {
+                None
+            }
+        } {
+            return self
+                .execute_with_retry(do_delete_range, (shard, start, end, options))
+                .await;
+        }
+
+        let n = match self.config.max_parallel_requests() {
+            0 => usize::MAX,
+            n => n,
+        };
+
+        let mut result_stream = self
+            .get_shards()?
+            .shard_stream(self.config.namespace())
+            .await
+            .map(|shard| {
+                // let shard = shard;
+                let args: Args = (shard.clone(), start.clone(), end.clone(), options.clone());
+                async move {
+                    self.execute_with_retry(do_delete_range, args)
+                        .await
+                        .map_err(|err| {
+                            let boxed = Box::new(ShardError {
+                                shard: shard.shard_id(),
+                                err,
+                            });
+                            Error::ShardError(boxed)
+                        })
+                }
+            })
+            .buffer_unordered(n);
+
+        let mut errs = Vec::new();
+        while let Some(s) = result_stream.next().await {
+            match s {
+                Err(Error::ShardError(e)) => errs.push(*e),
+                Err(_) => return s,
+                Ok(_) => (),
+            }
+        }
+
+        if !errs.is_empty() {
+            return Err(Error::MultipleShardError(errs));
+        }
+
+        Ok(())
+    }
+
+    pub async fn delete_range(
+        &self,
+        start_inclusive: impl Into<String>,
+        end_exclusive: impl Into<String>,
+    ) -> Result<()> {
+        self.delete_range_with_options(
+            start_inclusive,
+            end_exclusive,
+            DeleteRangeOptions::default(),
+        )
+        .await
     }
 
     pub async fn list_with_options(
