@@ -1,5 +1,5 @@
-use std::path::PathBuf;
+use std::path::Path;
 
-pub fn path() -> PathBuf {
-    PathBuf::from(env!("OXIA_BIN_PATH"))
+pub fn path() -> &'static Path {
+    Path::new(env!("OXIA_BIN_PATH"))
 }
