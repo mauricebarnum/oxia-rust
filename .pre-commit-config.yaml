@@ -3,7 +3,7 @@ repos:
     hooks:
       - id: cargo-check
         name: cargo check
-        entry: cargo check
+        entry: env RUSTFLAGS="-D warnings" cargo check
         language: system
         types: [rust]
         args: ["--all-targets", "--all-features", "--frozen"]
@@ -14,7 +14,7 @@ repos:
         entry: cargo clippy
         language: system
         types: [rust]
-        args: ["--all-targets", "--all-features", "--frozen"]
+        args: ["--no-deps", "--all-targets", "--all-features", "--frozen"]
         pass_filenames: false
 
       - id: cargo-fmt
