@@ -1,10 +1,8 @@
-use mauricebarnum_oxia_client::*;
+use mauricebarnum_oxia_client::GetResponse;
 use mauricebarnum_oxia_common::proto as oxia_proto;
 
 fn grpc_to_client(ggr: oxia_proto::GetResponse) -> GetResponse {
-    if ggr.status != 0 {
-        panic!("oops");
-    }
+    assert!((ggr.status == 0), "oops");
     ggr.into()
 }
 

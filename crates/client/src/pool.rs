@@ -13,7 +13,7 @@ use crate::config::Config;
 type CompletionResult = std::result::Result<Channel, Arc<Error>>;
 
 mod inner {
-    use super::*;
+    use super::{Arc, Channel, CompletionResult, HashMap, RwLock, broadcast, config};
 
     #[derive(Clone, Debug)]
     pub(super) enum Item {
@@ -98,7 +98,7 @@ impl<F: ChannelFactory> ChannelPool<F> {
     // Return a pooled item, waiting for a pending insert if one is in progress.
     // The pending insert may fail, which is why this is wrapped in Result<>
     async fn try_get(&self, target: &str) -> Option<CompletionResult> {
-        use inner::*;
+        use inner::Item;
         let guard = self.inner.state.read().await;
         let item = guard.clients.get(target)?;
         match item {
@@ -126,7 +126,7 @@ impl<F: ChannelFactory> ChannelPool<F> {
         match tx.send(r.clone()) {
             Err(err) => warn!(?err, "ChannelPool::get() send completion failed"),
             Ok(subscriptions) => {
-                info!(subscriptions, "ChannelPool::get() send completion")
+                info!(subscriptions, "ChannelPool::get() send completion");
             }
         }
 
@@ -138,7 +138,7 @@ impl<F: ChannelFactory> ChannelPool<F> {
             match tx.send(r) {
                 Err(err) => warn!(?err, "ChannelPool::get() send completion failed"),
                 Ok(subscriptions) => {
-                    info!(subscriptions, "ChannelPool::get() send completion")
+                    info!(subscriptions, "ChannelPool::get() send completion");
                 }
             }
             guard.clients.remove(target);
@@ -151,7 +151,7 @@ impl<F: ChannelFactory> ChannelPool<F> {
         tx: broadcast::Sender<CompletionResult>,
         r: Result<Channel>,
     ) -> Result<Channel> {
-        use inner::*;
+        use inner::Item;
 
         // If the entry was removed while we had the lock dropped, discard the channel.
         // There's no need to notify anyone waiting for a completion, when the the
@@ -179,12 +179,12 @@ impl<F: ChannelFactory> ChannelPool<F> {
 
                             match tx.send(notification.clone()) {
                                 Err(err) => {
-                                    warn!(?err, "ChannelPool::get() send completion failed")
+                                    warn!(?err, "ChannelPool::get() send completion failed");
                                 }
                                 Ok(subscriptions) => {
-                                    info!(subscriptions, "ChannelPool::get() send completion")
+                                    info!(subscriptions, "ChannelPool::get() send completion");
                                 }
-                            };
+                            }
 
                             // Now map the notification back to a cloneable Result
                             notification.map_err(Error::from)
@@ -203,7 +203,7 @@ impl<F: ChannelFactory> ChannelPool<F> {
 
     #[allow(dead_code)]
     pub(crate) async fn get(&self, target: &str) -> Result<Channel> {
-        use inner::*;
+        use inner::Item;
 
         // Already there, we're done and don't need the write lock
         if let Some(item) = self.try_get(target).await {

@@ -18,3 +18,7 @@ tonic = { workspace = true }
 glob = "0.3.2"
 prost-build = { workspace = true }
 tonic-build = { workspace = true }
+
+[lints.clippy]
+all = "allow"
+pedantic = "allow"

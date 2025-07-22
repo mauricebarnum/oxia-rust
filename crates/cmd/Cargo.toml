@@ -6,3 +6,6 @@ edition.workspace = true
 [dependencies]
 mauricebarnum-oxia-client = { path = "../client" }
 mauricebarnum-oxia-common = { path = "../common" }
+
+[lints]
+workspace = true
