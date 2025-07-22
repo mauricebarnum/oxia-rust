@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use chrono::Utc;
-use mauricebarnum_oxia_client::*;
+use mauricebarnum_oxia_client::{Client, Error, PutOptions, Result, config};
 use tracing_subscriber::{EnvFilter, fmt};
 // use tracing::{debug, error, info, span, warn};
 // use tracing_subscriber::{EnvFilter, fmt};

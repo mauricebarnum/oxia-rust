@@ -1,4 +1,4 @@
-use mauricebarnum_oxia_client::*;
+use mauricebarnum_oxia_client::{Client, Result, config};
 use std::time::Duration;
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -7,6 +7,8 @@ fn main() -> Result<()> {
         std::env::set_var("RUST_BACKTRACE", "1");
     }
     tokio::runtime::Runtime::new()?.block_on(async {
+        const SECONDS: u64 = 5;
+
         fmt()
             .with_env_filter(
                 EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -29,7 +31,6 @@ fn main() -> Result<()> {
 
         client.connect().await?;
 
-        const SECONDS: u64 = 5;
         println!("letting background processing to run for {SECONDS} seconds");
         tokio::time::sleep(Duration::from_secs(SECONDS)).await;
 

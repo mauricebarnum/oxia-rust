@@ -55,7 +55,7 @@ pub(crate) fn compare_with_slash(xa: impl AsRef<str>, ya: impl AsRef<str>) -> Or
                 x = &x[xi + 1..];
                 y = &y[xi + 1..];
             }
-        };
+        }
     }
 
     x.cmp(y)
@@ -72,8 +72,6 @@ pub(crate) fn select_response(
     candidate: GetResponse,
     ct: KeyComparisonType,
 ) -> GetResponse {
-    assert_ne!(KeyComparisonType::Equal, ct);
-
     // For selection, we only look at the key, secondary_index_key, and version
     fn cmp(a: &GetResponse, b: &GetResponse) -> Ordering {
         a.secondary_index_key
@@ -81,8 +79,10 @@ pub(crate) fn select_response(
             .then_with(|| a.key.cmp(&b.key))
     }
 
+    assert_ne!(KeyComparisonType::Equal, ct);
+
     if let Some(pv) = prev {
-        use KeyComparisonType::*;
+        use KeyComparisonType::{Ceiling, Equal, Floor, Higher, Lower};
         let ordering = cmp(&pv, &candidate);
         match ct {
             Equal => panic!("bug: should not get here"),
@@ -106,6 +106,7 @@ pub(crate) fn select_response(
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_lines)]
 mod tests {
     use super::*;
     use crate::config::RetryConfig;
@@ -131,6 +132,8 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_with_retry() -> Result<()> {
         const RETRIES: usize = 3;
+        const EXPECTED: usize = RETRIES + 2;
+
         let retry = Some(RetryConfig::new(RETRIES, Duration::from_millis(1)));
         let count = Arc::new(AtomicUsize::new(0));
 
@@ -142,8 +145,6 @@ mod tests {
                 })
             },
         ];
-        const EXPECTED: usize = RETRIES + 2;
-
         for f in funcs {
             let r = with_retry(retry, {
                 let count = count.clone();
@@ -215,6 +216,15 @@ mod tests {
             responses: Vec<GetResponse>,
         }
 
+        fn format_response(r: &GetResponse) -> String {
+            format!(
+                "{{k: {}, s: {}, v: {}}}",
+                r.key.as_deref().unwrap_or("None"),
+                r.secondary_index_key.as_deref().unwrap_or("None"),
+                r.version.version_id
+            )
+        }
+
         let test_cases = [
             TestCase {
                 expected: gk("a"),
@@ -278,15 +288,6 @@ mod tests {
             },
         ];
 
-        fn format_response(r: &GetResponse) -> String {
-            format!(
-                "{{k: {}, s: {}, v: {}}}",
-                r.key.as_deref().unwrap_or("None"),
-                r.secondary_index_key.as_deref().unwrap_or("None"),
-                r.version.version_id
-            )
-        }
-
         for ref tc in test_cases {
             let mut selected = None;
             for r in &tc.responses {
@@ -324,7 +325,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "left: Equal\n right: Equal")]
     fn test_select_response_panic_on_equal() {
         select_response(
             None,

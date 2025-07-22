@@ -1,4 +1,4 @@
-use mauricebarnum_oxia_client::*;
+use mauricebarnum_oxia_client::{Client, Result, config};
 // use tracing::{debug, error, info, span, warn};
 // use tracing_subscriber::{EnvFilter, fmt};
 

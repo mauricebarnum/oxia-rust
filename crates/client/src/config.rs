@@ -18,6 +18,8 @@ impl RetryConfig {
             max_delay: initial_delay.saturating_mul(10),
         }
     }
+
+    #[must_use]
     pub fn max(mut self, x: Duration) -> Self {
         self.max_delay = x;
         self
@@ -71,7 +73,7 @@ impl Builder {
                 service_addr: String::new(),
                 namespace: String::new(),
                 identity: String::new(),
-                session_timeout: Default::default(),
+                session_timeout: Duration::default(),
                 max_parallel_requests: 0,
                 request_timeout: None,
                 retry: None,
@@ -83,36 +85,43 @@ impl Builder {
         Self { c: config.clone() }
     }
 
+    #[must_use]
     pub fn service_addr(mut self, x: impl Into<String>) -> Self {
         self.c.service_addr = x.into();
         self
     }
 
+    #[must_use]
     pub fn namespace(mut self, x: impl Into<String>) -> Self {
         self.c.namespace = x.into();
         self
     }
 
+    #[must_use]
     pub fn identity(mut self, x: impl Into<String>) -> Self {
         self.c.identity = x.into();
         self
     }
 
+    #[must_use]
     pub fn session_timeout(mut self, x: Duration) -> Self {
         self.c.session_timeout = x;
         self
     }
 
+    #[must_use]
     pub fn max_parallel_requests(mut self, x: usize) -> Self {
         self.c.max_parallel_requests = x;
         self
     }
 
+    #[must_use]
     pub fn request_timeout(mut self, x: Duration) -> Self {
         self.c.request_timeout = if x.is_zero() { None } else { Some(x) };
         self
     }
 
+    #[must_use]
     pub fn retry(mut self, x: RetryConfig) -> Self {
         self.c.retry = Some(x);
         self

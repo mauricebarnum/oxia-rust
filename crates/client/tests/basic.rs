@@ -119,13 +119,14 @@ async fn test_disconnect_fail() {
 
 #[test_log::test(tokio::test)]
 async fn test_range_delete() -> anyhow::Result<()> {
+    const N: usize = 8;
+
     let nshards = non_zero(3);
     let server = trace_err!(common::TestServer::start_nshards(nshards))?;
 
     let builder = config::Builder::new();
     let client = trace_err!(server.connect(Some(builder)).await)?;
 
-    const N: usize = 8;
     let keys: Vec<String> = (0..N * 2).map(|i| format!("k{i:04}")).collect();
     for key in &keys {
         let r = trace_err!(client.put(key, "").await)?;

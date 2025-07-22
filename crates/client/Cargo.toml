@@ -35,3 +35,6 @@ chrono = "0.4.41"
 socket2 = "0.6.0"
 test-log = { version = "0.2.18", features = ["trace", "color"] }
 oxia-bin-util = { path = "../oxia-bin-util" }
+
+[lints]
+workspace = true

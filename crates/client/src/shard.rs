@@ -72,6 +72,7 @@ pub struct Client {
 }
 
 /// Enum to indicate the expected type of write response
+#[derive(Copy, Clone)]
 enum ExpectedWriteResponse {
     Put,
     Delete,
@@ -137,13 +138,12 @@ const INTERNAL_KEY_PREFIX: &str = "__oxia/";
 impl Client {
     fn start_heartbeat(&self, session_id: i64) -> JoinHandle<()> {
         let session_timeout_ms = self.data.config.session_timeout().as_millis();
-        if session_timeout_ms > u32::MAX as u128 {
-            panic!(
-                "bug: time out out of range {} max {}",
-                session_timeout_ms,
-                u32::MAX
-            );
-        }
+        assert!(
+            (session_timeout_ms <= u128::from(u32::MAX)),
+            "bug: time out out of range {} max {}",
+            session_timeout_ms,
+            u32::MAX
+        );
 
         let meta = self.data.meta.clone();
         let shard = self.data.shard_id;
@@ -159,12 +159,13 @@ impl Client {
             let distr = {
                 const JITTER: f64 = 0.03;
                 let target_ms = session_timeout_ms as f64 / 4.0;
+                #[allow(clippy::cast_sign_loss)]
                 let min_ms = (target_ms * (1.0 - JITTER)).round() as u32;
+                #[allow(clippy::cast_sign_loss)]
                 let max_ms = (target_ms * (1.0 + JITTER)).round() as u32;
                 Uniform::new_inclusive(min_ms, max_ms).unwrap()
             };
             loop {
-                // FIXME: create_request() isn't usable here because we can't capture `self`. consider getting rid of it.
                 let req = tonic::Request::from_parts(
                     meta.clone(),
                     tonic::Extensions::default(),
@@ -244,7 +245,7 @@ impl Client {
         Ok(s.as_ref().map(|session| session.id))
     }
 
-    /// Creates a GetRequest with the appropriate options
+    /// Creates a `GetRequest` with the appropriate options
     fn make_get_req(&self, opts: &GetOptions, k: impl Into<String>) -> oxia_proto::ReadRequest {
         let data = &self.data;
         let ct = opts.comparison_type as i32;
@@ -259,7 +260,7 @@ impl Client {
         }
     }
 
-    /// Creates a PutRequest with the appropriate options
+    /// Creates a `PutRequest` with the appropriate options
     fn make_put_req(
         &self,
         session_id: Option<i64>,
@@ -289,7 +290,7 @@ impl Client {
         }
     }
 
-    /// Creates a DeleteRequest with the appropriate options
+    /// Creates a `DeleteRequest` with the appropriate options
     fn make_delete_req(
         &self,
         opts: &DeleteOptions,
@@ -307,7 +308,7 @@ impl Client {
         }
     }
 
-    /// Creates a DeleteRangeRequest with the appropriate options
+    /// Creates a `DeleteRangeRequest` with the appropriate options
     fn make_delete_range_req(
         &self,
         _opts: &DeleteRangeOptions,
@@ -326,7 +327,7 @@ impl Client {
         }
     }
 
-    /// Creates a ListRequest with the appropriate options
+    /// Creates a `ListRequest` with the appropriate options
     fn make_list_req(
         &self,
         opts: ListOptions,
@@ -342,7 +343,7 @@ impl Client {
         }
     }
 
-    /// Creates a RangeScanRequest with the appropriate options
+    /// Creates a `RangeScanRequest` with the appropriate options
     fn make_range_scan_req(
         &self,
         opts: RangeScanOptions,
@@ -440,6 +441,8 @@ impl Client {
         k: impl Into<String>,
         opts: GetOptions,
     ) -> Result<Option<GetResponse>> {
+        use oxia_proto::Status;
+
         let req = self.create_request(self.make_get_req(&opts, k));
         let mut rsp_stream = self.data.grpc.clone().read(req).await?.into_inner();
 
@@ -469,7 +472,6 @@ impl Client {
         }
 
         let r = rsp.gets.into_iter().next().unwrap();
-        use oxia_proto::Status;
         match Status::try_from(r.status) {
             Ok(Status::Ok) => Ok(Some(r.into())),
             Ok(Status::KeyNotFound) => Ok(None),
@@ -533,9 +535,10 @@ impl Client {
         value: Bytes,
         options: PutOptions,
     ) -> Result<PutResponse> {
-        let session_id = match options.ephemeral {
-            true => self.get_session_id().await?,
-            false => None,
+        let session_id = if options.ephemeral {
+            self.get_session_id().await?
+        } else {
+            None
         };
 
         let req = self.make_put_req(session_id, options, key, value);
@@ -712,7 +715,7 @@ mod int32_hash_range {
     impl Mapper {
         fn hash(key: &str) -> u32 {
             let h = xxh3_64(key.as_bytes());
-            (h & 0xffffffff) as u32
+            (h & 0xffff_ffff) as u32
         }
     }
 
@@ -828,7 +831,7 @@ mod int32_hash_range {
         use super::*;
 
         #[test]
-        #[should_panic]
+        #[should_panic(expected = "called `Result::unwrap()` on an `Err` value")]
         fn test_builder_overlaps() {
             Builder {
                 ranges: vec![
@@ -849,29 +852,29 @@ mod int32_hash_range {
         }
 
         #[test]
-        #[should_panic]
+        #[should_panic(expected = "called `Result::unwrap()` on an `Err` value")]
         fn test_builder_duplicate_shard_id() {
             Builder {
                 ranges: vec![
                     Range {
                         min: 0,
-                        max: 1431655765u32,
+                        max: 1_431_655_765u32,
                         id: 0,
                     },
                     Range {
-                        min: 1431655766,
-                        max: 2863311531,
+                        min: 1_431_655_766,
+                        max: 2_863_311_531,
                         id: 1,
                     },
                     Range {
-                        min: 2863311532,
-                        max: 3015596446,
+                        min: 2_863_311_532,
+                        max: 3_015_596_446,
                         id: 2,
                     },
-                    // hole! [3015596447, 3015596448]
+                    // hole! [3_015_596_447, 3_015_596_448]
                     Range {
-                        min: 3015596449,
-                        max: 4294967295,
+                        min: 3_015_596_449,
+                        max: 4_294_967_295,
                         id: 2,
                     },
                 ],
@@ -886,23 +889,23 @@ mod int32_hash_range {
                 ranges: vec![
                     Range {
                         min: 0,
-                        max: 1431655765u32,
+                        max: 1_431_655_765,
                         id: 0,
                     },
                     Range {
-                        min: 1431655766,
-                        max: 2863311531,
+                        min: 1_431_655_766,
+                        max: 2_863_311_531,
                         id: 1,
                     },
                     Range {
-                        min: 2863311532,
-                        max: 3015596446,
+                        min: 2_863_311_532,
+                        max: 3_015_596_446,
                         id: 2,
                     },
-                    // hole! [3015596447, 3015596448]
+                    // hole! [3_015_596_447, 3_015_596_448]
                     Range {
-                        min: 3015596449,
-                        max: 4294967295,
+                        min: 3_015_596_449,
+                        max: 4_294_967_295,
                         id: 3,
                     },
                 ],
@@ -1100,7 +1103,7 @@ impl Manager {
         F: FnMut(&Client) -> Option<R>,
     {
         let lock = self.shards.lock().await;
-        for s in lock.clients.iter() {
+        for s in &lock.clients {
             if let Some(r) = f(&s.1) {
                 return Some(r);
             }

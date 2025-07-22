@@ -34,21 +34,25 @@ impl PutOptions {
         PutOptions::default()
     }
 
+    #[must_use]
     pub fn expected_version_id(mut self, value: i64) -> Self {
         self.expected_version_id = Some(value);
         self
     }
 
+    #[must_use]
     pub fn partition_key(mut self, value: impl Into<String>) -> Self {
         self.partition_key = Some(value.into());
         self
     }
 
+    #[must_use]
     pub fn sequence_key_deltas(mut self, value: impl Into<Arc<[u64]>>) -> Self {
         self.sequence_key_deltas = Some(value.into());
         self
     }
 
+    #[must_use]
     pub fn secondary_indexes(
         mut self,
         value: impl Into<Arc<[oxia_proto::SecondaryIndex]>>,
@@ -57,6 +61,7 @@ impl PutOptions {
         self
     }
 
+    #[must_use]
     pub fn ephemeral(mut self) -> Self {
         self.ephemeral = true;
         self
@@ -141,26 +146,31 @@ impl GetOptions {
         }
     }
 
+    #[must_use]
     pub fn include_value(mut self) -> Self {
         self.include_value = true;
         self
     }
 
+    #[must_use]
     pub fn exclude_value(mut self) -> Self {
         self.include_value = false;
         self
     }
 
+    #[must_use]
     pub fn comparison_type(mut self, value: KeyComparisonType) -> Self {
         self.comparison_type = value;
         self
     }
 
+    #[must_use]
     pub fn partition_key(mut self, value: impl Into<String>) -> Self {
         self.partition_key = Some(value.into());
         self
     }
 
+    #[must_use]
     pub fn secondary_index_name(mut self, value: impl Into<String>) -> Self {
         self.secondary_index_name = Some(value.into());
         self
@@ -283,11 +293,13 @@ impl DeleteOptions {
         Self::default()
     }
 
+    #[must_use]
     pub fn expected_version_id(mut self, value: i64) -> Self {
         self.expected_version_id = Some(value);
         self
     }
 
+    #[must_use]
     pub fn partition_key(mut self, value: impl Into<String>) -> Self {
         self.partition_key = Some(value.into());
         self
@@ -308,26 +320,31 @@ impl ListOptions {
         Self::default()
     }
 
+    #[must_use]
     pub fn shard(mut self, value: i64) -> Self {
         self.shard = Some(value);
         self
     }
 
+    #[must_use]
     pub fn secondary_index_name(mut self, value: impl Into<String>) -> Self {
         self.secondary_index_name = Some(value.into());
         self
     }
 
+    #[must_use]
     pub fn sort(mut self, value: bool) -> Self {
         self.sort = value;
         self
     }
 
+    #[must_use]
     pub fn partial_ok(mut self, value: bool) -> Self {
         self.partial_ok = value;
         self
     }
 
+    #[must_use]
     pub fn partition_key(mut self, value: impl Into<String>) -> Self {
         self.partition_key = Some(value.into());
         self
@@ -411,26 +428,31 @@ impl RangeScanOptions {
         Self::default()
     }
 
+    #[must_use]
     pub fn shard(mut self, value: i64) -> Self {
         self.shard = Some(value);
         self
     }
 
+    #[must_use]
     pub fn sort(mut self, value: bool) -> Self {
         self.sort = value;
         self
     }
 
+    #[must_use]
     pub fn partial_ok(mut self, value: bool) -> Self {
         self.partial_ok = value;
         self
     }
 
+    #[must_use]
     pub fn secondary_index_name(mut self, value: impl Into<String>) -> Self {
         self.secondary_index_name = Some(value.into());
         self
     }
 
+    #[must_use]
     pub fn partition_key(mut self, value: impl Into<String>) -> Self {
         self.partition_key = Some(value.into());
         self
@@ -460,7 +482,8 @@ impl RangeScanResponse {
     fn accum(&mut self, x: oxia_proto::RangeScanResponse) {
         if !x.records.is_empty() {
             self.sorted = self.records.is_empty();
-            self.records.extend(x.records.into_iter().map(|x| x.into()));
+            self.records
+                .extend(x.records.into_iter().map(std::convert::Into::into));
         }
     }
 
@@ -511,11 +534,13 @@ impl DeleteRangeOptions {
         Self::default()
     }
 
+    #[must_use]
     pub fn shard(mut self, value: i64) -> Self {
         self.shard = Some(value);
         self
     }
 
+    #[must_use]
     pub fn partition_key(mut self, value: impl Into<String>) -> Self {
         self.partition_key = Some(value.into());
         self
@@ -759,7 +784,7 @@ impl Client {
             match s {
                 Err(Error::ShardError(e)) => errs.push(*e),
                 Err(_) => return s,
-                Ok(_) => (),
+                Ok(()) => (),
             }
         }
 
