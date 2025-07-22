@@ -39,30 +39,11 @@ jobs:
           toolchain: 1.88
           components: clippy, rustfmt
 
-      - name: install cargo nextest
-        uses: taiki-e/install-action@nextest
-
-      - name: install-tools
-        run: |
-          sudo apt-get install -y protobuf-compiler || {
-            sudo apt-get update
-            sudo apt-get install -y protobuf-compiler
-          }
-
-      - name: install-go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.24"
-          cache: false
-
       - name: enable-build-cache
         uses: Swatinem/rust-cache@v2
 
-      - name: prepare go cache
-        run: |
-          cache="$PWD/target/.gocache"
-          test -d $cache || mkdir -p $cache
-          echo "GOCACHE=$cache" >> $GITHUB_ENV
+      - name: check formatting
+        run: cargo fmt --check
 
       - name: detect-vendored-build
         id: vendored
@@ -79,30 +60,34 @@ jobs:
           cargo update --dry-run # update crate index
           cargo fetch --locked   # fetch dependencies: last network dependency
 
-      - name: install pre-commit
-        run: pipx install pre-commit
+      - name: install-tools
+        run: |
+          sudo apt-get install -y protobuf-compiler || {
+            sudo apt-get update
+            sudo apt-get install -y protobuf-compiler
+          }
 
-      - name: cache pre-commit
-        uses: actions/cache@v4
+
+      - name: install-go
+        uses: actions/setup-go@v5
         with:
-          path: ~/.cache/pre-commit
-          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+          go-version: "1.24"
+          cache: false
 
-      - name: run pre-commit hooks (non-blocking)
-        id: precommit
-        continue-on-error: true
+      - name: prepare go cache
         run: |
-          echo "::group::pre-commit"
-          pre-commit run --all-files
-          echo "::endgroup::"
+          cache="$PWD/target/.gocache"
+          test -d $cache || mkdir -p $cache
+          echo "GOCACHE=$cache" >> $GITHUB_ENV
 
-      - name: flag pre-commit status if failed
-        if: steps.precommit.outcome == 'failure'
-        run: |
-          echo "::warning file=.pre-commit-config.yaml::Pre-commit checks failed. Run \`pre-commit run --all-files\` locally to fix."
+      - name: clippy
+        run: cargo clippy --no-deps --all-targets --all-features --frozen
 
       - name: build
         run: cargo build --frozen --all-targets
+
+      - name: install cargo nextest
+        uses: taiki-e/install-action@nextest
 
       - name: test
         timeout-minutes: 10
