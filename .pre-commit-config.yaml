@@ -1,14 +1,6 @@
 repos:
   - repo: local
     hooks:
-      - id: cargo-check
-        name: cargo check
-        entry: env RUSTFLAGS="-D warnings" cargo check
-        language: system
-        types: [rust]
-        args: ["--all-targets", "--all-features", "--frozen"]
-        pass_filenames: false
-
       - id: cargo-clippy
         name: cargo clippy
         entry: cargo clippy
