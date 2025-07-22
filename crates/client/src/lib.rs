@@ -635,43 +635,54 @@ impl Client {
         key: impl Into<String>,
         options: GetOptions,
     ) -> Result<Option<GetResponse>> {
-        type Args = (shard::Client, String, GetOptions);
-        let do_get = |(shard, key, options): Args| async move { shard.get(key, options).await };
-
         let key = key.into();
 
-        if options.partition_key.is_some()
+        // Define the core operation with retry/timeout wrapper
+        let execute_get = |shard: shard::Client, key: String, options: GetOptions| async move {
+            self.execute_with_retry(
+                |(shard, key, options)| async move { shard.get(key, options).await },
+                (shard, key, options),
+            )
+            .await
+        };
+
+        // Single shard case: exact match with partition key OR exact match without secondary index
+        let use_single_shard = options.partition_key.is_some()
             || (options.comparison_type == KeyComparisonType::Equal
-                && options.secondary_index_name.is_none())
-        {
+                && options.secondary_index_name.is_none());
+
+        if use_single_shard {
             let selector = options.partition_key.as_deref().unwrap_or(&key);
             let shard = self.get_shard(selector).await?;
-            return self.execute_with_retry(do_get, (shard, key, options)).await;
+            return execute_get(shard, key, options).await;
         }
 
-        let n = match self.config.max_parallel_requests() {
+        // Multi-shard case: query all shards and select best response
+        let max_parallel = match self.config.max_parallel_requests() {
             0 => usize::MAX,
             n => n,
         };
 
-        let stream = self
+        let best_response = self
             .get_shards()?
             .shard_stream(self.config.namespace())
             .await
-            .map(|shard| {
-                let args: Args = (shard, key.clone(), options.clone());
-                async move { self.execute_with_retry(do_get, args).await }
-            })
-            .buffer_unordered(n);
-
-        stream
-            .try_fold(None, |acc, r| async {
-                Ok(match r {
-                    Some(r) => Some(util::select_response(acc, r, options.comparison_type)),
-                    None => acc,
+            .map(|shard| execute_get(shard, key.clone(), options.clone()))
+            .buffer_unordered(max_parallel)
+            .try_fold(None, |best, response| async {
+                Ok(match response {
+                    Some(candidate) => Some(match best {
+                        None => candidate,
+                        Some(prev) => {
+                            util::select_response(Some(prev), candidate, options.comparison_type)
+                        }
+                    }),
+                    None => best,
                 })
             })
-            .await
+            .await?;
+
+        Ok(best_response)
     }
 
     pub async fn get(&self, k: impl Into<String>) -> Result<Option<GetResponse>> {
@@ -731,9 +742,17 @@ impl Client {
         end_exclusive: impl Into<String>,
         options: DeleteRangeOptions,
     ) -> Result<()> {
-        type Args = (shard::Client, String, String, DeleteRangeOptions);
-        let do_delete_range = |(shard, start, end, options): Args| async move {
-            shard.delete_range(start, end, options).await
+        let do_delete_range = |shard: shard::Client,
+                               start: String,
+                               end: String,
+                               options: DeleteRangeOptions| async move {
+            self.execute_with_retry(
+                |(shard, start, end, options)| async move {
+                    shard.delete_range(start, end, options).await
+                },
+                (shard, start, end, options),
+            )
+            .await
         };
 
         let start = start_inclusive.into();
@@ -748,9 +767,7 @@ impl Client {
                 None
             }
         } {
-            return self
-                .execute_with_retry(do_delete_range, (shard, start, end, options))
-                .await;
+            return do_delete_range(shard, start, end, options).await;
         }
 
         let n = match self.config.max_parallel_requests() {
@@ -762,28 +779,14 @@ impl Client {
             .get_shards()?
             .shard_stream(self.config.namespace())
             .await
-            .map(|shard| {
-                // let shard = shard;
-                let args: Args = (shard.clone(), start.clone(), end.clone(), options.clone());
-                async move {
-                    self.execute_with_retry(do_delete_range, args)
-                        .await
-                        .map_err(|err| {
-                            let boxed = Box::new(ShardError {
-                                shard: shard.shard_id(),
-                                err,
-                            });
-                            Error::ShardError(boxed)
-                        })
-                }
-            })
+            .map(|shard| do_delete_range(shard, start.clone(), end.clone(), options.clone()))
             .buffer_unordered(n);
 
         let mut errs = Vec::new();
-        while let Some(s) = result_stream.next().await {
-            match s {
+        while let Some(shard_result) = result_stream.next().await {
+            match shard_result {
                 Err(Error::ShardError(e)) => errs.push(*e),
-                Err(_) => return s,
+                Err(_) => return shard_result,
                 Ok(()) => (),
             }
         }
@@ -814,9 +817,12 @@ impl Client {
         end_exclusive: impl Into<String>,
         options: ListOptions,
     ) -> Result<ListResponse> {
-        type Args = (shard::Client, String, String, ListOptions);
-        let do_list = |(shard, start, end, options): Args| async move {
-            shard.list(start, end, options).await
+        let do_list = |shard: shard::Client, start: String, end: String, options: ListOptions| async move {
+            self.execute_with_retry(
+                |(shard, start, end, options)| async move { shard.list(start, end, options).await },
+                (shard, start, end, options),
+            )
+            .await
         };
 
         let start = start_inclusive.into();
@@ -824,9 +830,7 @@ impl Client {
 
         if let Some(pk) = options.partition_key.as_deref() {
             let shard = self.get_shard(pk).await?;
-            return self
-                .execute_with_retry(do_list, (shard, start, end, options))
-                .await;
+            return do_list(shard, start, end, options).await;
         }
 
         let n = match self.config.max_parallel_requests() {
@@ -838,28 +842,25 @@ impl Client {
             .get_shards()?
             .shard_stream(self.config.namespace())
             .await
-            .map(|shard| {
-                let args: Args = (shard, start.clone(), end.clone(), options.clone());
-                async move { self.execute_with_retry(do_list, args).await }
-            })
+            .map(|shard| do_list(shard, start.clone(), end.clone(), options.clone()))
             .buffer_unordered(n);
 
-        let mut rsp = ListResponse::default();
-        while let Some(s) = result_stream.next().await {
-            if let Ok(r) = s {
-                rsp.merge(r);
+        let mut response = ListResponse::default();
+        while let Some(shard_result) = result_stream.next().await {
+            if let Ok(shard_response) = shard_result {
+                response.merge(shard_response);
             } else if options.partial_ok {
-                rsp.partial = true;
+                response.partial = true;
             } else {
-                return s;
+                return shard_result;
             }
         }
 
         if options.sort {
-            rsp.sort();
+            response.sort();
         }
 
-        Ok(rsp)
+        Ok(response)
     }
 
     pub async fn list(
@@ -877,9 +878,17 @@ impl Client {
         end_exclusive: impl Into<String>,
         options: RangeScanOptions,
     ) -> Result<RangeScanResponse> {
-        type Args = (shard::Client, String, String, RangeScanOptions);
-        let do_range_scan = |(shard, start, end, options): Args| async move {
-            shard.range_scan(start, end, options).await
+        let do_range_scan = |shard: shard::Client,
+                             start: String,
+                             end: String,
+                             options: RangeScanOptions| async move {
+            self.execute_with_retry(
+                |(shard, start, end, options)| async move {
+                    shard.range_scan(start, end, options).await
+                },
+                (shard, start, end, options),
+            )
+            .await
         };
 
         let start = start_inclusive.into();
@@ -887,9 +896,7 @@ impl Client {
 
         if let Some(pk) = options.partition_key.as_deref() {
             let shard = self.get_shard(pk).await?;
-            return self
-                .execute_with_retry(do_range_scan, (shard, start, end, options))
-                .await;
+            return do_range_scan(shard, start, end, options).await;
         }
 
         let n = match self.config.max_parallel_requests() {
@@ -901,28 +908,25 @@ impl Client {
             .get_shards()?
             .shard_stream(self.config.namespace())
             .await
-            .map(|shard| {
-                let args: Args = (shard, start.clone(), end.clone(), options.clone());
-                async move { self.execute_with_retry(do_range_scan, args).await }
-            })
+            .map(|shard| do_range_scan(shard, start.clone(), end.clone(), options.clone()))
             .buffer_unordered(n);
 
-        let mut rsp = RangeScanResponse::default();
-        while let Some(s) = result_stream.next().await {
-            if let Ok(r) = s {
-                rsp.merge(r);
+        let mut response = RangeScanResponse::default();
+        while let Some(shard_result) = result_stream.next().await {
+            if let Ok(shard_response) = shard_result {
+                response.merge(shard_response);
             } else if options.partial_ok {
-                rsp.partial = true;
+                response.partial = true;
             } else {
-                return s;
+                return shard_result;
             }
         }
 
         if options.sort {
-            rsp.sort();
+            response.sort();
         }
 
-        Ok(rsp)
+        Ok(response)
     }
 
     pub async fn range_scan(

@@ -210,10 +210,6 @@ impl Client {
         })
     }
 
-    pub(super) fn shard_id(&self) -> i64 {
-        self.data.shard_id
-    }
-
     async fn create_session(&self) -> Result<Session> {
         let data = &self.data;
         let config = &data.config;
