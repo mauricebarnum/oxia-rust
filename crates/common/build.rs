@@ -7,8 +7,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     // Configure tonic to use Bytes for all protobuf bytes fields
-    tonic_build::configure()
-        .bytes(["."])
+    tonic_prost_build::configure()
+        .bytes(".")
         .protoc_arg("--experimental_allow_proto3_optional")
         .protoc_arg("--cpp_opt=speed")
         .build_client(true)
