@@ -7,19 +7,25 @@ Grpc support is based upon [tonic](https://github.com/hyperium/tonic).
 Support for all of the Oxia service is incomplete,
 
 
-# Crates
+# Layout
 
 * oxia-bin-util - testing support
+    * internal crate
     * build an oxia server for running tests
     * provide a compile-time path to the built binary
     * Go sources are vendored from upstream
-* mauricebarnum-oxia-common
+* common - low-level client
+    * crate: mauricebarnum-oxia-common
     * provide grpc binding to the [OxiaClient](crates/common/proto/client.proto) service, using tonic
-* mauricebarnum-oxia-client
-    * Higher level rust client to oxia.  Supports sharding.
-* mauricebarnum-oxia-cmd
+* client - higher-level client
+    * crate: mauricebarnum-oxia-client
+    * implements sharding, dispatch, etc. intended to be more ergonomic than the raw grpc binding
+    * minimal exposure to tonic api
+    * async rt not exposed
+* cmd
+    * crate: mauricebarnum-oxia-cmd
     * oxia client cli
-    * unimplemented
+    * unimplemented, intended as a test-bed/example for the client crate
 
 # TODO
 
