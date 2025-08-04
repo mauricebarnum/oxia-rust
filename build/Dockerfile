@@ -31,6 +31,9 @@ RUN apt-get update && apt-get install -y \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.88
 RUN rustup component add clippy rustfmt
 
+# Install sccache
+RUN cargo install sccache --locked
+
 # Install Go 1.24 (architecture-aware)
 RUN ARCH=$(dpkg --print-architecture) && \
     if [ "$ARCH" = "amd64" ]; then GO_ARCH="amd64"; \
@@ -38,6 +41,7 @@ RUN ARCH=$(dpkg --print-architecture) && \
     else echo "Unsupported architecture: $ARCH" && exit 1; fi && \
     LATEST=$(curl -s https://go.dev/VERSION?m=text | head -n1) && \
     curl -fsSL "https://go.dev/dl/${LATEST}.linux-${GO_ARCH}.tar.gz" | tar -xzC /usr/local
+
 ENV PATH=/usr/local/go/bin:$PATH
 
 # Install cargo-nextest
@@ -48,4 +52,5 @@ RUN rustc --version && \
     cargo --version && \
     go version && \
     protoc --version && \
-    cargo nextest --version
+    cargo nextest --version && \
+    sccache --version
