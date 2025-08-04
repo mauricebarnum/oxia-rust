@@ -611,23 +611,21 @@ impl Client {
         Ok(shard)
     }
 
-    async fn execute_with_retry<F, Fut, Args, R>(&self, op: F, args: Args) -> Result<R>
+    async fn execute_with_retry<Fut, R>(&self, op: impl Fn() -> Fut) -> Result<R>
     where
-        F: Fn(Args) -> Fut + Clone + Send + 'static,
         Fut: std::future::Future<Output = Result<R>> + Send,
-        Args: Clone + Send + 'static,
         R: Send,
     {
-        let timeout = self.config.request_timeout();
-        let do_with_timeout = move || {
-            let args = args.clone();
-            let op = op.clone();
-            async move {
-                let fut = async move { op(args).await };
-                util::with_timeout(timeout, fut).await
-            }
-        };
-        util::with_retry(self.config.retry(), do_with_timeout).await
+        let timeout_config = self.config.request_timeout();
+        let retry_config = self.config.retry();
+
+        let retry_op = move || op();
+        let retry_future = util::with_retry(retry_config, retry_op);
+
+        match timeout_config {
+            Some(t) => util::with_timeout(Some(t), retry_future).await,
+            None => retry_future.await,
+        }
     }
 
     pub async fn get_with_options(
@@ -639,10 +637,12 @@ impl Client {
 
         // Define the core operation with retry/timeout wrapper
         let execute_get = |shard: shard::Client, key: String, options: GetOptions| async move {
-            self.execute_with_retry(
-                |(shard, key, options)| async move { shard.get(key, options).await },
-                (shard, key, options),
-            )
+            self.execute_with_retry(move || {
+                let shard = shard.clone();
+                let key = key.clone();
+                let options = options.clone();
+                async move { shard.get(key, options).await }
+            })
             .await
         };
 
@@ -695,15 +695,18 @@ impl Client {
         value: impl Into<Bytes>,
         options: PutOptions,
     ) -> Result<PutResponse> {
-        type Args = (shard::Client, String, Bytes, PutOptions);
-        let do_put = |(shard, key, value, options): Args| async move {
-            shard.put(key, value, options).await
-        };
         let key = key.into();
+        let value = value.into();
         let selector = options.partition_key.as_deref().unwrap_or(&key);
         let shard = self.get_shard(selector).await?;
-        self.execute_with_retry(do_put, (shard, key, value.into(), options))
-            .await
+        self.execute_with_retry(move || {
+            let shard = shard.clone();
+            let key = key.clone();
+            let value = value.clone();
+            let options = options.clone();
+            async move { shard.put(key, value, options).await }
+        })
+        .await
     }
 
     pub async fn put(
@@ -720,15 +723,16 @@ impl Client {
         key: impl Into<String>,
         options: DeleteOptions,
     ) -> Result<()> {
-        type Args = (shard::Client, String, DeleteOptions);
-        let do_delete =
-            |(shard, key, options): Args| async move { shard.delete(key, options).await };
-
         let key = key.into();
         let selector = options.partition_key.as_deref().unwrap_or(&key);
         let shard = self.get_shard(selector).await?;
-        self.execute_with_retry(do_delete, (shard, key, options))
-            .await
+        self.execute_with_retry(move || {
+            let shard = shard.clone();
+            let key = key.clone();
+            let options = options.clone();
+            async move { shard.delete(key, options).await }
+        })
+        .await
     }
 
     pub async fn delete(&self, key: impl Into<String>) -> Result<()> {
@@ -746,12 +750,13 @@ impl Client {
                                start: String,
                                end: String,
                                options: DeleteRangeOptions| async move {
-            self.execute_with_retry(
-                |(shard, start, end, options)| async move {
-                    shard.delete_range(start, end, options).await
-                },
-                (shard, start, end, options),
-            )
+            self.execute_with_retry(move || {
+                let shard = shard.clone();
+                let start = start.clone();
+                let end = end.clone();
+                let options = options.clone();
+                async move { shard.delete_range(start, end, options).await }
+            })
             .await
         };
 
@@ -818,10 +823,13 @@ impl Client {
         options: ListOptions,
     ) -> Result<ListResponse> {
         let do_list = |shard: shard::Client, start: String, end: String, options: ListOptions| async move {
-            self.execute_with_retry(
-                |(shard, start, end, options)| async move { shard.list(start, end, options).await },
-                (shard, start, end, options),
-            )
+            self.execute_with_retry(move || {
+                let shard = shard.clone();
+                let start = start.clone();
+                let end = end.clone();
+                let options = options.clone();
+                async move { shard.list(start, end, options).await }
+            })
             .await
         };
 
@@ -882,12 +890,13 @@ impl Client {
                              start: String,
                              end: String,
                              options: RangeScanOptions| async move {
-            self.execute_with_retry(
-                |(shard, start, end, options)| async move {
-                    shard.range_scan(start, end, options).await
-                },
-                (shard, start, end, options),
-            )
+            self.execute_with_retry(move || {
+                let shard = shard.clone();
+                let start = start.clone();
+                let end = end.clone();
+                let options = options.clone();
+                async move { shard.range_scan(start, end, options).await }
+            })
             .await
         };
 

@@ -1,8 +1,7 @@
 use crate::{Error, Result, config};
+use backon::{FibonacciBuilder, Retryable};
 use std::future::Future;
 use std::{cmp::Ordering, time::Duration};
-use tokio_retry::RetryIf;
-use tokio_retry::strategy::{FibonacciBackoff, jitter};
 
 pub(crate) async fn with_timeout<T, Fut>(timeout: Option<Duration>, fut: Fut) -> Result<T>
 where
@@ -24,12 +23,15 @@ where
 {
     match retry_config {
         Some(rc) => {
-            let strategy = FibonacciBackoff::from_millis(rc.initial_delay.as_millis() as u64)
-                .max_delay(rc.max_delay)
-                .map(jitter)
-                .take(rc.attempts);
-
-            RetryIf::spawn(strategy, f, |e: &Error| e.is_retryable()).await
+            let backoff = FibonacciBuilder::default()
+                .with_min_delay(rc.initial_delay)
+                .with_max_delay(rc.max_delay)
+                .with_max_times(rc.attempts)
+                .with_jitter();
+            (|| f())
+                .retry(&backoff)
+                .when(|e: &Error| e.is_retryable())
+                .await
         }
         None => f().await,
     }
