@@ -1,12 +1,20 @@
 # Use Ubuntu 24.04 as base to match your current runner
 FROM ubuntu:24.04
 
+# Create non-root user for builds first
+RUN useradd -m -s /bin/bash runner
+
+# Set environment variables for runner user
+ENV RUSTUP_HOME=/home/runner/.rustup
+ENV CARGO_HOME=/home/runner/.cargo
+ENV PATH=/home/runner/.cargo/bin:/usr/local/go/bin:$PATH
+
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
 ENV CARGO_TERM_COLOR=always
 ENV RUSTUP_HOME=/usr/local/rustup
 ENV CARGO_HOME=/usr/local/cargo
-ENV PATH=/usr/local/cargo/bin:$PATH
+ENV PATH=/usr/local/cargo/bin:/usr/local/go/bin:$PATH
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -34,11 +42,6 @@ ENV PATH=/usr/local/go/bin:$PATH
 
 # Install cargo-nextest
 RUN cargo install cargo-nextest --locked
-
-# Create non-root user for builds
-RUN useradd -m -s /bin/bash runner
-USER runner
-WORKDIR /home/runner
 
 # Verify installations
 RUN rustc --version && \
