@@ -38,14 +38,19 @@ RUN ARCH=$(dpkg --print-architecture) && \
     else echo "Unsupported architecture: $ARCH" && exit 1; fi && \
     LATEST=$(curl -s https://go.dev/VERSION?m=text | head -n1) && \
     curl -fsSL "https://go.dev/dl/${LATEST}.linux-${GO_ARCH}.tar.gz" | tar -xzC /usr/local
+
 ENV PATH=/usr/local/go/bin:$PATH
 
 # Install cargo-nextest
 RUN cargo install cargo-nextest --locked
+
+# Install sccache
+RUN cargo install sccache --locked
 
 # Verify installations
 RUN rustc --version && \
     cargo --version && \
     go version && \
     protoc --version && \
-    cargo nextest --version
+    cargo nextest --version && \
+    sccache --version
