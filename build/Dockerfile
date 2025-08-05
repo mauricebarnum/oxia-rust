@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.88 \
     && rustup component add clippy rustfmt
 
-# Install Go (architecture-aware)
+# Install latest Go (architecture-aware)
 RUN ARCH=$(dpkg --print-architecture) && \
     if [ "$ARCH" = "amd64" ]; then GO_ARCH="amd64"; \
     elif [ "$ARCH" = "arm64" ]; then GO_ARCH="arm64"; \
