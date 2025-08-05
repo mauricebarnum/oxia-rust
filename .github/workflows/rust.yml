@@ -17,12 +17,7 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/${{ github.repository }}/rust-build:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: ubuntu-24.04
 
     steps:
       - name: set-extra-env
@@ -37,6 +32,12 @@ jobs:
 
       - name: checkout
         uses: actions/checkout@v4
+
+      - name: install-toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.88
+          components: clippy, rustfmt
 
       - name: enable-build-cache
         uses: Swatinem/rust-cache@v2
@@ -59,6 +60,20 @@ jobs:
           cargo update --dry-run # update crate index
           cargo fetch --locked   # fetch dependencies: last network dependency
 
+      - name: install-tools
+        run: |
+          sudo apt-get install -y protobuf-compiler || {
+            sudo apt-get update
+            sudo apt-get install -y protobuf-compiler
+          }
+
+
+      - name: install-go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: false
+
       - name: prepare go cache
         run: |
           cache="$PWD/target/.gocache"
@@ -70,6 +85,9 @@ jobs:
 
       - name: clippy
         run: cargo clippy --no-deps --all-targets --all-features --frozen
+
+      - name: install cargo nextest
+        uses: taiki-e/install-action@nextest
 
       - name: test
         timeout-minutes: 10
