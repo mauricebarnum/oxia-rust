@@ -1,93 +1,59 @@
-# Multi-stage build for minimal runtime image
-FROM ubuntu:24.04 AS builder
+FROM ubuntu:24.04
 
-# Set environment variables for build stage
-ENV DEBIAN_FRONTEND=noninteractive
-ENV RUSTUP_HOME=/usr/local/rustup
-ENV CARGO_HOME=/usr/local/cargo
-ENV PATH=/usr/local/cargo/bin:/usr/local/go/bin:$PATH
-
-# Install system dependencies for building
+# ===== 1. OS packages (long-lived layer) =====
 RUN apt-get update && apt-get install -y \
-    curl \
-    git \
     build-essential \
     pkg-config \
     libssl-dev \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install Rust
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.88 \
-    && rustup component add clippy rustfmt
-
-# Install latest Go (architecture-aware)
-RUN ARCH=$(dpkg --print-architecture) && \
-    if [ "$ARCH" = "amd64" ]; then GO_ARCH="amd64"; \
-    elif [ "$ARCH" = "arm64" ]; then GO_ARCH="arm64"; \
-    else echo "Unsupported architecture: $ARCH" && exit 1; fi && \
-    LATEST=$(curl -s https://go.dev/VERSION?m=text | head -n1) && \
-    curl -fsSL "https://go.dev/dl/${LATEST}.linux-${GO_ARCH}.tar.gz" | tar -xzC /usr/local
-
-# Install Rust tools using binstall for speed
-RUN cargo install cargo-binstall --locked \
-    && cargo binstall sccache cargo-nextest --no-confirm --locked
-
-# Clean cargo caches and temporary files
-RUN rm -rf /usr/local/cargo/registry/cache \
-    && rm -rf /usr/local/cargo/git/db \
-    && rm -rf /tmp/* \
-    && rm -rf /var/tmp/*
-
-# Final runtime stage
-FROM ubuntu:24.04
-
-# Create non-root user
-RUN useradd -m -s /bin/bash runner
-
-# Set environment variables for runtime
-ENV RUSTUP_HOME=/usr/local/rustup
-ENV CARGO_HOME=/usr/local/cargo
-ENV PATH=/usr/local/cargo/bin:/usr/local/go/bin:$PATH
-ENV CARGO_TERM_COLOR=always
-ENV DEBIAN_FRONTEND=noninteractive
-
-# Install runtime dependencies including protobuf
-RUN apt-get update && apt-get install -y \
-    ca-certificates \
-    libssl3 \
+    clang \
+    cmake \
     git \
     curl \
+    unzip \
+    ca-certificates \
     protobuf-compiler \
-    libprotobuf-dev \
-    && rm -rf /var/lib/apt/lists/* \
-    && rm -rf /var/cache/apt/archives/* \
-    && rm -rf /tmp/* \
-    && rm -rf /var/tmp/*
+    jq \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy Rust installation from builder and set up environment
-COPY --from=builder /usr/local/rustup /usr/local/rustup
-COPY --from=builder /usr/local/cargo /usr/local/cargo
-
-# Set up Rust environment properly - rustup is in cargo/bin
-RUN /usr/local/cargo/bin/rustup default stable
-
-# Copy Go installation from builder
-COPY --from=builder /usr/local/go /usr/local/go
-
-# Set up user directories and permissions
-RUN mkdir -p /home/runner/.rustup /home/runner/.cargo \
-    && chown -R runner:runner /home/runner \
-    && chmod -R 755 /home/runner
-
-# Verify installations work
-RUN rustc --version && \
-    cargo --version && \
-    go version && \
-    protoc --version && \
-    cargo nextest --version && \
-    sccache --version
-
-# Switch to non-root user
+# ===== 2. Create non-root build user =====
+RUN useradd -ms /bin/bash runner
 USER runner
 WORKDIR /home/runner
+
+# ===== 3. Install Rust (latest 1.89.y patch) =====
+ENV RUST_MINOR=1.89
+RUN latest=$(curl -s https://api.github.com/repos/rust-lang/rust/releases \
+      | jq -r '.[].tag_name' \
+      | grep "^${RUST_MINOR}\." \
+      | sort -Vr | head -n1) && \
+    echo "Installing Rust $latest" && \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --default-toolchain "$latest" --profile minimal && \
+    echo 'source $HOME/.cargo/env' >> ~/.bashrc
+ENV PATH=/home/runner/.cargo/bin:$PATH
+
+# ===== 4. Install Cargo tools =====
+RUN . $HOME/.cargo/env && \
+    cargo install sccache \
+                  cargo-nextest \
+                  cargo-edit \
+                  cargo-outdated \
+                  ripgrep \
+                  fd-find
+
+# ===== 5. Install Go (latest 1.24.x patch) =====
+ENV GO_MINOR=1.24
+RUN latest=$(curl -s https://go.dev/dl/?mode=json \
+      | jq -r '.[].version' \
+      | grep "^go${GO_MINOR}\." \
+      | sort -Vr | head -n1) && \
+    echo "Installing Go $latest" && \
+    curl -fsSL "https://go.dev/dl/${latest}.linux-amd64.tar.gz" \
+      | tar -C /home/runner -xzf - && \
+    mv /home/runner/go /home/runner/.go && \
+    echo 'export PATH=$HOME/.go/bin:$PATH' >> ~/.bashrc
+ENV PATH=/home/runner/.go/bin:$PATH
+
+# ===== 6. Environment for sccache =====
+ENV RUSTC_WRAPPER=sccache \
+    SCCACHE_DIR=/home/runner/.cache/sccache
