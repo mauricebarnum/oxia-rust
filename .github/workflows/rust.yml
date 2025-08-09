@@ -25,7 +25,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTC_WRAPPER: sccache
   SCCACHE_DIR: ~/.cache/sccache
 
 jobs:
