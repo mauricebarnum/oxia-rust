@@ -13,6 +13,11 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     protobuf-compiler \
     jq \
+    python3 \
+    python3-pip \
+    gnupg \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # ===== 2. Create non-root build user =====
@@ -43,7 +48,11 @@ RUN . $HOME/.cargo/env && \
 
 # ===== 5. Install Go (latest 1.24.x patch) =====
 ENV GO_MINOR=1.24
-RUN latest=$(curl -s https://go.dev/dl/?mode=json \
+RUN ARCH=$(dpkg --print-architecture) && \
+    if [ "$ARCH" = "amd64" ]; then GO_ARCH="amd64"; \
+    elif [ "$ARCH" = "arm64" ]; then GO_ARCH="arm64"; \
+    else echo "Unsupported architecture: $ARCH" && exit 1; fi && \
+    latest=$(curl -s https://go.dev/dl/?mode=json \
       | jq -r '.[].version' \
       | grep "^go${GO_MINOR}\." \
       | sort -Vr | head -n1) && \
@@ -57,3 +66,8 @@ ENV PATH=/home/runner/.go/bin:$PATH
 # ===== 6. Environment for sccache =====
 ENV RUSTC_WRAPPER=sccache \
     SCCACHE_DIR=/home/runner/.cache/sccache
+
+# ===== 7. Cacheable Cargo fetch layer =====
+RUN --mount=type=bind,source=.,target=/tmp/src,readonly \
+    . "$HOME/.cargo/env" && \
+    cargo fetch --locked --manifest-path /tmp/src/Cargo.toml
