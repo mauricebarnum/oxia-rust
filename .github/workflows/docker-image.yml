@@ -13,8 +13,7 @@ on:
       - '.github/workflows/docker-image.yml'
   workflow_dispatch:
   schedule:
-    # Rebuild weekly to get security updates
-    - cron: '0 2 * * 1'
+    - cron: '0 2 * * 1' # weekly
 
 env:
   REGISTRY: ghcr.io
@@ -48,15 +47,18 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
+            # Only tag "latest" if building on main
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
-          context: ./build
+          context: .
+          file: build/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}/rust-build:latest
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}/rust-build:cache,mode=max
+

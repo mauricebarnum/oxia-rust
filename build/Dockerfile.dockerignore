@@ -1,0 +1,13 @@
+# Ignore everything by default
+**
+
+# Allow Cargo manifests
+!**/Cargo.toml
+!Cargo.lock
+
+# Include minimal sources to make cargo fetch happy
+!**/src/lib.rs
+!**/src/main.rs
+
+# Allow build files (Dockerfile and any supporting scripts in build/)
+!build/**
