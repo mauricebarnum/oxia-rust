@@ -125,10 +125,10 @@ fn check_delete_response(r: &oxia_proto::WriteResponse) -> Option<Error> {
         return Some(e);
     }
 
-    if let Some(d) = r.deletes.first() {
-        if d.status != STATUS_OK {
-            return Some(OxiaError::from(d.status).into());
-        }
+    if let Some(d) = r.deletes.first()
+        && d.status != STATUS_OK
+    {
+        return Some(OxiaError::from(d.status).into());
     }
     None
 }
@@ -138,10 +138,10 @@ fn check_delete_range_response(r: &oxia_proto::WriteResponse) -> Option<Error> {
         return Some(e);
     }
 
-    if let Some(d) = r.delete_ranges.first() {
-        if d.status != STATUS_OK {
-            return Some(OxiaError::from(d.status).into());
-        }
+    if let Some(d) = r.delete_ranges.first()
+        && d.status != STATUS_OK
+    {
+        return Some(OxiaError::from(d.status).into());
     }
     None
 }
