@@ -168,13 +168,13 @@ pub enum Error {
 impl Error {
     /// Whether the error is likely transient and worth retrying
     pub fn is_retryable(&self) -> bool {
-        if let Error::TonicStatus(e) = self {
-            if matches!(
+        if let Error::TonicStatus(e) = self
+            && matches!(
                 e.code(),
                 tonic::Code::Unavailable | tonic::Code::Unknown | tonic::Code::Internal
-            ) {
-                return true;
-            }
+            )
+        {
+            return true;
         }
 
         if let Error::RequestTimeout { .. } = self {
