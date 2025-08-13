@@ -76,3 +76,6 @@ RUN --mount=type=bind,source=.,target=/tmp/src,readonly \
     . "$HOME/.cargo/env" && \
     cargo fetch --locked --manifest-path /tmp/src/Cargo.toml
 
+
+# --hack-- set rust for future builds. get rid of this when we do the next big rebuild
+RUN rustup default $(rustc --version | awk '{print $2}')
