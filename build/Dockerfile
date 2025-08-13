@@ -1,4 +1,4 @@
-FROM ubuntu:24.04
+FROM ubuntu:24.04 AS build
 
 # ===== 1. OS packages (long-lived layer) =====
 RUN apt-get update && apt-get install -y \
@@ -72,3 +72,6 @@ RUN rustup default $(rustc --version | awk '{print $2}')
 
 ENV RUSTUP_HOME=/home/runner/.rustup \
     CARGO_HOME=/home/runner/.cargo
+
+FROM scratch as final
+COPY --from=build / /
