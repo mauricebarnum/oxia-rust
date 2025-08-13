@@ -52,12 +52,12 @@ RUN ARCH=$(dpkg --print-architecture) && \
     if [ "$ARCH" = "amd64" ]; then GO_ARCH="amd64"; \
     elif [ "$ARCH" = "arm64" ]; then GO_ARCH="arm64"; \
     else echo "Unsupported architecture: $ARCH" && exit 1; fi && \
-    latest=$(curl -s https://go.dev/dl/?mode=json \
+    LATEST=$(curl -s https://go.dev/dl/?mode=json \
       | jq -r '.[].version' \
       | grep "^go${GO_MINOR}\." \
       | sort -Vr | head -n1) && \
-    echo "Installing Go $latest" && \
-    curl -fsSL "https://go.dev/dl/${latest}.linux-amd64.tar.gz" \
+    echo "Installing Go $LATEST" && \
+    curl -fsSL "https://go.dev/dl/${LATEST}.linux-${GO_ARCH}.tar.gz" \
       | tar -C /home/runner -xzf - && \
     mv /home/runner/go /home/runner/.go && \
     echo 'export PATH=$HOME/.go/bin:$PATH' >> ~/.bashrc
