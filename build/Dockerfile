@@ -64,8 +64,8 @@ RUN ARCH=$(dpkg --print-architecture) && \
 ENV PATH=/home/runner/.go/bin:$PATH
 
 # ===== 6. Environment for sccache =====
-ENV RUSTC_WRAPPER=sccache \
-    SCCACHE_DIR=/home/runner/.cache/sccache
+#ENV RUSTC_WRAPPER=sccache \
+#    SCCACHE_DIR=/home/runner/.cache/sccache
 
 # ===== --hack--. Add rust components left out of minimal install we'll need later.
 # TODO: just switch profiles, this is a hack to re-use existing layers
@@ -75,4 +75,3 @@ RUN rustup component add clippy rustfmt
 RUN --mount=type=bind,source=.,target=/tmp/src,readonly \
     . "$HOME/.cargo/env" && \
     cargo fetch --locked --manifest-path /tmp/src/Cargo.toml
-
