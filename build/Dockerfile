@@ -70,8 +70,15 @@ RUN rustup component add clippy rustfmt
 # --hack-- set rust for future builds. get rid of this when we do the next big rebuild
 RUN rustup default $(rustc --version | awk '{print $2}')
 
+
 ENV RUSTUP_HOME=/home/runner/.rustup \
     CARGO_HOME=/home/runner/.cargo
+
+# --hack-- install zstd
+USER root
+RUN apt-get update && apt-get install -y zstd \
+    && rm -rf /var/lib/apt/lists/*
+
 
 FROM scratch AS final
 COPY --from=build / /
