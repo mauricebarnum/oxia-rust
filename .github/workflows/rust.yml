@@ -25,8 +25,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  SCCACHE_DIR: ~/.cache/sccache
-  RUSTC_WRAPPER: ""
+  SCCACHE_DIR: ${{ github.workspace }}/target/.sccache
+  RUSTC_WRAPPER: sccache
   RUST_BACKTRACE: full
   CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: true
 
@@ -52,14 +52,6 @@ jobs:
 
       - name: checkout
         uses: actions/checkout@v4
-
-      # - name: Restore sccache cache
-      #   uses: actions/cache@v4
-      #   with:
-      #     path: ~/.cache/sccache
-      #     key: sccache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-      #     restore-keys: |
-      #       sccache-${{ runner.os }}-
 
       - name: enable-build-cache
         uses: Swatinem/rust-cache@v2
