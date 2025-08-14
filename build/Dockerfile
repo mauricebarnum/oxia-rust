@@ -73,5 +73,8 @@ RUN rustup default $(rustc --version | awk '{print $2}')
 ENV RUSTUP_HOME=/home/runner/.rustup \
     CARGO_HOME=/home/runner/.cargo
 
-FROM scratch as final
+FROM scratch AS final
 COPY --from=build / /
+ENV PATH=/home/runner/.cargo/bin:/home/runner/.go/bin:$PATH \
+    CARGO_HOME=/home/runner/.cargo \
+    RUSTUP_HOME=/home/runner/.rustup 
