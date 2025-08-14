@@ -71,12 +71,6 @@ jobs:
           cargo update --dry-run # update crate index
           cargo fetch --locked   # fetch dependencies: last network dependency
 
-      - name: prepare go cache
-        run: |
-          cache="$PWD/target/.gocache"
-          test -d $cache || mkdir -p $cache
-          echo "GOCACHE=$cache" >> $GITHUB_ENV
-
       - name: build
         run: cargo build --frozen --all-targets
 
