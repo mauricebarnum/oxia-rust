@@ -81,7 +81,7 @@ jobs:
         run: cargo build --frozen --all-targets
 
       - name: clippy
-        run: cargo clippy --no-deps --all-targets --all-features --frozen
+        run: cargo clippy --no-deps --all-targets --all-features --frozen --target-dir target/clippy
 
       - name: test
         timeout-minutes: 10
