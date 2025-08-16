@@ -22,7 +22,9 @@ where
     Fut: Future<Output = Result<T>>,
 {
     match timeout {
-        Some(t) => tokio::time::timeout(t, fut).await.map_err(Error::from)?,
+        Some(t) => tokio::time::timeout(t, fut)
+            .await
+            .map_err(Error::from_tokio_elapsed)?,
         None => fut.await,
     }
 }
