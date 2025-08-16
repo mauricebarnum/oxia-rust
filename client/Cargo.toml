@@ -38,3 +38,10 @@ oxia-bin-util = { path = "../oxia-bin-util" }
 
 [lints]
 workspace = true
+
+[package.metadata.cargo_check_external_types]
+allowed_external_types = [
+    "bytes::bytes::Bytes",
+    "tonic::status::Status",
+    "tonic::transport::error::*",
+]

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{cmp::Ordering, fmt::Display, sync::Arc};
+use std::{cmp::Ordering, fmt, fmt::Display, sync::Arc};
 
 use bytes::Bytes;
 
@@ -34,12 +34,69 @@ use crate::pool::ChannelPool;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+#[derive(Clone, Debug)]
+pub struct SecondaryIndex(oxia_proto::SecondaryIndex);
+
+impl SecondaryIndex {
+    pub fn new(name: impl Into<String>, key: impl Into<String>) -> Self {
+        Self(oxia_proto::SecondaryIndex {
+            index_name: name.into(),
+            secondary_key: key.into(),
+        })
+    }
+
+    pub fn index_name(&self) -> &str {
+        &self.0.index_name
+    }
+    pub fn secondary_key(&self) -> &str {
+        &self.0.secondary_key
+    }
+
+    // --- crate-only helpers; do not leak oxia_proto in public API ---
+    #[inline]
+    pub(crate) fn take_inner(&mut self) -> oxia_proto::SecondaryIndex {
+        // Cheap dummy: String::new() does not allocate.
+        std::mem::replace(
+            &mut self.0,
+            oxia_proto::SecondaryIndex {
+                index_name: String::new(),
+                secondary_key: String::new(),
+            },
+        )
+    }
+
+    #[inline]
+    pub(crate) fn clone_inner(&self) -> oxia_proto::SecondaryIndex {
+        self.0.clone()
+    }
+
+    pub(crate) fn into_proto_vec(
+        mut si: Option<Arc<[SecondaryIndex]>>,
+    ) -> Vec<oxia_proto::SecondaryIndex> {
+        match &mut si {
+            None => Vec::new(),
+            Some(arc) => {
+                if let Some(slice) = Arc::get_mut(arc) {
+                    // Unique: move out by replacing with dummies.
+                    let mut out = Vec::with_capacity(slice.len());
+                    for s in slice.iter_mut() {
+                        out.push(s.take_inner());
+                    }
+                    out
+                } else {
+                    arc.iter().map(SecondaryIndex::clone_inner).collect()
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct PutOptions {
     expected_version_id: Option<i64>,
     partition_key: Option<String>,
     sequence_key_deltas: Option<Arc<[u64]>>,
-    secondary_indexes: Option<Arc<[oxia_proto::SecondaryIndex]>>,
+    secondary_indexes: Option<Arc<[SecondaryIndex]>>,
     ephemeral: bool,
 }
 
@@ -67,10 +124,7 @@ impl PutOptions {
     }
 
     #[must_use]
-    pub fn secondary_indexes(
-        mut self,
-        value: impl Into<Arc<[oxia_proto::SecondaryIndex]>>,
-    ) -> Self {
+    pub fn secondary_indexes(mut self, value: impl Into<Arc<[SecondaryIndex]>>) -> Self {
         self.secondary_indexes = Some(value.into());
         self
     }
@@ -88,10 +142,10 @@ pub struct PutResponse {
     pub key: Option<String>,
 }
 
-impl From<oxia_proto::PutResponse> for PutResponse {
-    fn from(x: oxia_proto::PutResponse) -> Self {
+impl PutResponse {
+    fn from_proto(x: oxia_proto::PutResponse) -> Self {
         PutResponse {
-            version: x.version.into(),
+            version: RecordVersion::from_proto(x.version),
             key: x.key,
         }
     }
@@ -101,44 +155,52 @@ impl From<oxia_proto::PutResponse> for PutResponse {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum KeyComparisonType {
     /// The stored key must be equal to the requested key
-    Equal = 0,
+    Equal = oxia_proto::KeyComparisonType::Equal as i32,
     /// Search for a key that is the highest key that is <= to the requested key
-    Floor = 1,
+    Floor = oxia_proto::KeyComparisonType::Floor as i32,
     /// Search for a key that is the lowest key that is >= to the requested key
-    Ceiling = 2,
+    Ceiling = oxia_proto::KeyComparisonType::Ceiling as i32,
     /// Search for a key that is the highest key that is < to the requested key
-    Lower = 3,
+    Lower = oxia_proto::KeyComparisonType::Lower as i32,
     /// Search for a key that is the lowest key that is > to the requested key
-    Higher = 4,
+    Higher = oxia_proto::KeyComparisonType::Higher as i32,
 }
 
-impl Display for KeyComparisonType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                KeyComparisonType::Ceiling => "Ceiling",
-                KeyComparisonType::Equal => "Equal",
-                KeyComparisonType::Floor => "Floor",
-                KeyComparisonType::Higher => "Higher",
-                KeyComparisonType::Lower => "Lower",
-            }
-        )
+impl From<KeyComparisonType> for i32 {
+    fn from(k: KeyComparisonType) -> i32 {
+        k as i32
     }
 }
 
-impl From<oxia_proto::KeyComparisonType> for KeyComparisonType {
-    fn from(value: oxia_proto::KeyComparisonType) -> Self {
-        type X = oxia_proto::KeyComparisonType;
-        type Y = KeyComparisonType;
-        match value {
-            X::Equal => Y::Equal,
-            X::Floor => Y::Floor,
-            X::Ceiling => Y::Ceiling,
-            X::Lower => Y::Lower,
-            X::Higher => Y::Higher,
+impl TryFrom<i32> for KeyComparisonType {
+    type Error = crate::Error;
+
+    fn try_from(x: i32) -> Result<KeyComparisonType> {
+        match x {
+            x if x == KeyComparisonType::Equal as i32 => Ok(KeyComparisonType::Equal),
+            x if x == KeyComparisonType::Floor as i32 => Ok(KeyComparisonType::Floor),
+            x if x == KeyComparisonType::Ceiling as i32 => Ok(KeyComparisonType::Ceiling),
+            x if x == KeyComparisonType::Lower as i32 => Ok(KeyComparisonType::Lower),
+            x if x == KeyComparisonType::Higher as i32 => Ok(KeyComparisonType::Higher),
+            _ => Err(Error::InvalidKeyComparisonTypeValue(x)),
         }
+    }
+}
+
+fn to_proto(k: KeyComparisonType) -> oxia_proto::KeyComparisonType {
+    match k {
+        KeyComparisonType::Equal => oxia_proto::KeyComparisonType::Equal,
+        KeyComparisonType::Floor => oxia_proto::KeyComparisonType::Floor,
+        KeyComparisonType::Ceiling => oxia_proto::KeyComparisonType::Ceiling,
+        KeyComparisonType::Lower => oxia_proto::KeyComparisonType::Lower,
+        KeyComparisonType::Higher => oxia_proto::KeyComparisonType::Higher,
+    }
+}
+
+impl Display for KeyComparisonType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let proto = to_proto(*self);
+        write!(f, "{}", proto.as_str_name())
     }
 }
 
@@ -208,6 +270,21 @@ pub struct RecordVersion {
 }
 
 impl RecordVersion {
+    fn from_proto(value: Option<oxia_proto::Version>) -> Self {
+        if let Some(v) = value {
+            RecordVersion {
+                version_id: v.version_id,
+                modifications_count: v.modifications_count,
+                created_timestamp: v.created_timestamp,
+                modified_timestamp: v.modified_timestamp,
+                session_id: v.session_id,
+                client_identity: v.client_identity,
+            }
+        } else {
+            RecordVersion::default()
+        }
+    }
+
     pub fn is_ephemeral(&self) -> bool {
         self.session_id.is_some()
     }
@@ -235,29 +312,23 @@ impl Ord for RecordVersion {
     }
 }
 
-impl From<Option<oxia_proto::Version>> for RecordVersion {
-    fn from(value: Option<oxia_proto::Version>) -> Self {
-        if let Some(v) = value {
-            RecordVersion {
-                version_id: v.version_id,
-                modifications_count: v.modifications_count,
-                created_timestamp: v.created_timestamp,
-                modified_timestamp: v.modified_timestamp,
-                session_id: v.session_id,
-                client_identity: v.client_identity,
-            }
-        } else {
-            RecordVersion::default()
-        }
-    }
-}
-
 #[derive(Clone, Debug, Default, Eq)]
 pub struct GetResponse {
     pub value: Option<Bytes>,
     pub version: RecordVersion,
     pub key: Option<String>,
     pub secondary_index_key: Option<String>,
+}
+
+impl GetResponse {
+    fn from_proto(x: oxia_proto::GetResponse) -> Self {
+        GetResponse {
+            value: x.value,
+            version: RecordVersion::from_proto(x.version),
+            key: x.key,
+            secondary_index_key: x.secondary_index_key,
+        }
+    }
 }
 
 impl PartialEq for GetResponse {
@@ -285,16 +356,16 @@ impl Ord for GetResponse {
     }
 }
 
-impl From<oxia_proto::GetResponse> for GetResponse {
-    fn from(x: oxia_proto::GetResponse) -> Self {
-        GetResponse {
-            value: x.value,
-            version: x.version.into(),
-            key: x.key,
-            secondary_index_key: x.secondary_index_key,
-        }
-    }
-}
+// impl From<oxia_proto::GetResponse> for GetResponse {
+//     fn from(x: oxia_proto::GetResponse) -> Self {
+//         GetResponse {
+//             value: x.value,
+//             version: x.version.into(),
+//             key: x.key,
+//             secondary_index_key: x.secondary_index_key,
+//         }
+//     }
+// }
 
 #[derive(Clone, Debug, Default)]
 pub struct DeleteOptions {
@@ -418,15 +489,15 @@ impl Default for ListResponse {
     }
 }
 
-impl From<oxia_proto::ListResponse> for ListResponse {
-    fn from(x: oxia_proto::ListResponse) -> Self {
-        Self {
-            keys: x.keys.into_iter().map(|x| x.to_string()).collect(),
-            sorted: true,
-            partial: false,
-        }
-    }
-}
+// impl From<oxia_proto::ListResponse> for ListResponse {
+//     fn from(x: oxia_proto::ListResponse) -> Self {
+//         Self {
+//             keys: x.keys.into_iter().map(|x| x.to_string()).collect(),
+//             sorted: true,
+//             partial: false,
+//         }
+//     }
+// }
 
 #[derive(Clone, Debug)]
 pub struct RangeScanOptions {
@@ -497,7 +568,7 @@ impl RangeScanResponse {
         if !x.records.is_empty() {
             self.sorted = self.records.is_empty();
             self.records
-                .extend(x.records.into_iter().map(std::convert::Into::into));
+                .extend(x.records.into_iter().map(GetResponse::from_proto));
         }
     }
 
@@ -527,15 +598,15 @@ impl Default for RangeScanResponse {
     }
 }
 
-impl From<oxia_proto::RangeScanResponse> for RangeScanResponse {
-    fn from(x: oxia_proto::RangeScanResponse) -> Self {
-        Self {
-            records: x.records.into_iter().map(GetResponse::from).collect(),
-            sorted: true,
-            partial: false,
-        }
-    }
-}
+// impl From<oxia_proto::RangeScanResponse> for RangeScanResponse {
+//     fn from(x: oxia_proto::RangeScanResponse) -> Self {
+//         Self {
+//             records: x.records.into_iter().map(GetResponse::from).collect(),
+//             sorted: true,
+//             partial: false,
+//         }
+//     }
+// }
 
 #[derive(Clone, Debug, Default)]
 pub struct DeleteRangeOptions {

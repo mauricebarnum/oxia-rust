@@ -163,6 +163,9 @@ pub enum Error {
 
     #[error("Cancelled")]
     Cancelled,
+
+    #[error("Invalid KeyComparisonType value {0}")]
+    InvalidKeyComparisonTypeValue(i32),
 }
 
 impl Error {
@@ -212,6 +215,12 @@ impl Error {
         }
         None
     }
+
+    pub(crate) fn from_tokio_elapsed(e: tokio::time::error::Elapsed) -> Self {
+        Error::RequestTimeout {
+            source: Box::new(e),
+        }
+    }
 }
 
 impl From<tonic::Status> for Error {
@@ -230,13 +239,10 @@ impl From<tonic::Status> for Error {
     }
 }
 
-impl From<tokio::time::error::Elapsed> for Error {
-    fn from(value: tokio::time::error::Elapsed) -> Self {
-        Error::RequestTimeout {
-            source: Box::new(value),
-        }
-    }
-}
+// impl From<tokio::time::error::Elapsed> for Error {
+//     fn from(value: tokio::time::error::Elapsed) -> Self {
+//     }
+// }
 
 impl From<io::Error> for Error {
     fn from(value: io::Error) -> Self {

@@ -67,6 +67,10 @@ RUN cargo install cargo-binstall && cargo binstall cargo-nextest sccache
 # ===== Install Go =====
 RUN curl -fsSL "https://go.dev/dl/${GO_VERSION}.linux-${GO_ARCH}.tar.gz" | tar -C ${HOME} -xzf -
 
+# ====== Install cargo-check-external-types which requires nightly =====:w
+RUN rustup toolchain install nightly --profile minimal && \
+    cargo +nightly install cargo-check-external-types
+
 # ====== Fetch current dependencies =====
 RUN --mount=type=bind,dst=/src cargo fetch --locked --manifest-path=/src/Cargo.toml
 

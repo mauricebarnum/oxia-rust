@@ -32,9 +32,9 @@ use crate::pool::ChannelPool;
 use crate::{
     DeleteOptions, DeleteRangeOptions, Error, GetOptions, GetResponse, GrpcClient, ListOptions,
     ListResponse, OxiaError, PutOptions, PutResponse, RangeScanOptions, RangeScanResponse, Result,
-    config, create_grpc_client,
+    SecondaryIndex, config, create_grpc_client,
 };
-use mauricebarnum_oxia_common::proto as oxia_proto;
+use mauricebarnum_oxia_common::proto::{self as oxia_proto};
 
 /// Constants for Oxia protocol
 const STATUS_OK: i32 = 0;
@@ -258,13 +258,12 @@ impl Client {
     /// Creates a `GetRequest` with the appropriate options
     fn make_get_req(&self, opts: &GetOptions, k: impl Into<String>) -> oxia_proto::ReadRequest {
         let data = &self.data;
-        let ct = opts.comparison_type as i32;
         oxia_proto::ReadRequest {
             shard: Some(data.shard_id),
             gets: vec![oxia_proto::GetRequest {
                 key: k.into(),
                 include_value: opts.include_value,
-                comparison_type: ct,
+                comparison_type: opts.comparison_type.into(),
                 secondary_index_name: None,
             }],
         }
@@ -291,9 +290,7 @@ impl Client {
                 sequence_key_delta: opts
                     .sequence_key_deltas
                     .map_or_else(Vec::new, |x| (*x).to_vec()),
-                secondary_indexes: opts
-                    .secondary_indexes
-                    .map_or_else(Vec::new, |x| (*x).to_vec()),
+                secondary_indexes: SecondaryIndex::into_proto_vec(opts.secondary_indexes),
             }],
             deletes: vec![],
             delete_ranges: vec![],
@@ -483,7 +480,7 @@ impl Client {
 
         let r = rsp.gets.into_iter().next().unwrap();
         match Status::try_from(r.status) {
-            Ok(Status::Ok) => Ok(Some(r.into())),
+            Ok(Status::Ok) => Ok(Some(GetResponse::from_proto(r))),
             Ok(Status::KeyNotFound) => Ok(None),
             _ => Err(OxiaError::from(r.status).into()),
         }
@@ -559,7 +556,7 @@ impl Client {
         }
 
         let p = rsp.puts.into_iter().next().unwrap();
-        Ok(p.into())
+        Ok(PutResponse::from_proto(p))
     }
 
     /// Deletes a key with the given options
