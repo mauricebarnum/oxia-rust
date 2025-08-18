@@ -12,37 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package balancer
+package actions
 
-import (
-	"io"
+type Type string
 
-	"golang.org/x/net/context"
-
-	"github.com/oxia-db/oxia/coordinator/actions"
-
-	"github.com/oxia-db/oxia/coordinator/resources"
-
-	"github.com/oxia-db/oxia/coordinator/selectors"
+const (
+	SwapNode Type = "swap-node"
+	Election Type = "election"
 )
 
-type Options struct {
-	context.Context
+type Action interface {
+	Type() Type
 
-	StatusResource        resources.StatusResource
-	ClusterConfigResource resources.ClusterConfigResource
-
-	NodeAvailableJudger func(nodeID string) bool
-}
-
-type LoadBalancer interface {
-	io.Closer
-
-	Trigger()
-
-	Action() <-chan actions.Action
-
-	IsBalanced() bool
-
-	LoadRatioAlgorithm() selectors.LoadRatioAlgorithm
+	Done(t any)
 }

@@ -12,37 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package balancer
+package io
 
-import (
-	"io"
+import "io"
 
-	"golang.org/x/net/context"
+var _ io.Closer = &NopCloser{}
 
-	"github.com/oxia-db/oxia/coordinator/actions"
-
-	"github.com/oxia-db/oxia/coordinator/resources"
-
-	"github.com/oxia-db/oxia/coordinator/selectors"
-)
-
-type Options struct {
-	context.Context
-
-	StatusResource        resources.StatusResource
-	ClusterConfigResource resources.ClusterConfigResource
-
-	NodeAvailableJudger func(nodeID string) bool
+type NopCloser struct {
 }
 
-type LoadBalancer interface {
-	io.Closer
-
-	Trigger()
-
-	Action() <-chan actions.Action
-
-	IsBalanced() bool
-
-	LoadRatioAlgorithm() selectors.LoadRatioAlgorithm
+func (*NopCloser) Close() error {
+	return nil
 }
