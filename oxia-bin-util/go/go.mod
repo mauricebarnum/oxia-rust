@@ -2,7 +2,7 @@ module oxia-tools
 
 go 1.24.4
 
-require github.com/oxia-db/oxia v0.14.1
+require github.com/oxia-db/oxia v0.14.2
 
 require (
 	github.com/DataDog/zstd v1.4.5 // indirect
@@ -32,7 +32,7 @@ require (
 	github.com/go-openapi/jsonpointer v0.21.1 // indirect
 	github.com/go-openapi/jsonreference v0.21.0 // indirect
 	github.com/go-openapi/swag v0.23.1 // indirect
-	github.com/go-viper/mapstructure/v2 v2.2.1 // indirect
+	github.com/go-viper/mapstructure/v2 v2.3.0 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/snappy v1.0.0 // indirect
 	github.com/google/gnostic-models v0.6.9 // indirect

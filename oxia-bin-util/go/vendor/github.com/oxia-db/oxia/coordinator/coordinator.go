@@ -25,6 +25,8 @@ import (
 	"go.uber.org/multierr"
 	pb "google.golang.org/protobuf/proto"
 
+	"github.com/oxia-db/oxia/coordinator/actions"
+
 	"github.com/oxia-db/oxia/coordinator/controllers"
 	"github.com/oxia-db/oxia/coordinator/resources"
 
@@ -136,7 +138,7 @@ func (c *coordinator) ConfigChanged(newConfig *model.ClusterConfig) {
 			_ = nc.Close()
 			delete(c.drainingNodes, sa.GetIdentifier())
 		}
-		c.nodeControllers[sa.GetIdentifier()] = controllers.NewNodeController(sa, c, c, c.rpc)
+		c.nodeControllers[sa.GetIdentifier()] = controllers.NewNodeController(c.ctx, sa, c, c, c.rpc)
 	}
 
 	// Check for nodes to remove
@@ -270,7 +272,13 @@ func (c *coordinator) NodeBecameUnavailable(node model.Server) {
 	if nc, ok := c.drainingNodes[node.GetIdentifier()]; ok {
 		// The draining node became unavailable. Let's remove it
 		delete(c.drainingNodes, node.GetIdentifier())
-		_ = nc.Close()
+		go func() {
+			// the callback will come from the node controller internal health check goroutine,
+			// we should close it in the background goroutines to avoid any unexpected deadlock here
+			if err := nc.Close(); err != nil {
+				c.Error("Failed to close node controller", slog.String("node", node.GetIdentifier()), slog.Any("error", err))
+			}
+		}()
 	}
 
 	ctrls := make(map[int64]controllers.ShardController)
@@ -302,36 +310,58 @@ func (c *coordinator) startBackgroundActionWorker() {
 	defer c.Done()
 	for {
 		select {
-		case action := <-c.loadBalancer.Action():
-			switch action.Type() { //nolint:revive,gocritic
-			case balancer.SwapNode:
-				c.handleActionSwap(action)
+		case ac := <-c.loadBalancer.Action():
+			switch ac.Type() {
+			case actions.SwapNode:
+				c.handleActionSwap(ac)
+			case actions.Election:
+				c.handleActionElection(ac)
 			}
+
 		case <-c.ctx.Done():
 			return
 		}
 	}
 }
 
-func (c *coordinator) handleActionSwap(action balancer.Action) {
-	var ac *balancer.SwapNodeAction
+func (c *coordinator) handleActionElection(ac actions.Action) {
+	var electionAc *actions.ElectionAction
 	var ok bool
-	if ac, ok = action.(*balancer.SwapNodeAction); !ok {
+	if electionAc, ok = ac.(*actions.ElectionAction); !ok {
 		panic("unexpected action type")
 	}
-	defer ac.Done()
 	c.Info("Applying swap action", slog.Any("swap-action", ac))
 
 	c.RLock()
-	sc, ok := c.shardControllers[ac.Shard]
+	sc, ok := c.shardControllers[electionAc.Shard]
 	c.RUnlock()
 	if !ok {
-		c.Warn("Shard controller not found", slog.Int64("shard", ac.Shard))
+		c.Warn("Shard controller not found", slog.Int64("shard", electionAc.Shard))
+		electionAc.Done(nil)
+		return
+	}
+	electionAc.Done(sc.Election(electionAc))
+}
+
+func (c *coordinator) handleActionSwap(ac actions.Action) {
+	var swapAction *actions.SwapNodeAction
+	var ok bool
+	if swapAction, ok = ac.(*actions.SwapNodeAction); !ok {
+		panic("unexpected action type")
+	}
+	defer swapAction.Done(nil)
+	c.Info("Applying swap action", slog.Any("swap-action", ac))
+
+	c.RLock()
+	sc, ok := c.shardControllers[swapAction.Shard]
+	c.RUnlock()
+	if !ok {
+		c.Warn("Shard controller not found", slog.Int64("shard", swapAction.Shard))
 		return
 	}
 
-	if err := sc.SwapNode(ac.From, ac.To); err != nil {
-		c.Warn("Failed to swap node", slog.Any("error", err), slog.Any("swap-action", ac))
+	if err := sc.SwapNode(swapAction.From, swapAction.To); err != nil {
+		c.Warn("Failed to swap node", slog.Any("error", err), slog.Int64("shard", swapAction.Shard), slog.Any("swap-action", ac))
 	}
 }
 
@@ -401,6 +431,12 @@ func NewCoordinator(meta metadata.Provider,
 		Context:               c.ctx,
 		StatusResource:        c.statusResource,
 		ClusterConfigResource: c.configResource,
+		NodeAvailableJudger: func(nodeID string) bool {
+			c.RLock()
+			defer c.RUnlock()
+			nc := c.nodeControllers[nodeID]
+			return nc.Status() == controllers.Running
+		},
 	})
 
 	clusterConfig := c.configResource.Load()
@@ -408,7 +444,7 @@ func NewCoordinator(meta metadata.Provider,
 
 	// init node controllers
 	for _, node := range clusterConfig.Servers {
-		c.nodeControllers[node.GetIdentifier()] = controllers.NewNodeController(node, c, c, c.rpc)
+		c.nodeControllers[node.GetIdentifier()] = controllers.NewNodeController(c.ctx, node, c, c, c.rpc)
 	}
 
 	// init status

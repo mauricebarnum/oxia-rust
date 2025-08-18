@@ -12,37 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package balancer
+package actions
 
-import (
-	"io"
+import "sync"
 
-	"golang.org/x/net/context"
+type ElectionAction struct {
+	Shard int64
 
-	"github.com/oxia-db/oxia/coordinator/actions"
-
-	"github.com/oxia-db/oxia/coordinator/resources"
-
-	"github.com/oxia-db/oxia/coordinator/selectors"
-)
-
-type Options struct {
-	context.Context
-
-	StatusResource        resources.StatusResource
-	ClusterConfigResource resources.ClusterConfigResource
-
-	NodeAvailableJudger func(nodeID string) bool
+	NewLeader string
+	Waiter    *sync.WaitGroup
 }
 
-type LoadBalancer interface {
-	io.Closer
+func (e *ElectionAction) Done(leader any) {
+	e.NewLeader = leader.(string) //nolint:revive
+	e.Waiter.Done()
+}
 
-	Trigger()
+func (*ElectionAction) Type() Type {
+	return Election
+}
 
-	Action() <-chan actions.Action
-
-	IsBalanced() bool
-
-	LoadRatioAlgorithm() selectors.LoadRatioAlgorithm
+func (e *ElectionAction) Clone() *ElectionAction {
+	return &ElectionAction{
+		Shard:  e.Shard,
+		Waiter: &sync.WaitGroup{},
+	}
 }
