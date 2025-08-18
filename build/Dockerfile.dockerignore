@@ -11,3 +11,6 @@
 
 # Allow build files (Dockerfile and any supporting scripts in build/)
 !build/**
+
+# Include go source tree
+!oxia-bin-util/go/**
