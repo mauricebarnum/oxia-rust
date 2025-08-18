@@ -13,13 +13,19 @@
 // limitations under the License.
 
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process;
+use std::process::ExitCode;
 use std::process::{Command, Stdio};
 
+use is_executable::IsExecutable;
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
+
+const OXIA_BIN: &str = "oxia";
 
 // Derive .../target/{profile} from OUT_DIR
 fn get_target_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
@@ -37,13 +43,13 @@ fn get_target_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
     Err("Could not find target directory root".into())
 }
 
-fn build_oxia_cli() -> io::Result<()> {
+fn build_oxia_cli() -> io::Result<OsString> {
     const OXIA_MOD: &str = "github.com/oxia-db/oxia";
     let tools_src_dir = Path::new("go");
     let vendor_root = tools_src_dir.join("vendor").join(OXIA_MOD);
 
     let target_dir = get_target_dir().unwrap();
-    let oxia_path = target_dir.join("oxia-bin");
+    let oxia_path = target_dir.join(OXIA_BIN);
     let oxia_path_str = oxia_path.to_str().unwrap().to_string();
 
     let go_mod = tools_src_dir.join("go.mod").to_str().unwrap().to_string();
@@ -53,6 +59,7 @@ fn build_oxia_cli() -> io::Result<()> {
     println!("cargo:rerun-if-changed={}", vendor_root.display());
     println!("cargo:rerun-if-changed={go_mod}");
     println!("cargo:rerun-if-changed={go_sum}");
+    println!("cargo:rerun-if-changed={oxia_path_str}");
 
     // Compute a stable content hash of all relevant Go sources + go.mod/go.sum
     let mut hasher = Sha256::new();
@@ -98,11 +105,35 @@ fn build_oxia_cli() -> io::Result<()> {
     }
 
     // Keep exporting the path to the built binary for consumers
-    println!("cargo:rustc-env=OXIA_BIN_PATH={oxia_path_str}");
-    Ok(())
+    Ok(oxia_path_str.into())
 }
 
-fn main() {
-    // Propagate IO errors as panics to fail the build clearly
-    build_oxia_cli().unwrap();
+fn find_oxia_in_path() -> Option<PathBuf> {
+    env::split_paths(env::var_os("PATH").as_ref()?)
+        .map(|d| d.join(OXIA_BIN))
+        .find(|p| p.is_executable())
+}
+
+fn main() -> process::ExitCode {
+    let oxia_bin = env::var_os("OXIA_BIN")
+        .or_else(|| {
+            if env::var_os("OXIA_BIN_IGNORE_PATH").is_some() {
+                None
+            } else {
+                find_oxia_in_path().map(PathBuf::into)
+            }
+        })
+        .or_else(|| Some(build_oxia_cli().unwrap()));
+
+    let Some(oxia_bin) = oxia_bin else {
+        return ExitCode::FAILURE;
+    };
+
+    println!("cargo:rerun-if-env-changed=OXIA_BIN_PATH");
+    println!("cargo:rerun-if-env-changed=OXIA_BIN_IGNORE_PATH");
+    println!("cargo:rerun-if-env-changed=PATH");
+    println!("cargo:rustc-env=OXIA_BIN_PATH={}", oxia_bin.display());
+    println!("cargo:warning=OXIA_BIN_PATH={}", oxia_bin.display());
+
+    ExitCode::SUCCESS
 }
