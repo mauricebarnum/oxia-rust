@@ -46,7 +46,7 @@ fn get_target_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
 fn build_oxia_cli() -> io::Result<OsString> {
     const OXIA_MOD: &str = "github.com/oxia-db/oxia";
     let tools_src_dir = Path::new("go");
-    let vendor_root = tools_src_dir.join("vendor").join(OXIA_MOD);
+    let vendor_root = tools_src_dir.join("vendor");
 
     let target_dir = get_target_dir().unwrap();
     let oxia_path = target_dir.join(OXIA_BIN);
@@ -79,7 +79,6 @@ fn build_oxia_cli() -> io::Result<OsString> {
         }
     }
     let new_hash = format!("{:x}", hasher.finalize());
-
     let hash_path = oxia_path.with_extension("sha256");
     let old_hash = fs::read_to_string(&hash_path).ok();
 
