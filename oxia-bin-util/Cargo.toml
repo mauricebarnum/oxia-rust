@@ -8,6 +8,7 @@ publish = false
 workspace = true
 
 [build-dependencies]
+base16ct = { version = "0.2.0", features = ["alloc"] }
 is_executable = "1.0.4"
 sha2 = "0.10.9"
 walkdir = "2.5.0"
