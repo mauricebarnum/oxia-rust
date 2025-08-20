@@ -20,6 +20,11 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::process::ExitCode;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Instant;
 
 use is_executable::IsExecutable;
 use sha2::{Digest, Sha256};
@@ -46,7 +51,7 @@ fn get_target_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
 fn build_oxia_cli() -> io::Result<OsString> {
     const OXIA_MOD: &str = "github.com/oxia-db/oxia";
     let tools_src_dir = Path::new("go");
-    let vendor_root = tools_src_dir.join("vendor").join(OXIA_MOD);
+    let vendor_root = tools_src_dir.join("vendor");
 
     let target_dir = get_target_dir().unwrap();
     let oxia_path = target_dir.join(OXIA_BIN);
@@ -61,25 +66,7 @@ fn build_oxia_cli() -> io::Result<OsString> {
     println!("cargo:rerun-if-changed={go_sum}");
     println!("cargo:rerun-if-changed={oxia_path_str}");
 
-    // Compute a stable content hash of all relevant Go sources + go.mod/go.sum
-    let mut hasher = Sha256::new();
-
-    // Hash go.mod / go.sum
-    hasher.update(fs::read(&go_mod)?);
-    hasher.update(fs::read(&go_sum)?);
-
-    // Hash all .go files under the vendored oxia module
-    for entry in WalkDir::new(&vendor_root)
-        .into_iter()
-        .filter_map(Result::ok)
-    {
-        let path = entry.path();
-        if path.is_file() && path.extension().is_some_and(|e| e == "go") {
-            hasher.update(fs::read(path)?);
-        }
-    }
-    let new_hash = format!("{:x}", hasher.finalize());
-
+    let new_hash = hash_sources(&vendor_root, go_mod, go_sum);
     let hash_path = oxia_path.with_extension("sha256");
     let old_hash = fs::read_to_string(&hash_path).ok();
 
@@ -106,6 +93,67 @@ fn build_oxia_cli() -> io::Result<OsString> {
 
     // Keep exporting the path to the built binary for consumers
     Ok(oxia_path_str.into())
+}
+
+fn hash_sources(vendor_root: &Path, go_mod: impl AsRef<str>, go_sum: impl AsRef<str>) -> String {
+    let start = Instant::now();
+
+    let hash = thread::scope(|s| {
+        let npar = std::thread::available_parallelism().unwrap().get();
+        let (path_tx, path_rx) = mpsc::sync_channel::<PathBuf>(npar * 4);
+        let (hash_tx, hash_rx) = mpsc::sync_channel::<[u8; 32]>(npar * 4);
+        let path_rx = Arc::new(Mutex::new(path_rx));
+
+        // enqueue files to hash
+        {
+            let vendor_root = vendor_root.to_path_buf();
+            let go_mod = PathBuf::from(go_mod.as_ref());
+            let go_sum = PathBuf::from(go_sum.as_ref());
+            let tx = path_tx.clone();
+            s.spawn(move || {
+                tx.send(go_mod).unwrap();
+                tx.send(go_sum).unwrap();
+                for entry in WalkDir::new(vendor_root).into_iter().filter_map(Result::ok) {
+                    let p = entry.path();
+                    if p.is_file() && p.extension().is_some_and(|e| e == "go") {
+                        tx.send(p.to_path_buf()).unwrap();
+                    }
+                }
+            });
+        }
+
+        // hash files in parallel
+        for _ in 0..npar {
+            let rx = path_rx.clone();
+            let tx = hash_tx.clone();
+            s.spawn(move || {
+                let mut h = Sha256::new();
+                while let Ok(p) = rx.lock().unwrap().recv() {
+                    if p.is_file() && p.extension().is_some_and(|e| e == "go") {
+                        h.update(fs::read(p).unwrap());
+                    }
+                }
+                tx.send(h.finalize().into()).unwrap();
+            });
+        }
+
+        drop(path_tx);
+        drop(hash_tx);
+
+        let mut hasher = Sha256::new();
+        for partial in hash_rx {
+            hasher.update(partial);
+        }
+        base16ct::lower::encode_string(&hasher.finalize())
+    });
+
+    let elapsed = start.elapsed();
+    println!(
+        "cargo:warning=hash_sources elapsed: {}.{:09}s",
+        elapsed.as_secs(),
+        elapsed.subsec_nanos()
+    );
+    hash
 }
 
 fn find_oxia_in_path() -> Option<PathBuf> {
