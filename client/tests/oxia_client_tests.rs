@@ -12,6 +12,8 @@ use std::sync::Arc;
 use std::time::Duration;
 // use tokio::time::timeout;
 
+use futures::StreamExt;
+use mauricebarnum_oxia_client::NotificationType;
 use mauricebarnum_oxia_client::{self as client, config};
 // Import the Oxia client types
 use client::{
@@ -24,6 +26,7 @@ use common::TestResultExt;
 use common::non_zero;
 use common::trace_err;
 use mauricebarnum_oxia_client::OxiaError::KeyNotFound;
+use tokio::time::timeout;
 
 /// Helper function to create a test client
 async fn create_test_client_nshards(nshards: u32) -> Result<(common::TestServer, Client)> {
@@ -56,9 +59,9 @@ async fn test_basic_crud_operations() -> Result<()> {
 
     // Test Put operation
     let key = test_key("basic-crud");
-    let value = b"test-value-0".to_vec();
+    let value = &b"test-value-0"[..];
 
-    let put_result = client.put(&key, value.clone()).await?;
+    let put_result = client.put(&key, value).await?;
     assert_eq!(put_result.version.modifications_count, 0);
     assert!(put_result.version.version_id >= 0);
 
@@ -483,62 +486,53 @@ async fn test_get_without_value() -> Result<()> {
     Ok(())
 }
 
-// #[test_log::test(tokio::test)]
-// async fn test_notifications() -> Result<()> {
-//     let (_server, client) = create_test_client().await?;
-//
-//     // Create notifications stream
-//     let mut notifications = client::make_notifications_stream(&client)?;
-//
-//     let key = test_key("notifications");
-//
-//     // Put a new record - should generate KeyCreated notification
-//     let put_result = client.put(&key, b"value1").await?;
-//
-//     // Check for notification
-//     if let Some(batch_result) = timeout(Duration::from_secs(5), notifications.next()).await? {
-//         let batch = batch_result?;
-//
-//         // Find notification for our key
-//         if let Some(notification) = batch.notifications.get(&key) {
-//             assert_eq!(
-//                 notification.type_,
-//                 oxia_client::NotificationType::KeyCreated
-//             );
-//             assert_eq!(notification.version_id, Some(put_result.version.version_id));
-//         }
-//     }
-//
-//     // Update the record - should generate KeyModified notification
-//     client.put(&key, b"value2").await?;
-//
-//     if let Some(batch_result) = timeout(Duration::from_secs(5), notifications.next()).await? {
-//         let batch = batch_result?;
-//
-//         if let Some(notification) = batch.notifications.get(&key) {
-//             assert_eq!(
-//                 notification.type_,
-//                 oxia_client::NotificationType::KeyModified
-//             );
-//         }
-//     }
-//
-//     // Delete the record - should generate KeyDeleted notification
-//     client.delete(&key).await?;
-//
-//     if let Some(batch_result) = timeout(Duration::from_secs(5), notifications.next()).await? {
-//         let batch = batch_result?;
-//
-//         if let Some(notification) = batch.notifications.get(&key) {
-//             assert_eq!(
-//                 notification.type_,
-//                 oxia_client::NotificationType::KeyDeleted
-//             );
-//         }
-//     }
-//
-//     Ok(())
-// }
+#[test_log::test(tokio::test)]
+async fn test_notifications() -> anyhow::Result<()> {
+    let (_server, client) = create_test_client().await?;
+
+    // Create notifications stream
+    let mut notifications = client.create_notifications_stream()?;
+
+    let key = test_key("notifications");
+
+    // Put a new record - should generate KeyCreated notification
+    let put_result = client.put(&key, &b"value1"[..]).await?;
+
+    // Check for notification
+    if let Some(batch_result) = timeout(Duration::from_secs(5), notifications.next()).await? {
+        let batch = batch_result?;
+
+        // Find notification for our key
+        if let Some(notification) = batch.notifications.get(&key) {
+            assert_eq!(notification.type_, NotificationType::KeyCreated);
+            assert_eq!(notification.version_id, Some(put_result.version.version_id));
+        }
+    }
+
+    // Update the record - should generate KeyModified notification
+    client.put(&key, &b"value2"[..]).await?;
+
+    if let Some(batch_result) = timeout(Duration::from_secs(5), notifications.next()).await? {
+        let batch = batch_result?;
+
+        if let Some(notification) = batch.notifications.get(&key) {
+            assert_eq!(notification.type_, NotificationType::KeyModified);
+        }
+    }
+
+    // Delete the record - should generate KeyDeleted notification
+    client.delete(&key).await?;
+
+    if let Some(batch_result) = timeout(Duration::from_secs(5), notifications.next()).await? {
+        let batch = batch_result?;
+
+        if let Some(notification) = batch.notifications.get(&key) {
+            assert_eq!(notification.type_, NotificationType::KeyDeleted);
+        }
+    }
+
+    Ok(())
+}
 
 #[test_log::test(tokio::test)]
 async fn test_version_ordering() -> Result<()> {
