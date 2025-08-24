@@ -13,17 +13,18 @@
 // limitations under the License.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::Poll;
 use std::time::Duration;
 use std::{str::FromStr, sync::Arc};
 
 use bytes::Bytes;
+use futures::StreamExt;
 use rand::SeedableRng;
 use rand::distr::{Distribution, Uniform};
 use rand::rngs::StdRng;
 use tokio::sync::{Mutex, OnceCell, watch};
 use tokio::{task::JoinHandle, time::sleep};
 use tokio_stream::Stream;
-use tokio_stream::StreamExt as _;
 use tonic::Streaming;
 use tonic::metadata::MetadataValue;
 use tracing::{debug, info, trace, warn};
@@ -163,7 +164,7 @@ impl Client {
     fn start_heartbeat(&self, session_id: i64) -> JoinHandle<()> {
         let session_timeout_ms = self.data.config.session_timeout().as_millis();
         assert!(
-            (session_timeout_ms <= u128::from(u32::MAX)),
+            session_timeout_ms <= u128::from(u32::MAX),
             "bug: time out out of range {} max {}",
             session_timeout_ms,
             u32::MAX
@@ -207,7 +208,7 @@ impl Client {
     }
 
     /// Creates a new Client instance for a specific shard
-    pub(super) fn new(
+    pub(crate) fn new(
         grpc: GrpcClient,
         config: Arc<config::Config>,
         shard_id: i64,
@@ -226,6 +227,10 @@ impl Client {
             data: Arc::new(ClientData::new(config, grpc, shard_id, dest, meta)),
             session: Arc::new(OnceCell::new()),
         })
+    }
+
+    pub(crate) fn id(&self) -> i64 {
+        self.data.shard_id
     }
 
     async fn create_session(&self) -> Result<Session> {
@@ -447,7 +452,7 @@ impl Client {
     }
 
     /// Retrieves a key with the given options
-    pub(super) async fn get(
+    pub(crate) async fn get(
         &self,
         k: impl Into<String>,
         opts: GetOptions,
@@ -491,7 +496,7 @@ impl Client {
     }
 
     // /// Gets multiple keys in a single batch request
-    // pub(super) async fn batch_get(
+    // pub(crate) async fn batch_get(
     //     &self,
     //     keys: Vec<String>,
     //     opts: GetOptions,
@@ -540,7 +545,7 @@ impl Client {
     // }
 
     /// Puts a value with the given options
-    pub(super) async fn put(
+    pub(crate) async fn put(
         &self,
         key: impl Into<String>,
         value: Bytes,
@@ -564,7 +569,7 @@ impl Client {
     }
 
     /// Deletes a key with the given options
-    pub(super) async fn delete(
+    pub(crate) async fn delete(
         &self,
         key: impl Into<String>,
         options: DeleteOptions,
@@ -580,7 +585,7 @@ impl Client {
     }
 
     /// Deletes a range of keys with the given options
-    pub(super) async fn delete_range(
+    pub(crate) async fn delete_range(
         &self,
         start_inclusive: impl Into<String>,
         end_exclusive: impl Into<String>,
@@ -593,7 +598,7 @@ impl Client {
     }
 
     /// Lists keys in the given range with options
-    pub(super) async fn list(
+    pub(crate) async fn list(
         &self,
         start_inclusive: impl Into<String>,
         end_exclusive: impl Into<String>,
@@ -626,7 +631,7 @@ impl Client {
 
     /// Gets a list with timeout handling
     #[allow(dead_code)]
-    pub(super) async fn list_with_timeout(
+    pub(crate) async fn list_with_timeout(
         &self,
         start_inclusive: impl Into<String>,
         end_exclusive: impl Into<String>,
@@ -643,7 +648,7 @@ impl Client {
     }
 
     /// Scans for records in the given range with options
-    pub(super) async fn range_scan(
+    pub(crate) async fn range_scan(
         &self,
         start_inclusive: impl Into<String>,
         end_exclusive: impl Into<String>,
@@ -673,9 +678,27 @@ impl Client {
 
         Ok(rsp)
     }
+
+    pub(crate) async fn get_notifications(
+        &self,
+        start_offset_exclusive: Option<i64>,
+    ) -> Result<NotificationsStream> {
+        let req = oxia_proto::NotificationsRequest {
+            shard: self.data.shard_id,
+            start_offset_exclusive,
+        };
+
+        self.data
+            .grpc
+            .clone()
+            .get_notifications(req)
+            .await
+            .map(|r| NotificationsStream::from_proto(r.into_inner()))
+            .map_err(std::convert::Into::into)
+    }
 }
 
-/// Trait for a shard mapping strategy.
+/// Trait for a shardfmapping strategy.
 ///
 /// Note: this trait is object-safe, despite being using with static dispatch.  This is to
 /// facilitate possibly supporting more than one mapping strategy later.
@@ -986,6 +1009,37 @@ mod searchable {
         type Target = [Shard];
         fn deref(&self) -> &Self::Target {
             &self.shards
+        }
+    }
+}
+
+pub(crate) struct NotificationsStream {
+    inner: tonic::Streaming<oxia_proto::NotificationBatch>,
+}
+
+impl NotificationsStream {
+    fn from_proto(inner: tonic::Streaming<oxia_proto::NotificationBatch>) -> Self {
+        Self { inner }
+    }
+}
+
+impl Stream for NotificationsStream {
+    type Item = crate::Result<crate::NotificationBatch>;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        match self.get_mut().inner.poll_next_unpin(cx) {
+            Poll::Ready(Some(item)) => {
+                let r = match item {
+                    Ok(b) => Ok(crate::NotificationBatch::from_proto(b)),
+                    Err(e) => Err(e.into()),
+                };
+                Poll::Ready(Some(r))
+            }
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
         }
     }
 }

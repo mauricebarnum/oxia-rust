@@ -12,7 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{cmp::Ordering, fmt, fmt::Display, sync::Arc};
+use std::{
+    cmp::Ordering,
+    collections::HashMap,
+    fmt::{self, Display},
+    sync::Arc,
+};
 
 use bytes::Bytes;
 
@@ -22,6 +27,7 @@ use tonic::transport::Channel;
 
 pub mod config;
 pub mod errors;
+mod notification;
 mod pool;
 mod shard;
 mod util;
@@ -30,7 +36,7 @@ use mauricebarnum_oxia_common::proto as oxia_proto;
 
 pub use errors::*;
 
-use crate::pool::ChannelPool;
+use crate::{notification::NotificationsStream, pool::ChannelPool};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -601,6 +607,69 @@ impl DeleteRangeOptions {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(i32)]
+pub enum NotificationType {
+    KeyCreated = oxia_proto::NotificationType::KeyCreated as i32,
+    KeyModified = oxia_proto::NotificationType::KeyModified as i32,
+    KeyDeleted = oxia_proto::NotificationType::KeyDeleted as i32,
+    KeyRangeDeleted = oxia_proto::NotificationType::KeyRangeDeleted as i32,
+    Unknown(i32),
+}
+
+impl From<i32> for NotificationType {
+    fn from(x: i32) -> Self {
+        use oxia_proto::NotificationType as p;
+        match x {
+            x if x == p::KeyCreated as i32 => NotificationType::KeyCreated,
+            x if x == p::KeyModified as i32 => NotificationType::KeyModified,
+            x if x == p::KeyDeleted as i32 => NotificationType::KeyDeleted,
+            x if x == p::KeyRangeDeleted as i32 => NotificationType::KeyRangeDeleted,
+            other => NotificationType::Unknown(other),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Notification {
+    pub type_: NotificationType,
+    pub version_id: Option<i64>,
+    pub key_range_last: Option<String>,
+}
+
+impl Notification {
+    fn from_proto(x: oxia_proto::Notification) -> Self {
+        Self {
+            type_: x.r#type.into(),
+            version_id: x.version_id,
+            key_range_last: x.key_range_last,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NotificationBatch {
+    pub shard: i64,
+    pub offset: i64,
+    pub timestamp: u64,
+    pub notifications: HashMap<String, Notification>,
+}
+
+impl NotificationBatch {
+    fn from_proto(x: oxia_proto::NotificationBatch) -> Self {
+        Self {
+            shard: x.shard,
+            offset: x.offset,
+            timestamp: x.timestamp,
+            notifications: x
+                .notifications
+                .into_iter()
+                .map(|(k, v)| (k, Notification::from_proto(v)))
+                .collect(),
+        }
+    }
+}
+
 type GrpcClient = oxia_proto::OxiaClientClient<Channel>;
 
 pub(crate) async fn create_grpc_client(
@@ -993,5 +1062,13 @@ impl Client {
     ) -> Result<RangeScanResponse> {
         self.range_scan_with_options(start_inclusive, end_exclusive, RangeScanOptions::default())
             .await
+    }
+
+    pub fn create_notifications_stream(&self) -> Result<notification::NotificationsStream> {
+        let shard_manager = self.get_shard_manager()?;
+        Ok(NotificationsStream::new(
+            self.config.clone(),
+            shard_manager.clone(),
+        ))
     }
 }
