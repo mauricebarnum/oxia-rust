@@ -1100,21 +1100,18 @@ impl Manager {
     }
 
     /// Gets a client by shard id
-    pub(crate) async fn get_client_by_shard_id(&self, _namespace: &str, id: i64) -> Result<Client> {
+    pub(crate) async fn get_client_by_shard_id(&self, id: i64) -> Result<Client> {
         self.shards.lock().await.find_by_id(id)
     }
 
     /// Gets a client for the shard that handles the given key
-    pub(crate) async fn get_client(&self, _namespace: &str, key: &str) -> Result<Client> {
+    pub(crate) async fn get_client(&self, key: &str) -> Result<Client> {
         self.shards.lock().await.find_by_key(key)
     }
 
     /// Returns a stream containing a snapshot of the current clients.  Use `for_each_shard` to
     /// work on a locked shards.
-    pub(crate) async fn shard_stream(
-        &self,
-        _namespace: &str,
-    ) -> impl Stream<Item = Client> + use<> {
+    pub(crate) async fn shard_stream(&self) -> impl Stream<Item = Client> + use<> {
         let clients: Vec<Client> = {
             let lock = self.shards.lock().await;
             lock.shards.iter().map(|s| s.client.clone()).collect()
