@@ -1113,21 +1113,6 @@ impl Manager {
         self.shards.lock().await.find_by_key(key)
     }
 
-    /// Executes a function on each shard client
-    #[allow(dead_code)]
-    pub(super) async fn for_each_shard<R, F>(&self, _namespace: &str, mut f: F) -> Option<R>
-    where
-        F: FnMut(&Client) -> Option<R>,
-    {
-        let lock = self.shards.lock().await;
-        for s in &lock.clients {
-            if let Some(r) = f(&s.1) {
-                return Some(r);
-            }
-        }
-        None
-    }
-
     /// Returns a stream containing a snapshot of the current clients.  Use `for_each_shard` to
     /// work on a locked shards.
     pub(super) async fn shard_stream(&self, _namespace: &str) -> impl Stream<Item = Client> {
