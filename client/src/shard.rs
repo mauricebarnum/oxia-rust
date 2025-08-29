@@ -211,7 +211,7 @@ impl Client {
         grpc: GrpcClient,
         config: Arc<config::Config>,
         shard_id: i64,
-        dest: &str,
+        dest: impl Into<String>,
     ) -> Result<Self> {
         // Create metadata with shard ID and namespace
         let mut meta = tonic::metadata::MetadataMap::new();
@@ -223,13 +223,7 @@ impl Client {
         );
 
         Ok(Client {
-            data: Arc::new(ClientData::new(
-                config,
-                grpc,
-                shard_id,
-                dest.to_string(),
-                meta,
-            )),
+            data: Arc::new(ClientData::new(config, grpc, shard_id, dest, meta)),
             session: Arc::new(OnceCell::new()),
         })
     }
@@ -1007,9 +1001,9 @@ impl ShardAssignmentTask {
         mb.build()
     }
 
-    async fn process_assignments(&self, ns: &oxia_proto::NamespaceShardsAssignment) -> Result<()> {
+    async fn process_assignments(&self, ns: oxia_proto::NamespaceShardsAssignment) -> Result<()> {
         // Create shard mappings and bail out if we find anything silly.
-        let mapper = Self::make_mapper(ns)?;
+        let mapper = Self::make_mapper(&ns)?;
 
         // Now potentially make network calls to connect clients.
         let mut shards = Vec::with_capacity(ns.assignments.len());
@@ -1032,12 +1026,15 @@ impl ShardAssignmentTask {
     }
 
     async fn process_assignments_stream(&mut self, mut s: Streaming<oxia_proto::ShardAssignments>) {
+        let namespace = self.config.namespace();
         while let Some(r) = s.next().await {
             debug!(?r, "assignment");
             match r {
-                Ok(r) => {
-                    if let Some(a) = r.namespaces.get(self.config.namespace()) {
-                        // TODO: log errors
+                Ok(mut r) => {
+                    if let Some(a) = r.namespaces.get_mut(namespace) {
+                        // We're throwing this map away, so just grab the value contents rather
+                        // than clone it
+                        let a = std::mem::take(a);
                         let pr = self.process_assignments(a).await;
                         if let Some(tx) = self.ready.take() {
                             let _ = tx.send(pr);
