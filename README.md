@@ -29,7 +29,9 @@ Support for all of the Oxia service is incomplete,
 
 # TODO
 
-Create a TODO list
+1. Add robustness for transient errors
+   1. don't fail assignment processing if unable to connect to a shard
+   1. reconnect client when remote fails
 
 # Copying
 
