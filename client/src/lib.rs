@@ -678,17 +678,12 @@ impl Client {
     }
 
     async fn get_shard(&self, k: &str) -> Result<shard::Client> {
-        let namespace = self.config.namespace();
-        let shard = self.get_shards()?.get_client(namespace, k).await?;
+        let shard = self.get_shards()?.get_client(k).await?;
         Ok(shard)
     }
 
     async fn get_shard_by_id(&self, id: i64) -> Result<shard::Client> {
-        let namespace = self.config.namespace();
-        let shard = self
-            .get_shards()?
-            .get_client_by_shard_id(namespace, id)
-            .await?;
+        let shard = self.get_shards()?.get_client_by_shard_id(id).await?;
         Ok(shard)
     }
 
@@ -746,7 +741,7 @@ impl Client {
 
         let best_response = self
             .get_shards()?
-            .shard_stream(self.config.namespace())
+            .shard_stream()
             .await
             .map(|shard| execute_get(shard, key.clone(), options.clone()))
             .buffer_unordered(max_parallel)
@@ -863,7 +858,7 @@ impl Client {
 
         let mut result_stream = self
             .get_shards()?
-            .shard_stream(self.config.namespace())
+            .shard_stream()
             .await
             .map(|shard| do_delete_range(shard, start.clone(), end.clone(), options.clone()))
             .buffer_unordered(n);
@@ -929,7 +924,7 @@ impl Client {
 
         let mut result_stream = self
             .get_shards()?
-            .shard_stream(self.config.namespace())
+            .shard_stream()
             .await
             .map(|shard| do_list(shard, start.clone(), end.clone(), options.clone()))
             .buffer_unordered(n);
@@ -996,7 +991,7 @@ impl Client {
 
         let mut result_stream = self
             .get_shards()?
-            .shard_stream(self.config.namespace())
+            .shard_stream()
             .await
             .map(|shard| do_range_scan(shard, start.clone(), end.clone(), options.clone()))
             .buffer_unordered(n);
