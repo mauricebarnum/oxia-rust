@@ -652,32 +652,28 @@ pub(crate) async fn create_grpc_client(
 
 #[derive(Debug)]
 pub struct Client {
-    channel_pool: ChannelPool,
-    cluster: Option<GrpcClient>,
-    shards: Option<shard::Manager>,
+    shard_manager: Option<Arc<shard::Manager>>,
     config: Arc<config::Config>,
 }
 
 impl Client {
     pub fn new(config: Arc<config::Config>) -> Self {
         Self {
-            channel_pool: ChannelPool::new(&config),
-            cluster: None,
-            shards: None,
+            shard_manager: None,
             config,
         }
     }
 
     pub async fn connect(&mut self) -> Result<()> {
-        let grpc = create_grpc_client(self.config.service_addr(), &self.channel_pool).await?;
-        self.shards = Some(shard::Manager::new(&self.config, &grpc, &self.channel_pool).await?);
-        self.cluster = Some(grpc.clone());
+        let shard_manager = shard::Manager::new(&self.config).await?;
+        self.shard_manager = Some(Arc::new(shard_manager));
         Ok(())
     }
 
-    fn get_shards(&self) -> Result<&shard::Manager> {
-        self.shards
-            .as_ref()
+    #[inline]
+    fn get_shards(&self) -> Result<Arc<shard::Manager>> {
+        self.shard_manager
+            .clone()
             .ok_or_else(|| crate::Error::Custom("Shard manager not initialized".to_string()))
     }
 

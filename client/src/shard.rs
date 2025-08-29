@@ -1069,10 +1069,8 @@ impl ShardAssignmentTask {
 }
 
 #[derive(Debug)]
-pub(super) struct Manager {
-    #[allow(dead_code)] // cache is actually used
-    // cache: GrpcClientCache,
-    channel_pool: ChannelPool,
+pub(crate) struct Manager {
+    // channel_pool: ChannelPool,
     shards: Arc<Mutex<Shards>>,
     shutdown_requested: Arc<AtomicBool>,
     task_handle: JoinHandle<()>,
@@ -1080,23 +1078,15 @@ pub(super) struct Manager {
 
 impl Manager {
     /// Creates a new shard manager
-    pub(super) async fn new(
-        config: &Arc<config::Config>,
-        cluster: &GrpcClient,
-        channel_pool: &ChannelPool,
-    ) -> Result<Self> {
+    pub(crate) async fn new(config: &Arc<config::Config>) -> Result<Self> {
+        let channel_pool = ChannelPool::new(config);
         let shards = Arc::new(Mutex::new(Shards::default()));
         let shutdown_requested = Arc::new(AtomicBool::new(false));
-        let task_handle = Self::start_shard_assignment_task(
-            config,
-            cluster,
-            channel_pool,
-            &shards,
-            &shutdown_requested,
-        )
-        .await?;
+        let task_handle =
+            Self::start_shard_assignment_task(config, &channel_pool, &shards, &shutdown_requested)
+                .await?;
         Ok(Manager {
-            channel_pool: channel_pool.clone(),
+            // channel_pool,
             shards,
             shutdown_requested,
             task_handle,
@@ -1104,18 +1094,21 @@ impl Manager {
     }
 
     /// Gets a client by shard id
-    pub(super) async fn get_client_by_shard_id(&self, _namespace: &str, id: i64) -> Result<Client> {
+    pub(crate) async fn get_client_by_shard_id(&self, _namespace: &str, id: i64) -> Result<Client> {
         self.shards.lock().await.find_by_id(id)
     }
 
     /// Gets a client for the shard that handles the given key
-    pub(super) async fn get_client(&self, _namespace: &str, key: &str) -> Result<Client> {
+    pub(crate) async fn get_client(&self, _namespace: &str, key: &str) -> Result<Client> {
         self.shards.lock().await.find_by_key(key)
     }
 
     /// Returns a stream containing a snapshot of the current clients.  Use `for_each_shard` to
     /// work on a locked shards.
-    pub(super) async fn shard_stream(&self, _namespace: &str) -> impl Stream<Item = Client> {
+    pub(crate) async fn shard_stream(
+        &self,
+        _namespace: &str,
+    ) -> impl Stream<Item = Client> + use<> {
         let clients: Vec<Client> = {
             let lock = self.shards.lock().await;
             lock.clients
@@ -1129,19 +1122,18 @@ impl Manager {
     /// Returns the number of shards at the moment
     /// This is mostly usable as hint, as the number of shards may change over time
     #[allow(dead_code)]
-    pub(super) async fn num_shards(&self) -> usize {
+    pub(crate) async fn num_shards(&self) -> usize {
         self.shards.lock().await.clients.len()
     }
 
     async fn start_shard_assignment_task(
         config: &Arc<config::Config>,
-        cluster: &GrpcClient,
         channel_pool: &ChannelPool,
         shards: &Arc<Mutex<Shards>>,
         shutdown_requested: &Arc<AtomicBool>,
     ) -> Result<JoinHandle<()>> {
         let (tx, rx) = oneshot::channel();
-        let cluster = cluster.clone();
+        let cluster = create_grpc_client(config.service_addr(), channel_pool).await?;
         let mut task =
             ShardAssignmentTask::new(config.clone(), channel_pool.clone(), shards.clone(), tx);
         let shutdown_requested = shutdown_requested.clone();
