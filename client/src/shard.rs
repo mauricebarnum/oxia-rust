@@ -939,9 +939,15 @@ mod int32_hash_range {
     }
 } // mod int32_hash_range
 
+#[derive(Clone, Debug)]
+struct Shard {
+    id: i64,
+    client: Client,
+}
+
 #[derive(Debug, Default)]
 struct Shards {
-    clients: Vec<(i64, Client)>,
+    shards: Vec<Shard>,
     mapper: int32_hash_range::Mapper,
 }
 
@@ -950,15 +956,15 @@ impl Shards {
         // Linear or binary search?  It depends.  Since it's easy let's just code up both and make
         // it someone else's problem to pick the crossover
         const BINARY_SEARCH_CROSSOVER: usize = 16;
-        let c = if self.clients.len() > BINARY_SEARCH_CROSSOVER {
-            self.clients
-                .binary_search_by_key(&id, |(k, _)| *k)
+        let s = if self.shards.len() > BINARY_SEARCH_CROSSOVER {
+            self.shards
+                .binary_search_by_key(&id, |s| s.id)
                 .ok()
-                .map(|i| &self.clients[i])
+                .map(|i| &self.shards[i])
         } else {
-            self.clients.iter().find(|x| x.0 == id)
+            self.shards.iter().find(|s| s.id == id)
         };
-        c.map(|c| c.1.clone())
+        s.map(|s| s.client.clone())
             .ok_or_else(|| Error::NoShardMapping(id))
     }
 
@@ -1006,18 +1012,21 @@ impl ShardAssignmentTask {
         let mapper = Self::make_mapper(ns)?;
 
         // Now potentially make network calls to connect clients.
-        let mut clients = Vec::with_capacity(ns.assignments.len());
+        let mut shards = Vec::with_capacity(ns.assignments.len());
         for a in &ns.assignments {
             info!(?a, "processing assignments");
             let grpc = create_grpc_client(&a.leader, &self.channel_pool).await?;
             let client = Client::new(grpc, self.config.clone(), a.shard, &a.leader)?;
-            clients.push((a.shard, client));
+            shards.push(Shard {
+                id: a.shard,
+                client,
+            });
         }
-        clients.sort_unstable_by_key(|c| c.0);
+        shards.sort_unstable_by_key(|c| c.id);
 
         let mut guard = self.shards.lock().await;
         guard.mapper = mapper;
-        guard.clients = clients;
+        guard.shards = shards;
 
         Ok(())
     }
@@ -1111,10 +1120,7 @@ impl Manager {
     ) -> impl Stream<Item = Client> + use<> {
         let clients: Vec<Client> = {
             let lock = self.shards.lock().await;
-            lock.clients
-                .iter()
-                .map(|(_, client)| client.clone())
-                .collect()
+            lock.shards.iter().map(|s| s.client.clone()).collect()
         };
         tokio_stream::iter(clients)
     }
@@ -1123,7 +1129,7 @@ impl Manager {
     /// This is mostly usable as hint, as the number of shards may change over time
     #[allow(dead_code)]
     pub(crate) async fn num_shards(&self) -> usize {
-        self.shards.lock().await.clients.len()
+        self.shards.lock().await.shards.len()
     }
 
     async fn start_shard_assignment_task(
