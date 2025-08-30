@@ -18,7 +18,7 @@ futures-util = "0.3.31"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
-async-trait = "0.1.88"
+async-trait = "0.1.89"
 futures = "0.3.31"
 getrandom = "0.3.3"
 lazy_static = "1.5.0"
@@ -27,7 +27,7 @@ xxhash-rust = { version = "0.8.15", default-features = false, features = [
   "xxh3",
 ] }
 itertools = "0.14.0"
-tempfile = "3.20.0"
+tempfile = "3.21.0"
 backon = "1.5.2"
 
 [dev-dependencies]

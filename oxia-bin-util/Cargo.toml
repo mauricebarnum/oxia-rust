@@ -8,6 +8,6 @@ publish = false
 workspace = true
 
 [build-dependencies]
-is_executable = "1.0.4"
+is_executable = "1.0.5"
 sha2 = "0.10.9"
 walkdir = "2.5.0"
