@@ -939,42 +939,61 @@ struct Shard {
     client: Client,
 }
 
-#[derive(Debug, Default)]
-struct Shards {
-    shards: Vec<Shard>,
-    mapper: int32_hash_range::Mapper,
-}
+mod searchable {
+    use super::*;
 
-impl Shards {
-    fn find_by_id(&self, id: i64) -> Result<Client> {
-        // Linear or binary search?  It depends.  Since it's easy let's just code up both and make
-        // it someone else's problem to pick the crossover
-        const BINARY_SEARCH_CROSSOVER: usize = 16;
-        let s = if self.shards.len() > BINARY_SEARCH_CROSSOVER {
-            self.shards
-                .binary_search_by_key(&id, |s| s.id)
-                .ok()
-                .map(|i| &self.shards[i])
-        } else {
-            self.shards.iter().find(|s| s.id == id)
-        };
-        s.map(|s| s.client.clone())
-            .ok_or_else(|| Error::NoShardMapping(id))
+    // Linear or binary search for shards?  It depends.  Since it's easy let's just code up both and make
+    // it someone else's problem to pick the crossover
+    const BINARY_SEARCH_CROSSOVER: usize = 16;
+
+    #[derive(Debug, Default)]
+    pub(super) struct Shards {
+        shards: Vec<super::Shard>,
+        mapper: int32_hash_range::Mapper,
     }
 
-    fn find_by_key(&self, key: &str) -> Result<Client> {
-        let id = self
-            .mapper
-            .get_shard_id(key)
-            .ok_or_else(|| Error::Custom(format!("unable to map {key} to shard")))?;
-        self.find_by_id(id)
+    impl Shards {
+        pub(super) fn new(mut shards: Vec<Shard>, mapper: int32_hash_range::Mapper) -> Self {
+            if shards.len() > BINARY_SEARCH_CROSSOVER {
+                shards.sort_unstable_by_key(|c| c.id);
+            }
+            Self { shards, mapper }
+        }
+
+        pub(super) fn find_by_id(&self, id: i64) -> Result<Client> {
+            let s = if self.shards.len() > BINARY_SEARCH_CROSSOVER {
+                self.shards
+                    .binary_search_by_key(&id, |s| s.id)
+                    .ok()
+                    .map(|i| &self.shards[i])
+            } else {
+                self.shards.iter().find(|s| s.id == id)
+            };
+            s.map(|s| s.client.clone())
+                .ok_or_else(|| Error::NoShardMapping(id))
+        }
+
+        pub(super) fn find_by_key(&self, key: &str) -> Result<Client> {
+            let id = self
+                .mapper
+                .get_shard_id(key)
+                .ok_or_else(|| Error::Custom(format!("unable to map {key} to shard")))?;
+            self.find_by_id(id)
+        }
+    }
+
+    impl std::ops::Deref for Shards {
+        type Target = [Shard];
+        fn deref(&self) -> &Self::Target {
+            &self.shards
+        }
     }
 }
 
 struct ShardAssignmentTask {
     config: Arc<config::Config>,
     channel_pool: ChannelPool,
-    shards: Arc<Mutex<Shards>>,
+    shards: Arc<Mutex<searchable::Shards>>,
     ready: Option<oneshot::Sender<Result<()>>>,
 }
 
@@ -982,7 +1001,7 @@ impl ShardAssignmentTask {
     fn new(
         config: Arc<config::Config>,
         channel_pool: ChannelPool,
-        shards: Arc<Mutex<Shards>>,
+        shards: Arc<Mutex<searchable::Shards>>,
         ready: oneshot::Sender<Result<()>>,
     ) -> Self {
         Self {
@@ -1016,11 +1035,9 @@ impl ShardAssignmentTask {
                 client,
             });
         }
-        shards.sort_unstable_by_key(|c| c.id);
 
         let mut guard = self.shards.lock().await;
-        guard.mapper = mapper;
-        guard.shards = shards;
+        *guard = searchable::Shards::new(shards, mapper);
 
         Ok(())
     }
@@ -1077,7 +1094,7 @@ impl ShardAssignmentTask {
 #[derive(Debug)]
 pub(crate) struct Manager {
     // channel_pool: ChannelPool,
-    shards: Arc<Mutex<Shards>>,
+    shards: Arc<Mutex<searchable::Shards>>,
     shutdown_requested: Arc<AtomicBool>,
     task_handle: JoinHandle<()>,
 }
@@ -1086,7 +1103,7 @@ impl Manager {
     /// Creates a new shard manager
     pub(crate) async fn new(config: &Arc<config::Config>) -> Result<Self> {
         let channel_pool = ChannelPool::new(config);
-        let shards = Arc::new(Mutex::new(Shards::default()));
+        let shards = Arc::new(Mutex::new(searchable::Shards::default()));
         let shutdown_requested = Arc::new(AtomicBool::new(false));
         let task_handle =
             Self::start_shard_assignment_task(config, &channel_pool, &shards, &shutdown_requested)
@@ -1114,7 +1131,7 @@ impl Manager {
     pub(crate) async fn shard_stream(&self) -> impl Stream<Item = Client> + use<> {
         let clients: Vec<Client> = {
             let lock = self.shards.lock().await;
-            lock.shards.iter().map(|s| s.client.clone()).collect()
+            lock.iter().map(|s| s.client.clone()).collect()
         };
         tokio_stream::iter(clients)
     }
@@ -1123,13 +1140,13 @@ impl Manager {
     /// This is mostly usable as hint, as the number of shards may change over time
     #[allow(dead_code)]
     pub(crate) async fn num_shards(&self) -> usize {
-        self.shards.lock().await.shards.len()
+        self.shards.lock().await.len()
     }
 
     async fn start_shard_assignment_task(
         config: &Arc<config::Config>,
         channel_pool: &ChannelPool,
-        shards: &Arc<Mutex<Shards>>,
+        shards: &Arc<Mutex<searchable::Shards>>,
         shutdown_requested: &Arc<AtomicBool>,
     ) -> Result<JoinHandle<()>> {
         let (tx, rx) = oneshot::channel();
