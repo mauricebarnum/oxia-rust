@@ -356,17 +356,6 @@ impl Ord for GetResponse {
     }
 }
 
-// impl From<oxia_proto::GetResponse> for GetResponse {
-//     fn from(x: oxia_proto::GetResponse) -> Self {
-//         GetResponse {
-//             value: x.value,
-//             version: x.version.into(),
-//             key: x.key,
-//             secondary_index_key: x.secondary_index_key,
-//         }
-//     }
-// }
-
 #[derive(Clone, Debug, Default)]
 pub struct DeleteOptions {
     expected_version_id: Option<i64>,
@@ -489,16 +478,6 @@ impl Default for ListResponse {
     }
 }
 
-// impl From<oxia_proto::ListResponse> for ListResponse {
-//     fn from(x: oxia_proto::ListResponse) -> Self {
-//         Self {
-//             keys: x.keys.into_iter().map(|x| x.to_string()).collect(),
-//             sorted: true,
-//             partial: false,
-//         }
-//     }
-// }
-
 #[derive(Clone, Debug)]
 pub struct RangeScanOptions {
     shard: Option<i64>,
@@ -598,16 +577,6 @@ impl Default for RangeScanResponse {
     }
 }
 
-// impl From<oxia_proto::RangeScanResponse> for RangeScanResponse {
-//     fn from(x: oxia_proto::RangeScanResponse) -> Self {
-//         Self {
-//             records: x.records.into_iter().map(GetResponse::from).collect(),
-//             sorted: true,
-//             partial: false,
-//         }
-//     }
-// }
-
 #[derive(Clone, Debug, Default)]
 pub struct DeleteRangeOptions {
     shard: Option<i64>,
@@ -650,6 +619,26 @@ pub(crate) async fn create_grpc_client(
     Ok(GrpcClient::new(channel))
 }
 
+pub(crate) async fn execute_with_retry<Fut, R>(
+    config: &Arc<config::Config>,
+    op: impl Fn() -> Fut,
+) -> Result<R>
+where
+    Fut: std::future::Future<Output = Result<R>> + Send,
+    R: Send,
+{
+    let timeout_config = config.request_timeout();
+    let retry_config = config.retry();
+
+    let retry_op = move || op();
+    let retry_future = util::with_retry(retry_config, retry_op);
+
+    match timeout_config {
+        Some(t) => util::with_timeout(Some(t), retry_future).await,
+        None => retry_future.await,
+    }
+}
+
 #[derive(Debug)]
 pub struct Client {
     shard_manager: Option<Arc<shard::Manager>>,
@@ -687,23 +676,6 @@ impl Client {
         Ok(shard)
     }
 
-    async fn execute_with_retry<Fut, R>(&self, op: impl Fn() -> Fut) -> Result<R>
-    where
-        Fut: std::future::Future<Output = Result<R>> + Send,
-        R: Send,
-    {
-        let timeout_config = self.config.request_timeout();
-        let retry_config = self.config.retry();
-
-        let retry_op = move || op();
-        let retry_future = util::with_retry(retry_config, retry_op);
-
-        match timeout_config {
-            Some(t) => util::with_timeout(Some(t), retry_future).await,
-            None => retry_future.await,
-        }
-    }
-
     pub async fn get_with_options(
         &self,
         key: impl Into<String>,
@@ -713,7 +685,7 @@ impl Client {
 
         // Define the core operation with retry/timeout wrapper
         let execute_get = |shard: shard::Client, key: String, options: GetOptions| async move {
-            self.execute_with_retry(move || {
+            execute_with_retry(&self.config, move || {
                 let shard = shard.clone();
                 let key = key.clone();
                 let options = options.clone();
@@ -775,7 +747,7 @@ impl Client {
         let value = value.into();
         let selector = options.partition_key.as_deref().unwrap_or(&key);
         let shard = self.get_shard(selector).await?;
-        self.execute_with_retry(move || {
+        execute_with_retry(&self.config, move || {
             let shard = shard.clone();
             let key = key.clone();
             let value = value.clone();
@@ -802,7 +774,7 @@ impl Client {
         let key = key.into();
         let selector = options.partition_key.as_deref().unwrap_or(&key);
         let shard = self.get_shard(selector).await?;
-        self.execute_with_retry(move || {
+        execute_with_retry(&self.config, move || {
             let shard = shard.clone();
             let key = key.clone();
             let options = options.clone();
@@ -826,7 +798,7 @@ impl Client {
                                start: String,
                                end: String,
                                options: DeleteRangeOptions| async move {
-            self.execute_with_retry(move || {
+            execute_with_retry(&self.config, move || {
                 let shard = shard.clone();
                 let start = start.clone();
                 let end = end.clone();
@@ -899,7 +871,7 @@ impl Client {
         options: ListOptions,
     ) -> Result<ListResponse> {
         let do_list = |shard: shard::Client, start: String, end: String, options: ListOptions| async move {
-            self.execute_with_retry(move || {
+            execute_with_retry(&self.config, move || {
                 let shard = shard.clone();
                 let start = start.clone();
                 let end = end.clone();
@@ -966,7 +938,7 @@ impl Client {
                              start: String,
                              end: String,
                              options: RangeScanOptions| async move {
-            self.execute_with_retry(move || {
+            execute_with_retry(&self.config, move || {
                 let shard = shard.clone();
                 let start = start.clone();
                 let end = end.clone();
