@@ -20,7 +20,7 @@ use bytes::Bytes;
 use rand::SeedableRng;
 use rand::distr::{Distribution, Uniform};
 use rand::rngs::StdRng;
-use tokio::sync::{Mutex, OnceCell, oneshot};
+use tokio::sync::{Mutex, OnceCell, watch};
 use tokio::{task::JoinHandle, time::sleep};
 use tokio_stream::Stream;
 use tokio_stream::StreamExt as _;
@@ -940,7 +940,7 @@ struct Shard {
 }
 
 mod searchable {
-    use super::*;
+    use super::{Client, Error, Result, Shard, ShardMapper, int32_hash_range};
 
     // Linear or binary search for shards?  It depends.  Since it's easy let's just code up both and make
     // it someone else's problem to pick the crossover
@@ -994,7 +994,7 @@ struct ShardAssignmentTask {
     config: Arc<config::Config>,
     channel_pool: ChannelPool,
     shards: Arc<Mutex<searchable::Shards>>,
-    ready: Option<oneshot::Sender<Result<()>>>,
+    changed: watch::Sender<std::result::Result<(), Arc<Error>>>,
 }
 
 impl ShardAssignmentTask {
@@ -1002,13 +1002,13 @@ impl ShardAssignmentTask {
         config: Arc<config::Config>,
         channel_pool: ChannelPool,
         shards: Arc<Mutex<searchable::Shards>>,
-        ready: oneshot::Sender<Result<()>>,
+        changed: watch::Sender<std::result::Result<(), Arc<Error>>>,
     ) -> Self {
         Self {
             config,
             channel_pool,
             shards,
-            ready: Some(ready),
+            changed,
         }
     }
 
@@ -1049,19 +1049,15 @@ impl ShardAssignmentTask {
             match r {
                 Ok(mut r) => {
                     if let Some(a) = r.namespaces.get_mut(namespace) {
-                        // We're throwing this map away, so just grab the value contents rather
+                        // We're throwing this map away, so grab the value contents rather
                         // than clone it
                         let a = std::mem::take(a);
                         let pr = self.process_assignments(a).await;
-                        if let Some(tx) = self.ready.take() {
-                            let _ = tx.send(pr);
-                        }
+                        let _ = self.changed.send(pr.map_err(Arc::new));
                     }
                 }
                 Err(e) => {
-                    if let Some(tx) = self.ready.take() {
-                        let _ = tx.send(Err(e.into()));
-                    }
+                    let _ = self.changed.send(Err(Arc::new(e.into())));
                 }
             }
         }
@@ -1097,6 +1093,7 @@ pub(crate) struct Manager {
     shards: Arc<Mutex<searchable::Shards>>,
     shutdown_requested: Arc<AtomicBool>,
     task_handle: JoinHandle<()>,
+    changed: watch::Receiver<std::result::Result<(), Arc<Error>>>,
 }
 
 impl Manager {
@@ -1105,7 +1102,7 @@ impl Manager {
         let channel_pool = ChannelPool::new(config);
         let shards = Arc::new(Mutex::new(searchable::Shards::default()));
         let shutdown_requested = Arc::new(AtomicBool::new(false));
-        let task_handle =
+        let (task_handle, changed) =
             Self::start_shard_assignment_task(config, &channel_pool, &shards, &shutdown_requested)
                 .await?;
         Ok(Manager {
@@ -1113,6 +1110,7 @@ impl Manager {
             shards,
             shutdown_requested,
             task_handle,
+            changed,
         })
     }
 
@@ -1143,13 +1141,24 @@ impl Manager {
         self.shards.lock().await.len()
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn recv_changed(&self) -> watch::Receiver<std::result::Result<(), Arc<Error>>> {
+        self.changed.clone()
+    }
+
     async fn start_shard_assignment_task(
         config: &Arc<config::Config>,
         channel_pool: &ChannelPool,
         shards: &Arc<Mutex<searchable::Shards>>,
         shutdown_requested: &Arc<AtomicBool>,
-    ) -> Result<JoinHandle<()>> {
-        let (tx, rx) = oneshot::channel();
+    ) -> Result<(
+        JoinHandle<()>,
+        watch::Receiver<std::result::Result<(), Arc<Error>>>,
+    )> {
+        let (tx, mut rx) = watch::channel(Ok(()));
+        // Consume the initial value
+        rx.borrow_and_update();
+
         let cluster = create_grpc_client(config.service_addr(), channel_pool).await?;
         let mut task =
             ShardAssignmentTask::new(config.clone(), channel_pool.clone(), shards.clone(), tx);
@@ -1158,9 +1167,12 @@ impl Manager {
             task.run(cluster, shutdown_requested).await;
         });
 
-        // TODO: time this out
-        rx.await.map_err(|e| Error::Boxed(Box::new(e)))??;
-        Ok(handle)
+        // Wait for the notification that the task has started up
+        rx.changed().await.map_err(|e| Error::Boxed(Box::new(e)))?;
+        rx.borrow_and_update()
+            .as_ref()
+            .map_err(|e| Error::Shared(e.clone()))?;
+        Ok((handle, rx))
     }
 }
 
