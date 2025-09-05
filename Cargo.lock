@@ -827,7 +827,6 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.3",
  "itertools",
- "lazy_static",
  "mauricebarnum-oxia-common",
  "oxia-bin-util",
  "prost",
