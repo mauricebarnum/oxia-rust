@@ -25,6 +25,11 @@ use std::time::{Duration, Instant};
 use std::{io, path};
 use tempfile::TempDir;
 
+#[inline]
+pub fn non_zero(x: u32) -> NonZeroU32 {
+    NonZeroU32::new(x).unwrap()
+}
+
 pub trait TestResultExt<T> {
     #[allow(dead_code)]
     fn trace_err(self) -> Self;
