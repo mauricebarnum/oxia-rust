@@ -116,7 +116,17 @@ fn check_write_response(r: &oxia_proto::WriteResponse, x: ExpectedWriteResponse)
 
 /// Validates a put response - ensures it has the expected structure
 fn check_put_response(r: &oxia_proto::WriteResponse) -> Option<Error> {
-    check_write_response(r, ExpectedWriteResponse::Put)
+    if let Some(e) = check_write_response(r, ExpectedWriteResponse::Put) {
+        return Some(e);
+    }
+
+    if let Some(p) = r.puts.first()
+        && p.status != STATUS_OK
+    {
+        return Some(OxiaError::from(p.status).into());
+    }
+
+    None
 }
 
 /// Validates a delete response - ensures it has the expected structure and status
