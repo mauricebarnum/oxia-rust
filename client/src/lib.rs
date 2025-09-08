@@ -660,19 +660,19 @@ impl Client {
     }
 
     #[inline]
-    fn get_shards(&self) -> Result<Arc<shard::Manager>> {
+    fn get_shard_manager(&self) -> Result<Arc<shard::Manager>> {
         self.shard_manager
             .clone()
             .ok_or_else(|| crate::Error::Custom("Shard manager not initialized".to_string()))
     }
 
     async fn get_shard(&self, k: &str) -> Result<shard::Client> {
-        let shard = self.get_shards()?.get_client(k).await?;
+        let shard = self.get_shard_manager()?.get_client(k).await?;
         Ok(shard)
     }
 
     async fn get_shard_by_id(&self, id: i64) -> Result<shard::Client> {
-        let shard = self.get_shards()?.get_client_by_shard_id(id).await?;
+        let shard = self.get_shard_manager()?.get_client_by_shard_id(id).await?;
         Ok(shard)
     }
 
@@ -712,7 +712,7 @@ impl Client {
         };
 
         let best_response = self
-            .get_shards()?
+            .get_shard_manager()?
             .shard_stream()
             .await
             .map(|shard| execute_get(shard, key.clone(), options.clone()))
@@ -829,7 +829,7 @@ impl Client {
         };
 
         let mut result_stream = self
-            .get_shards()?
+            .get_shard_manager()?
             .shard_stream()
             .await
             .map(|shard| do_delete_range(shard, start.clone(), end.clone(), options.clone()))
@@ -895,7 +895,7 @@ impl Client {
         };
 
         let mut result_stream = self
-            .get_shards()?
+            .get_shard_manager()?
             .shard_stream()
             .await
             .map(|shard| do_list(shard, start.clone(), end.clone(), options.clone()))
@@ -962,7 +962,7 @@ impl Client {
         };
 
         let mut result_stream = self
-            .get_shards()?
+            .get_shard_manager()?
             .shard_stream()
             .await
             .map(|shard| do_range_scan(shard, start.clone(), end.clone(), options.clone()))
