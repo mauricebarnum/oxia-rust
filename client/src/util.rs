@@ -53,7 +53,6 @@ where
     }
 }
 
-#[cfg(test)]
 pub(crate) fn compare_with_slash(xa: impl AsRef<str>, ya: impl AsRef<str>) -> Ordering {
     let mut x = xa.as_ref();
     let mut y = ya.as_ref();
@@ -71,12 +70,32 @@ pub(crate) fn compare_with_slash(xa: impl AsRef<str>, ya: impl AsRef<str>) -> Or
                     return c;
                 }
                 x = &x[xi + 1..];
-                y = &y[xi + 1..];
+                y = &y[yi + 1..];
             }
         }
     }
 
     x.cmp(y)
+}
+struct WithSlashCmp<'a>(&'a str);
+
+impl PartialEq for WithSlashCmp<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+impl Eq for WithSlashCmp<'_> {}
+
+impl PartialOrd for WithSlashCmp<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for WithSlashCmp<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        compare_with_slash(self.0, other.0)
+    }
 }
 
 use crate::{GetResponse, KeyComparisonType};
@@ -90,13 +109,18 @@ pub(crate) fn select_response(
     candidate: GetResponse,
     ct: KeyComparisonType,
 ) -> GetResponse {
-    // For selection, we only look at the key, secondary_index_key, and version
     fn cmp(a: &GetResponse, b: &GetResponse) -> Ordering {
         a.secondary_index_key
-            .cmp(&b.secondary_index_key)
-            .then_with(|| a.key.cmp(&b.key))
+            .as_deref()
+            .map(WithSlashCmp)
+            .cmp(&b.secondary_index_key.as_deref().map(WithSlashCmp))
+            .then_with(|| {
+                a.key
+                    .as_deref()
+                    .map(WithSlashCmp)
+                    .cmp(&b.key.as_deref().map(WithSlashCmp))
+            })
     }
-
     assert_ne!(KeyComparisonType::Equal, ct);
 
     if let Some(pv) = prev {
