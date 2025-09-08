@@ -16,17 +16,13 @@ use chrono::Utc;
 use mauricebarnum_oxia_client as client;
 use mauricebarnum_oxia_client::config;
 use std::fs;
-use std::num::NonZeroU32;
 use std::time::Duration;
 use tracing::info;
 
 mod common;
 use common::TestResultExt;
+use common::non_zero;
 use common::trace_err;
-
-fn non_zero(x: u32) -> NonZeroU32 {
-    NonZeroU32::new(x).unwrap()
-}
 
 #[test_log::test(tokio::test)]
 async fn test_basic() -> anyhow::Result<()> {
