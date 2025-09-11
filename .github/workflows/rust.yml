@@ -25,8 +25,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  SCCACHE_DIR: ${{ github.workspace }}/target/.sccache
-  RUSTC_WRAPPER: sccache
+  SCCACHE_DIR_DISABLED: ${{ github.workspace }}/target/.sccache
+  RUSTC_WRAPPER_DISABLED: sccache
   RUST_BACKTRACE: full
   CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: true
 
