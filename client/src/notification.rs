@@ -1,11 +1,8 @@
-#![allow(unused)]
-
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
 
-use backon::FibonacciBackoff;
 use futures::FutureExt;
 use futures::Stream;
 use futures::StreamExt;
@@ -20,8 +17,6 @@ use crate::config;
 use crate::config::Config;
 use crate::errors;
 use crate::shard;
-
-struct ReconnectStrategy {}
 
 enum ShardState {
     Start,
@@ -241,7 +236,7 @@ impl NotificationsStream {
         self.state = match std::mem::replace(&mut self.state, StreamState::Done) {
             // Reconnect, use current offsets
             // TODO: are we sure the shard ids are stable?
-            StreamState::Active { shards, next } => {
+            StreamState::Active { shards, .. } => {
                 self.watcher.mark_unchanged();
                 Self::setup_stream(self.shard_manager.clone(), Some(shards))
             }

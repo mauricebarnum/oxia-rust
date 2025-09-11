@@ -136,12 +136,14 @@ impl TestServerArgs {
     }
 }
 
+#[allow(dead_code)]
 pub struct TestServer {
     pub data_dir: TempDir,
     args: TestServerArgs,
     process: Child,
 }
 
+#[allow(dead_code)]
 impl TestServer {
     pub fn start_nshards(nshards: NonZeroU32) -> io::Result<Self> {
         let [service_port, metrics_port] = trace_err!(find_free_ports(2))?.try_into().unwrap();
