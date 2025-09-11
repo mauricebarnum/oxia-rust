@@ -27,11 +27,11 @@ xxhash-rust = { version = "0.8.15", default-features = false, features = [
 backon = "1.5.2"
 
 [dev-dependencies]
-chrono = "0.4.41"
+chrono = "0.4.42"
 socket2 = "0.6.0"
 test-log = { version = "0.2.18", features = ["trace", "color"] }
 oxia-bin-util = { path = "../oxia-bin-util" }
-tempfile = "3.21.0"
+tempfile = "3.22.0"
 anyhow = { workspace = true }
 itertools = "0.14.0"
 
