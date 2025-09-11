@@ -12,10 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{Error, Result, config};
-use backon::{FibonacciBuilder, Retryable};
+use std::cmp::Ordering;
 use std::future::Future;
-use std::{cmp::Ordering, time::Duration};
+use std::time::Duration;
+
+use backon::FibonacciBuilder;
+use backon::Retryable;
+
+use crate::Error;
+use crate::Result;
+use crate::config;
 
 pub(crate) async fn with_timeout<T, Fut>(timeout: Option<Duration>, fut: Fut) -> Result<T>
 where

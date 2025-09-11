@@ -6,20 +6,24 @@
 //! This module contains tests that mirror the functionality tested in the original Go client,
 //! adapted for the Rust client implementation.
 
-// use futures::StreamExt;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
-// use tokio::time::timeout;
 
 use futures::StreamExt;
+
+use client::Client;
+use client::DeleteOptions;
+use client::Error;
+use client::GetOptions;
+use client::KeyComparisonType;
+use client::ListOptions;
+use client::PutOptions;
+use client::RangeScanOptions;
+use client::Result;
+use client::SecondaryIndex;
 use mauricebarnum_oxia_client::NotificationType;
 use mauricebarnum_oxia_client::{self as client, config};
-// Import the Oxia client types
-use client::{
-    Client, DeleteOptions, Error, GetOptions, KeyComparisonType, ListOptions, PutOptions,
-    RangeScanOptions, Result, SecondaryIndex,
-};
 
 mod common;
 use common::TestResultExt;

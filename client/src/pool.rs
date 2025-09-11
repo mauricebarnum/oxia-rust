@@ -12,12 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
+
 use tokio::sync::RwLock;
 use tokio::sync::broadcast;
-use tonic::transport::{Channel, Endpoint};
-use tracing::{info, warn};
+use tonic::transport::Channel;
+use tonic::transport::Endpoint;
+use tracing::info;
+use tracing::warn;
 
 use crate::Error;
 use crate::Result;

@@ -12,30 +12,52 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::task::Poll;
 use std::time::Duration;
-use std::{str::FromStr, sync::Arc};
 
 use bytes::Bytes;
 use futures::StreamExt;
 use rand::SeedableRng;
-use rand::distr::{Distribution, Uniform};
+use rand::distr::Distribution;
+use rand::distr::Uniform;
 use rand::rngs::StdRng;
-use tokio::sync::{Mutex, OnceCell, watch};
-use tokio::{task::JoinHandle, time::sleep};
+use tokio::sync::Mutex;
+use tokio::sync::OnceCell;
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+use tokio::time::sleep;
 use tokio_stream::Stream;
 use tonic::Streaming;
 use tonic::metadata::MetadataValue;
-use tracing::{debug, info, trace, warn};
+use tracing::debug;
+use tracing::info;
+use tracing::trace;
+use tracing::warn;
 
+use mauricebarnum_oxia_common::proto as oxia_proto;
+
+use crate::DeleteOptions;
+use crate::DeleteRangeOptions;
+use crate::Error;
+use crate::GetOptions;
+use crate::GetResponse;
+use crate::GrpcClient;
+use crate::ListOptions;
+use crate::ListResponse;
+use crate::OxiaError;
+use crate::PutOptions;
+use crate::PutResponse;
+use crate::RangeScanOptions;
+use crate::RangeScanResponse;
+use crate::Result;
+use crate::SecondaryIndex;
+use crate::config;
+use crate::create_grpc_client;
 use crate::pool::ChannelPool;
-use crate::{
-    DeleteOptions, DeleteRangeOptions, Error, GetOptions, GetResponse, GrpcClient, ListOptions,
-    ListResponse, OxiaError, PutOptions, PutResponse, RangeScanOptions, RangeScanResponse, Result,
-    SecondaryIndex, config, create_grpc_client,
-};
-use mauricebarnum_oxia_common::proto::{self as oxia_proto};
 
 /// Constants for Oxia protocol
 const STATUS_OK: i32 = 0;

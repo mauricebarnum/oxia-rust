@@ -12,9 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::KeyComparisonType;
-use std::{fmt::Display, io, sync::Arc};
+use std::fmt::Display;
+use std::io;
+use std::sync::Arc;
+
 use thiserror::Error as ThisError;
+
+use crate::KeyComparisonType;
 
 /// Errors that map directly from the Oxia gRPC service responses (excluding success/OK)
 #[derive(ThisError, Debug, PartialEq, Eq)]

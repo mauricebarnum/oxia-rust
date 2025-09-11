@@ -15,7 +15,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::{Error, Result};
+use crate::Error;
+use crate::Result;
 
 #[derive(Clone, Copy, Debug)]
 pub struct RetryConfig {
