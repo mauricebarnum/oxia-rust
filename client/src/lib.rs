@@ -12,18 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{
-    cmp::Ordering,
-    collections::HashMap,
-    fmt::{self, Display},
-    sync::Arc,
-};
+use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::fmt;
+use std::fmt::Display;
+use std::sync::Arc;
 
 use bytes::Bytes;
-
-use futures::{StreamExt, TryStreamExt};
-
+use futures::StreamExt;
+use futures::TryStreamExt;
 use tonic::transport::Channel;
+
+use mauricebarnum_oxia_common::proto as oxia_proto;
+
+use crate::notification::NotificationsStream;
+use crate::pool::ChannelPool;
 
 pub mod config;
 pub mod errors;
@@ -32,11 +35,7 @@ mod pool;
 mod shard;
 mod util;
 
-use mauricebarnum_oxia_common::proto as oxia_proto;
-
 pub use errors::*;
-
-use crate::{notification::NotificationsStream, pool::ChannelPool};
 
 pub type Result<T> = std::result::Result<T, Error>;
 

@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::process::{Command, Stdio};
+use std::process::Command;
+use std::process::Stdio;
 
 #[test]
 fn test_allowed_symbols() {
