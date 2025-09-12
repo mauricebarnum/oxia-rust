@@ -64,7 +64,7 @@ ENV \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain ${RUST_VERSION} -y
 
 # ===== Install Cargo tools =====
-RUN cargo install cargo-binstall && cargo binstall cargo-nextest sccache
+RUN cargo install cargo-binstall && cargo binstall -y --no-track --disable-telemetry cargo-nextest
 
 # ===== Install Go =====
 RUN curl -fsSL "https://go.dev/dl/${GO_VERSION}.linux-${GO_ARCH}.tar.gz" | tar -C ${HOME} -xzf -
