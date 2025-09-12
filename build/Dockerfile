@@ -8,6 +8,8 @@ ARG RUSTUP_HOME=${HOME}/.rustup
 
 FROM ubuntu:24.04 AS build
 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 # Import defaults
 ARG USER
 ARG HOME
