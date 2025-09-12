@@ -171,41 +171,27 @@ pub enum KeyComparisonType {
     Higher = oxia_proto::KeyComparisonType::Higher as i32,
 }
 
+impl KeyComparisonType {
+    fn to_proto(self) -> oxia_proto::KeyComparisonType {
+        match self {
+            KeyComparisonType::Equal => oxia_proto::KeyComparisonType::Equal,
+            KeyComparisonType::Floor => oxia_proto::KeyComparisonType::Floor,
+            KeyComparisonType::Ceiling => oxia_proto::KeyComparisonType::Ceiling,
+            KeyComparisonType::Lower => oxia_proto::KeyComparisonType::Lower,
+            KeyComparisonType::Higher => oxia_proto::KeyComparisonType::Higher,
+        }
+    }
+}
+
 impl From<KeyComparisonType> for i32 {
     fn from(k: KeyComparisonType) -> i32 {
         k as i32
     }
 }
 
-impl TryFrom<i32> for KeyComparisonType {
-    type Error = crate::Error;
-
-    fn try_from(x: i32) -> Result<KeyComparisonType> {
-        match x {
-            x if x == KeyComparisonType::Equal as i32 => Ok(KeyComparisonType::Equal),
-            x if x == KeyComparisonType::Floor as i32 => Ok(KeyComparisonType::Floor),
-            x if x == KeyComparisonType::Ceiling as i32 => Ok(KeyComparisonType::Ceiling),
-            x if x == KeyComparisonType::Lower as i32 => Ok(KeyComparisonType::Lower),
-            x if x == KeyComparisonType::Higher as i32 => Ok(KeyComparisonType::Higher),
-            _ => Err(Error::InvalidKeyComparisonTypeValue(x)),
-        }
-    }
-}
-
-fn to_proto(k: KeyComparisonType) -> oxia_proto::KeyComparisonType {
-    match k {
-        KeyComparisonType::Equal => oxia_proto::KeyComparisonType::Equal,
-        KeyComparisonType::Floor => oxia_proto::KeyComparisonType::Floor,
-        KeyComparisonType::Ceiling => oxia_proto::KeyComparisonType::Ceiling,
-        KeyComparisonType::Lower => oxia_proto::KeyComparisonType::Lower,
-        KeyComparisonType::Higher => oxia_proto::KeyComparisonType::Higher,
-    }
-}
-
 impl Display for KeyComparisonType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let proto = to_proto(*self);
-        write!(f, "{}", proto.as_str_name())
+        write!(f, "{}", self.to_proto().as_str_name())
     }
 }
 
