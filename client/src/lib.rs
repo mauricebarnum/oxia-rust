@@ -602,6 +602,20 @@ pub enum NotificationType {
     Unknown(i32),
 }
 
+impl NotificationType {
+    fn try_to_proto(self) -> Option<oxia_proto::NotificationType> {
+        match self {
+            NotificationType::KeyCreated => Some(oxia_proto::NotificationType::KeyCreated),
+            NotificationType::KeyModified => Some(oxia_proto::NotificationType::KeyModified),
+            NotificationType::KeyDeleted => Some(oxia_proto::NotificationType::KeyDeleted),
+            NotificationType::KeyRangeDeleted => {
+                Some(oxia_proto::NotificationType::KeyRangeDeleted)
+            }
+            NotificationType::Unknown(_) => None,
+        }
+    }
+}
+
 impl From<i32> for NotificationType {
     fn from(x: i32) -> Self {
         use oxia_proto::NotificationType as p;
@@ -611,6 +625,16 @@ impl From<i32> for NotificationType {
             x if x == p::KeyDeleted as i32 => NotificationType::KeyDeleted,
             x if x == p::KeyRangeDeleted as i32 => NotificationType::KeyRangeDeleted,
             other => NotificationType::Unknown(other),
+        }
+    }
+}
+
+impl Display for NotificationType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let NotificationType::Unknown(x) = *self {
+            write!(f, "Uknownn({x}")
+        } else {
+            write!(f, "{}", self.try_to_proto().unwrap().as_str_name())
         }
     }
 }
