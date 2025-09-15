@@ -17,6 +17,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Display;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 
 use bytes::Bytes;
 use futures::StreamExt;
@@ -705,14 +707,38 @@ where
     Fut: std::future::Future<Output = Result<R>> + Send,
     R: Send,
 {
+    let timeout = config.request_timeout();
     let retry_config = config.retry();
+    let start = if retry_config.is_some() && timeout.unwrap_or_default() > Duration::ZERO {
+        Some(Instant::now())
+    } else {
+        None
+    };
+
+    let result = util::with_timeout(timeout, op()).await;
+
+    // Happy path: call just worked
+    if result.is_ok() {
+        return result;
+    }
+
+    // Or... our time budget was consumed, and we're done
+    if matches!(&result, Err(Error::RequestTimeout { .. })) {
+        return result;
+    }
+
+    // Or... no retries are requested
+    if retry_config.is_none() {
+        return result;
+    }
+
+    // Account for the time we've used so far for the next round of retries
+    let timeout = timeout
+        .zip(start)
+        .map(|(t, s)| t.saturating_sub(s.elapsed()));
 
     let retry_op = move || op();
-    util::with_timeout(
-        config.request_timeout(),
-        util::with_retry(retry_config, retry_op),
-    )
-    .await
+    util::with_timeout(timeout, util::with_retry(retry_config, retry_op)).await
 }
 
 #[derive(Debug)]
