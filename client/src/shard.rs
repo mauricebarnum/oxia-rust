@@ -287,12 +287,12 @@ impl Client {
     }
 
     /// Creates a `GetRequest` with the appropriate options
-    fn make_get_req(&self, opts: &GetOptions, k: impl Into<String>) -> oxia_proto::ReadRequest {
+    fn make_get_req(&self, opts: &GetOptions, k: &str) -> oxia_proto::ReadRequest {
         let data = &self.data;
         oxia_proto::ReadRequest {
             shard: Some(data.shard_id),
             gets: vec![oxia_proto::GetRequest {
-                key: k.into(),
+                key: k.to_string(),
                 include_value: opts.include_value,
                 comparison_type: opts.comparison_type.into(),
                 secondary_index_name: None,
@@ -304,24 +304,25 @@ impl Client {
     fn make_put_req(
         &self,
         session_id: Option<i64>,
-        opts: PutOptions,
-        k: impl Into<String>,
+        opts: &PutOptions,
+        k: &str,
         v: Bytes,
     ) -> oxia_proto::WriteRequest {
         let data = &self.data;
         oxia_proto::WriteRequest {
             shard: Some(data.shard_id),
             puts: vec![oxia_proto::PutRequest {
-                key: k.into(),
+                key: k.to_string(),
                 value: v,
                 expected_version_id: opts.expected_version_id,
                 session_id,
                 client_identity: Some(data.config.identity().into()),
-                partition_key: opts.partition_key,
+                partition_key: opts.partition_key.clone(),
                 sequence_key_delta: opts
                     .sequence_key_deltas
+                    .as_ref()
                     .map_or_else(Vec::new, |x| (*x).to_vec()),
-                secondary_indexes: SecondaryIndex::into_proto_vec(opts.secondary_indexes),
+                secondary_indexes: SecondaryIndex::into_proto_vec(opts.secondary_indexes.clone()),
             }],
             deletes: vec![],
             delete_ranges: vec![],
@@ -329,17 +330,13 @@ impl Client {
     }
 
     /// Creates a `DeleteRequest` with the appropriate options
-    fn make_delete_req(
-        &self,
-        opts: &DeleteOptions,
-        k: impl Into<String>,
-    ) -> oxia_proto::WriteRequest {
+    fn make_delete_req(&self, opts: &DeleteOptions, k: &str) -> oxia_proto::WriteRequest {
         let data = &self.data;
         oxia_proto::WriteRequest {
             shard: Some(data.shard_id),
             puts: vec![],
             deletes: vec![oxia_proto::DeleteRequest {
-                key: k.into(),
+                key: k.to_string(),
                 expected_version_id: opts.expected_version_id,
             }],
             delete_ranges: vec![],
@@ -350,8 +347,8 @@ impl Client {
     fn make_delete_range_req(
         &self,
         _opts: &DeleteRangeOptions,
-        start_inclusive: impl Into<String>,
-        end_exclusive: impl Into<String>,
+        start_inclusive: &str,
+        end_exclusive: &str,
     ) -> oxia_proto::WriteRequest {
         let data = &self.data;
         oxia_proto::WriteRequest {
@@ -359,8 +356,8 @@ impl Client {
             puts: vec![],
             deletes: vec![],
             delete_ranges: vec![oxia_proto::DeleteRangeRequest {
-                start_inclusive: start_inclusive.into(),
-                end_exclusive: end_exclusive.into(),
+                start_inclusive: start_inclusive.to_string(),
+                end_exclusive: end_exclusive.to_string(),
             }],
         }
     }
@@ -368,43 +365,42 @@ impl Client {
     /// Creates a `ListRequest` with the appropriate options
     fn make_list_req(
         &self,
-        opts: ListOptions,
-        start_inclusive: impl Into<String>,
-        end_exclusive: impl Into<String>,
+        opts: &ListOptions,
+        start_inclusive: &str,
+        end_exclusive: &str,
     ) -> oxia_proto::ListRequest {
         let data = &self.data;
         oxia_proto::ListRequest {
             shard: Some(data.shard_id),
-            start_inclusive: start_inclusive.into(),
-            end_exclusive: end_exclusive.into(),
-            secondary_index_name: opts.secondary_index_name,
+            start_inclusive: start_inclusive.to_string(),
+            end_exclusive: end_exclusive.to_string(),
+            secondary_index_name: opts.secondary_index_name.clone(),
         }
     }
 
     /// Creates a `RangeScanRequest` with the appropriate options
     fn make_range_scan_req(
         &self,
-        opts: RangeScanOptions,
-        start_inclusive: impl Into<String>,
-        end_exclusive: impl Into<String>,
+        opts: &RangeScanOptions,
+        start_inclusive: &str,
+        end_exclusive: &str,
     ) -> oxia_proto::RangeScanRequest {
         let data = &self.data;
 
         // If end key is empty, use the internal key prefix to scan all keys
         let effective_end = {
-            let s = end_exclusive.into();
-            if s.is_empty() {
+            if end_exclusive.is_empty() {
                 INTERNAL_KEY_PREFIX.to_string()
             } else {
-                s
+                end_exclusive.to_string()
             }
         };
 
         oxia_proto::RangeScanRequest {
             shard: Some(data.shard_id),
-            start_inclusive: start_inclusive.into(),
+            start_inclusive: start_inclusive.to_string(),
             end_exclusive: effective_end,
-            secondary_index_name: opts.secondary_index_name,
+            secondary_index_name: opts.secondary_index_name.clone(),
         }
     }
 
@@ -474,14 +470,10 @@ impl Client {
     }
 
     /// Retrieves a key with the given options
-    pub(crate) async fn get(
-        &self,
-        k: impl Into<String>,
-        opts: GetOptions,
-    ) -> Result<Option<GetResponse>> {
+    pub(crate) async fn get(&self, k: &str, opts: &GetOptions) -> Result<Option<GetResponse>> {
         use oxia_proto::Status;
 
-        let req = self.create_request(self.make_get_req(&opts, k));
+        let req = self.create_request(self.make_get_req(opts, k));
         let mut rsp_stream = self.data.grpc.clone().read(req).await?.into_inner();
 
         let rsp = match rsp_stream.next().await {
@@ -569,9 +561,9 @@ impl Client {
     /// Puts a value with the given options
     pub(crate) async fn put(
         &self,
-        key: impl Into<String>,
+        key: &str,
         value: Bytes,
-        options: PutOptions,
+        options: &PutOptions,
     ) -> Result<PutResponse> {
         let session_id = if options.ephemeral {
             self.get_session_id().await?
@@ -591,12 +583,8 @@ impl Client {
     }
 
     /// Deletes a key with the given options
-    pub(crate) async fn delete(
-        &self,
-        key: impl Into<String>,
-        options: DeleteOptions,
-    ) -> Result<()> {
-        let req = self.make_delete_req(&options, key);
+    pub(crate) async fn delete(&self, key: &str, options: &DeleteOptions) -> Result<()> {
+        let req = self.make_delete_req(options, key);
         let rsp = self.process_write(req).await?;
 
         if let Some(e) = check_delete_response(&rsp) {
@@ -609,11 +597,11 @@ impl Client {
     /// Deletes a range of keys with the given options
     pub(crate) async fn delete_range(
         &self,
-        start_inclusive: impl Into<String>,
-        end_exclusive: impl Into<String>,
-        options: DeleteRangeOptions,
+        start_inclusive: &str,
+        end_exclusive: &str,
+        options: &DeleteRangeOptions,
     ) -> Result<()> {
-        let req = self.make_delete_range_req(&options, start_inclusive, end_exclusive);
+        let req = self.make_delete_range_req(options, start_inclusive, end_exclusive);
         let rsp = self.process_write(req).await?;
 
         check_delete_range_response(&rsp).map_or_else(|| Ok(()), Err)
@@ -622,9 +610,9 @@ impl Client {
     /// Lists keys in the given range with options
     pub(crate) async fn list(
         &self,
-        start_inclusive: impl Into<String>,
-        end_exclusive: impl Into<String>,
-        opts: ListOptions,
+        start_inclusive: &str,
+        end_exclusive: &str,
+        opts: &ListOptions,
     ) -> Result<ListResponse> {
         let partial_ok = opts.partial_ok;
 
@@ -655,9 +643,9 @@ impl Client {
     #[allow(dead_code)]
     pub(crate) async fn list_with_timeout(
         &self,
-        start_inclusive: impl Into<String>,
-        end_exclusive: impl Into<String>,
-        opts: ListOptions,
+        start_inclusive: &str,
+        end_exclusive: &str,
+        opts: &ListOptions,
         timeout: Duration,
     ) -> Result<ListResponse> {
         // Apply timeout to the list operation
@@ -672,9 +660,9 @@ impl Client {
     /// Scans for records in the given range with options
     pub(crate) async fn range_scan(
         &self,
-        start_inclusive: impl Into<String>,
-        end_exclusive: impl Into<String>,
-        opts: RangeScanOptions,
+        start_inclusive: &str,
+        end_exclusive: &str,
+        opts: &RangeScanOptions,
     ) -> Result<RangeScanResponse> {
         let partial_ok = opts.partial_ok;
 
