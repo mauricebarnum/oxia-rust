@@ -705,16 +705,14 @@ where
     Fut: std::future::Future<Output = Result<R>> + Send,
     R: Send,
 {
-    let timeout_config = config.request_timeout();
     let retry_config = config.retry();
 
     let retry_op = move || op();
-    let retry_future = util::with_retry(retry_config, retry_op);
-
-    match timeout_config {
-        Some(t) => util::with_timeout(Some(t), retry_future).await,
-        None => retry_future.await,
-    }
+    util::with_timeout(
+        config.request_timeout(),
+        util::with_retry(retry_config, retry_op),
+    )
+    .await
 }
 
 #[derive(Debug)]
@@ -767,7 +765,7 @@ impl Client {
                 let shard = shard.clone();
                 let key = key.clone();
                 let options = options.clone();
-                async move { shard.get(key, options).await }
+                async move { shard.get(&key, &options).await }
             })
             .await
         };
@@ -830,7 +828,7 @@ impl Client {
             let key = key.clone();
             let value = value.clone();
             let options = options.clone();
-            async move { shard.put(key, value, options).await }
+            async move { shard.put(&key, value, &options).await }
         })
         .await
     }
@@ -856,7 +854,7 @@ impl Client {
             let shard = shard.clone();
             let key = key.clone();
             let options = options.clone();
-            async move { shard.delete(key, options).await }
+            async move { shard.delete(&key, &options).await }
         })
         .await
     }
@@ -881,7 +879,7 @@ impl Client {
                 let start = start.clone();
                 let end = end.clone();
                 let options = options.clone();
-                async move { shard.delete_range(start, end, options).await }
+                async move { shard.delete_range(&start, &end, &options).await }
             })
             .await
         };
@@ -954,7 +952,7 @@ impl Client {
                 let start = start.clone();
                 let end = end.clone();
                 let options = options.clone();
-                async move { shard.list(start, end, options).await }
+                async move { shard.list(&start, &end, &options).await }
             })
             .await
         };
@@ -1021,7 +1019,7 @@ impl Client {
                 let start = start.clone();
                 let end = end.clone();
                 let options = options.clone();
-                async move { shard.range_scan(start, end, options).await }
+                async move { shard.range_scan(&start, &end, &options).await }
             })
             .await
         };

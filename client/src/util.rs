@@ -28,10 +28,10 @@ where
     Fut: Future<Output = Result<T>>,
 {
     match timeout {
-        Some(t) => tokio::time::timeout(t, fut)
+        Some(t) if t > Duration::ZERO => tokio::time::timeout(t, fut)
             .await
             .map_err(Error::from_tokio_elapsed)?,
-        None => fut.await,
+        _ => fut.await,
     }
 }
 
