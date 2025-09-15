@@ -757,10 +757,10 @@ impl Client {
         key: impl Into<String>,
         options: GetOptions,
     ) -> Result<Option<GetResponse>> {
-        let key = key.into();
+        let key = Arc::from(key.into());
 
         // Define the core operation with retry/timeout wrapper
-        let execute_get = |shard: shard::Client, key: String, options: GetOptions| async move {
+        let execute_get = |shard: shard::Client, key: Arc<str>, options: GetOptions| async move {
             execute_with_retry(&self.config, move || {
                 let shard = shard.clone();
                 let key = key.clone();
@@ -819,7 +819,7 @@ impl Client {
         value: impl Into<Bytes>,
         options: PutOptions,
     ) -> Result<PutResponse> {
-        let key = key.into();
+        let key = Arc::from(key.into());
         let value = value.into();
         let selector = options.partition_key.as_deref().unwrap_or(&key);
         let shard = self.get_shard(selector).await?;
@@ -847,7 +847,7 @@ impl Client {
         key: impl Into<String>,
         options: DeleteOptions,
     ) -> Result<()> {
-        let key = key.into();
+        let key = Arc::from(key.into());
         let selector = options.partition_key.as_deref().unwrap_or(&key);
         let shard = self.get_shard(selector).await?;
         execute_with_retry(&self.config, move || {
@@ -871,8 +871,8 @@ impl Client {
         options: DeleteRangeOptions,
     ) -> Result<()> {
         let do_delete_range = |shard: shard::Client,
-                               start: String,
-                               end: String,
+                               start: Arc<str>,
+                               end: Arc<str>,
                                options: DeleteRangeOptions| async move {
             execute_with_retry(&self.config, move || {
                 let shard = shard.clone();
@@ -884,8 +884,8 @@ impl Client {
             .await
         };
 
-        let start = start_inclusive.into();
-        let end = end_exclusive.into();
+        let start = Arc::from(start_inclusive.into());
+        let end = Arc::from(end_exclusive.into());
 
         if let Some(shard) = {
             if let Some(pk) = options.partition_key.as_deref() {
@@ -946,7 +946,10 @@ impl Client {
         end_exclusive: impl Into<String>,
         options: ListOptions,
     ) -> Result<ListResponse> {
-        let do_list = |shard: shard::Client, start: String, end: String, options: ListOptions| async move {
+        let do_list = |shard: shard::Client,
+                       start: Arc<str>,
+                       end: Arc<str>,
+                       options: ListOptions| async move {
             execute_with_retry(&self.config, move || {
                 let shard = shard.clone();
                 let start = start.clone();
@@ -957,8 +960,8 @@ impl Client {
             .await
         };
 
-        let start = start_inclusive.into();
-        let end = end_exclusive.into();
+        let start = Arc::from(start_inclusive.into());
+        let end = Arc::from(end_exclusive.into());
 
         if let Some(pk) = options.partition_key.as_deref() {
             let shard = self.get_shard(pk).await?;
@@ -1011,8 +1014,8 @@ impl Client {
         options: RangeScanOptions,
     ) -> Result<RangeScanResponse> {
         let do_range_scan = |shard: shard::Client,
-                             start: String,
-                             end: String,
+                             start: Arc<str>,
+                             end: Arc<str>,
                              options: RangeScanOptions| async move {
             execute_with_retry(&self.config, move || {
                 let shard = shard.clone();
@@ -1024,8 +1027,8 @@ impl Client {
             .await
         };
 
-        let start = start_inclusive.into();
-        let end = end_exclusive.into();
+        let start = Arc::from(start_inclusive.into());
+        let end = Arc::from(end_exclusive.into());
 
         if let Some(pk) = options.partition_key.as_deref() {
             let shard = self.get_shard(pk).await?;
