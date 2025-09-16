@@ -79,7 +79,7 @@ RUN --mount=type=bind,dst=/src cargo fetch --locked --manifest-path=/src/Cargo.t
 
 # ====== Install oxia ======
 # if this breaks, take a look at oxia-bin-util/build.rs
-RUN --mount=type=bind,dst=/src GOPROXY=off GOCACHE=/tmp/gocache go -C /src/oxia-bin-util/go build -mod=vendor -o $HOME/go/bin/oxia ./vendor/github.com/oxia-db/oxia/cmd && rm -rf $GOCACHE
+RUN --mount=type=bind,dst=/src GOPROXY=off GOCACHE=/tmp/gocache go -C /src/oxia-bin-util/go build -mod=vendor -o $HOME/go/bin/oxia ./vendor/github.com/oxia-db/oxia/cmd && rm -rf "$GOCACHE"
 
 # ===== ================== =====
 # ===== Create final image =====
