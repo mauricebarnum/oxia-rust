@@ -68,7 +68,7 @@ jobs:
       - name: fetch-dependencies
         if: steps.vendored.outputs.vendored == 'false'
         run: |
-          cargo update --dry-run # update crate index
+          cargo update --dry-run --verbose # update crate index
           cargo fetch --locked   # fetch dependencies: last network dependency
 
       - name: build
