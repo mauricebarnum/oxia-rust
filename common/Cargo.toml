@@ -5,18 +5,18 @@ publish = false
 edition.workspace = true
 
 [dependencies]
-bytes = { workspace = true }
-prost = { workspace = true }
-prost-types = { workspace = true }
-serde = { workspace = true }
-tokio = { workspace = true }
-tonic = { workspace = true }
-tonic-prost = { workspace = true }
+bytes = "1.10.1"
+prost = "0.14.1" # If using Protobuf
+prost-types = "0.14.1"
+serde = { version = "1.0.225", features = ["derive"] }
+tokio = { version = "1.47.1", features = ["full"] }
+tonic = { version = "0.14.2", features = ["gzip", "channel", "zstd"] }
+tonic-prost = "0.14.2"
 
 [build-dependencies]
-prost-build = { workspace = true }
-tonic-build = { workspace = true }
-tonic-prost-build = { workspace = true }
+prost-build = "0.14.1"
+tonic-build = "0.14.2"
+tonic-prost-build = "0.14.2"
 
 [lints.clippy]
 all = "allow"

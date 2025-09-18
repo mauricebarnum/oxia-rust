@@ -1,8 +1,8 @@
 [package]
 name = "oxia-bin-util"
 version = "0.1.0"
-edition = "2024"
 publish = false
+edition.workspace = true
 
 [lints]
 workspace = true
