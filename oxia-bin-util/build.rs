@@ -43,13 +43,17 @@ fn get_target_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
     Err("Could not find target directory root".into())
 }
 
+fn get_oxia_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    get_target_dir().map(|d| d.join("oxia"))
+}
+
 fn build_oxia_cli() -> io::Result<OsString> {
     const OXIA_MOD: &str = "github.com/oxia-db/oxia";
     let tools_src_dir = Path::new("go");
     let vendor_root = tools_src_dir.join("vendor");
 
-    let target_dir = get_target_dir().unwrap();
-    let oxia_path = target_dir.join(OXIA_BIN);
+    let oxia_dir = get_oxia_dir().unwrap();
+    let oxia_path = oxia_dir.join(OXIA_BIN);
     let oxia_path_str = oxia_path.to_str().unwrap().to_string();
 
     let go_mod = tools_src_dir.join("go.mod").to_str().unwrap().to_string();
