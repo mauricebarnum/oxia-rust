@@ -2,31 +2,32 @@ name: Rust
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
     paths-ignore:
-      - 'build/Dockerfile'
-      - '.github/workflows/docker-image.yml'
+      - "build/Dockerfile"
+      - ".github/workflows/docker-image.yml"
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
     paths-ignore:
-      - 'build/Dockerfile'
-      - '.github/workflows/docker-image.yml'
+      - "build/Dockerfile"
+      - ".github/workflows/docker-image.yml"
   workflow_dispatch:
     inputs:
       extra_env:
-        description: 'Extra environment variables (e.g., FOO=bar BAZ=qux)'
+        description: "Extra environment variables (e.g., FOO=bar BAZ=qux)"
         required: false
-        default: ''
+        default: ""
   workflow_run:
-    workflows: ['build-docker-image']
+    workflows: ["build-docker-image"]
     types:
       - completed
-    branches: ['main']
+    branches: ["main"]
 
 env:
   CARGO_TERM_COLOR: always
-  SCCACHE_DIR_DISABLED: ${{ github.workspace }}/target/.sccache
-  RUSTC_WRAPPER_DISABLED: sccache
+  # Use sccache with local cache only (no GitHub Actions cache)
+  SCCACHE_DIR: "/tmp/sccache"
+  RUSTC_WRAPPER: "sccache"
   RUST_BACKTRACE: full
   CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: true
 
@@ -52,6 +53,14 @@ jobs:
 
       - name: checkout
         uses: actions/checkout@v4
+
+      - name: enable-sccache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/sccache
+          key: sccache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            sccache-${{ runner.os }}-
 
       - name: enable-build-cache
         uses: Swatinem/rust-cache@v2
@@ -80,3 +89,6 @@ jobs:
       - name: test
         timeout-minutes: 10
         run: cargo nextest run --frozen --no-fail-fast --verbose
+
+      - name: show-sccache-stats
+        run: sccache --show-stats || true
