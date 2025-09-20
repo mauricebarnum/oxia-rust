@@ -3,9 +3,27 @@ name = "mauricebarnum-oxia-cmd"
 version = "0.1.0"
 edition.workspace = true
 
+[[bin]]
+name = "oxia-cmd"
+path = "src/main.rs"
+
 [dependencies]
+anyhow = "1.0.100"
+async-trait = "0.1.89"
+base64 = "0.22.1"
 bytes = "1.10.1"
+clap = { version = "4.5.47", features = ["derive"] }
+clap_complete = "4.5.58"
+futures = "0.3.31"
+hex = "0.4.3"
+humantime = "2.3.0"
+mauricebarnum-oxia-client = { path = "../client" }
+mauricebarnum-oxia-common = { path = "../common" }
+num_cpus = "1.17.0"
 thiserror = "2.0.16"
+tokio = { version = "1.47.1", features = ["full"] }
+tracing = "0.1.41"
+tracing-subscriber = "0.3.20"
 
 [lints]
 workspace = true
