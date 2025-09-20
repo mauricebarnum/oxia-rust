@@ -12,4 +12,46 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-fn main() {}
+use clap::Parser;
+use clap::Subcommand;
+
+mod commands;
+
+use commands::CommandRunnable;
+use commands::completions::CompletionsCommand;
+use commands::delete::DeleteCommand;
+use commands::get::GetCommand;
+use commands::put::PutCommand;
+
+#[derive(Parser)]
+#[command(name = "mycli", version, about = "A Git/Cargo-style CLI example")]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+#[derive(Subcommand)]
+pub enum Commands {
+    /// Generate shell completions
+    Completions(CompletionsCommand),
+
+    /// Put a key-value pair
+    Put(PutCommand),
+
+    /// Get one or more keys
+    Get(GetCommand),
+
+    /// Delete one or more keys
+    Delete(DeleteCommand),
+}
+
+fn main() {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Completions(cmd) => cmd.run(),
+        Commands::Put(cmd) => cmd.run(),
+        Commands::Get(cmd) => cmd.run(),
+        Commands::Delete(cmd) => cmd.run(),
+    }
+}
