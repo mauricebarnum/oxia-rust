@@ -4,6 +4,8 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
+clap = { version = "4.5.47", features = ["derive"] }
+clap_complete = "4.5.58"
 mauricebarnum-oxia-client = { path = "../client" }
 mauricebarnum-oxia-common = { path = "../common" }
 
