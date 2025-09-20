@@ -19,6 +19,8 @@ ARG RUSTUP_HOME
 # Versions
 ARG RUST_VERSION=1.90
 ARG GO_VERSION=go1.25.1
+ARG SCCACHE_VERSION=v0.8.2
+ARG NEXTEST_VERSION=0.9.84
 
 ARG TARGETARCH
 ARG GO_ARCH=${TARGETARCH}
@@ -63,8 +65,28 @@ ENV \
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain ${RUST_VERSION} -y
 
-# ===== Install Cargo tools =====
-RUN cargo install cargo-binstall && cargo binstall -y --no-track --disable-telemetry cargo-nextest
+# ===== Install sccache =====
+RUN case "${TARGETARCH}" in \
+        "amd64") SCCACHE_ARCH="x86_64-unknown-linux-musl" ;; \
+        "arm64") SCCACHE_ARCH="aarch64-unknown-linux-musl" ;; \
+        *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
+    esac && \
+    curl -fsSL "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}.tar.gz" \
+    | tar -xz -C /tmp && \
+    mv "/tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}/sccache" "${CARGO_HOME}/bin/sccache" && \
+    rm -rf /tmp/sccache-*
+
+# ===== Install cargo-nextest =====
+ARG NEXTEST_VERSION=0.9.84
+RUN case "${TARGETARCH}" in \
+        "amd64") NEXTEST_ARCH="x86_64-unknown-linux-gnu" ;; \
+        "arm64") NEXTEST_ARCH="aarch64-unknown-linux-gnu" ;; \
+        *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
+    esac && \
+    curl -fsSL "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-${NEXTEST_VERSION}/cargo-nextest-${NEXTEST_VERSION}-${NEXTEST_ARCH}.tar.gz" \
+    | tar -xz -C /tmp && \
+    mv "/tmp/cargo-nextest" "${CARGO_HOME}/bin/cargo-nextest" && \
+    rm -rf /tmp/cargo-nextest*
 
 # ===== Install Go =====
 RUN curl -fsSL "https://go.dev/dl/${GO_VERSION}.linux-${GO_ARCH}.tar.gz" | tar -C ${HOME} -xzf -
