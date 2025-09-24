@@ -43,7 +43,7 @@ fn main() -> Result<()> {
         let now_str = Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
         let key = format!("{}-{}", "ephemeral_key", now_str);
         let result = client
-            .put_with_options(&key, key.clone(), PutOptions::new().ephemeral())
+            .put_with_options(&key, key.clone(), PutOptions::new().with(|x| x.ephemeral()))
             .await?;
         println!("put result: {result:?}");
 

@@ -112,32 +112,32 @@ impl PutOptions {
         PutOptions::default()
     }
 
-    #[must_use]
-    pub fn expected_version_id(mut self, value: i64) -> Self {
+    pub fn with(mut self, f: impl FnOnce(&mut Self) -> &mut Self) -> Self {
+        f(&mut self);
+        self
+    }
+
+    pub fn expected_version_id(&mut self, value: i64) -> &mut Self {
         self.expected_version_id = Some(value);
         self
     }
 
-    #[must_use]
-    pub fn partition_key(mut self, value: impl Into<String>) -> Self {
+    pub fn partition_key(&mut self, value: impl Into<String>) -> &mut Self {
         self.partition_key = Some(value.into());
         self
     }
 
-    #[must_use]
-    pub fn sequence_key_deltas(mut self, value: impl Into<Arc<[u64]>>) -> Self {
+    pub fn sequence_key_deltas(&mut self, value: impl Into<Arc<[u64]>>) -> &mut Self {
         self.sequence_key_deltas = Some(value.into());
         self
     }
 
-    #[must_use]
-    pub fn secondary_indexes(mut self, value: impl Into<Arc<[SecondaryIndex]>>) -> Self {
+    pub fn secondary_indexes(&mut self, value: impl Into<Arc<[SecondaryIndex]>>) -> &mut Self {
         self.secondary_indexes = Some(value.into());
         self
     }
 
-    #[must_use]
-    pub fn ephemeral(mut self) -> Self {
+    pub fn ephemeral(&mut self) -> &mut Self {
         self.ephemeral = true;
         self
     }
@@ -215,32 +215,32 @@ impl GetOptions {
         }
     }
 
-    #[must_use]
-    pub fn include_value(mut self) -> Self {
+    pub fn with(mut self, f: impl FnOnce(&mut Self) -> &mut Self) -> Self {
+        f(&mut self);
+        self
+    }
+
+    pub fn include_value(&mut self) -> &mut Self {
         self.include_value = true;
         self
     }
 
-    #[must_use]
-    pub fn exclude_value(mut self) -> Self {
+    pub fn exclude_value(&mut self) -> &mut Self {
         self.include_value = false;
         self
     }
 
-    #[must_use]
-    pub fn comparison_type(mut self, value: KeyComparisonType) -> Self {
+    pub fn comparison_type(&mut self, value: KeyComparisonType) -> &mut Self {
         self.comparison_type = value;
         self
     }
 
-    #[must_use]
-    pub fn partition_key(mut self, value: impl Into<String>) -> Self {
+    pub fn partition_key(&mut self, value: impl Into<String>) -> &mut Self {
         self.partition_key = Some(value.into());
         self
     }
 
-    #[must_use]
-    pub fn secondary_index_name(mut self, value: impl Into<String>) -> Self {
+    pub fn secondary_index_name(&mut self, value: impl Into<String>) -> &mut Self {
         self.secondary_index_name = Some(value.into());
         self
     }
@@ -360,14 +360,17 @@ impl DeleteOptions {
         Self::default()
     }
 
-    #[must_use]
-    pub fn expected_version_id(mut self, value: i64) -> Self {
+    pub fn with(mut self, f: impl FnOnce(&mut Self) -> &mut Self) -> Self {
+        f(&mut self);
+        self
+    }
+
+    pub fn expected_version_id(&mut self, value: i64) -> &mut Self {
         self.expected_version_id = Some(value);
         self
     }
 
-    #[must_use]
-    pub fn partition_key(mut self, value: impl Into<String>) -> Self {
+    pub fn partition_key(&mut self, value: impl Into<String>) -> &mut Self {
         self.partition_key = Some(value.into());
         self
     }
@@ -387,32 +390,32 @@ impl ListOptions {
         Self::default()
     }
 
-    #[must_use]
-    pub fn shard(mut self, value: i64) -> Self {
+    pub fn with(mut self, f: impl FnOnce(&mut Self) -> &mut Self) -> Self {
+        f(&mut self);
+        self
+    }
+
+    pub fn shard(&mut self, value: i64) -> &mut Self {
         self.shard = Some(value);
         self
     }
 
-    #[must_use]
-    pub fn secondary_index_name(mut self, value: impl Into<String>) -> Self {
+    pub fn secondary_index_name(&mut self, value: impl Into<String>) -> &mut Self {
         self.secondary_index_name = Some(value.into());
         self
     }
 
-    #[must_use]
-    pub fn sort(mut self, value: bool) -> Self {
+    pub fn sort(&mut self, value: bool) -> &mut Self {
         self.sort = value;
         self
     }
 
-    #[must_use]
-    pub fn partial_ok(mut self, value: bool) -> Self {
+    pub fn partial_ok(&mut self, value: bool) -> &mut Self {
         self.partial_ok = value;
         self
     }
 
-    #[must_use]
-    pub fn partition_key(mut self, value: impl Into<String>) -> Self {
+    pub fn partition_key(&mut self, value: impl Into<String>) -> &mut Self {
         self.partition_key = Some(value.into());
         self
     }
@@ -485,32 +488,32 @@ impl RangeScanOptions {
         Self::default()
     }
 
-    #[must_use]
-    pub fn shard(mut self, value: i64) -> Self {
+    pub fn with(mut self, f: impl FnOnce(&mut Self) -> &mut Self) -> Self {
+        f(&mut self);
+        self
+    }
+
+    pub fn shard(&mut self, value: i64) -> &mut Self {
         self.shard = Some(value);
         self
     }
 
-    #[must_use]
-    pub fn sort(mut self, value: bool) -> Self {
+    pub fn sort(&mut self, value: bool) -> &mut Self {
         self.sort = value;
         self
     }
 
-    #[must_use]
-    pub fn partial_ok(mut self, value: bool) -> Self {
+    pub fn partial_ok(&mut self, value: bool) -> &mut Self {
         self.partial_ok = value;
         self
     }
 
-    #[must_use]
-    pub fn secondary_index_name(mut self, value: impl Into<String>) -> Self {
+    pub fn secondary_index_name(&mut self, value: impl Into<String>) -> &mut Self {
         self.secondary_index_name = Some(value.into());
         self
     }
 
-    #[must_use]
-    pub fn partition_key(mut self, value: impl Into<String>) -> Self {
+    pub fn partition_key(&mut self, value: impl Into<String>) -> &mut Self {
         self.partition_key = Some(value.into());
         self
     }
@@ -581,14 +584,17 @@ impl DeleteRangeOptions {
         Self::default()
     }
 
-    #[must_use]
-    pub fn shard(mut self, value: i64) -> Self {
+    pub fn with(mut self, f: impl FnOnce(&mut Self) -> &mut Self) -> Self {
+        f(&mut self);
+        self
+    }
+
+    pub fn shard(&mut self, value: i64) -> &mut Self {
         self.shard = Some(value);
         self
     }
 
-    #[must_use]
-    pub fn partition_key(mut self, value: impl Into<String>) -> Self {
+    pub fn partition_key(&mut self, value: impl Into<String>) -> &mut Self {
         self.partition_key = Some(value.into());
         self
     }

@@ -85,7 +85,7 @@ async fn test_basic_crud_operations() -> Result<()> {
         .put_with_options(
             &key,
             value2.clone(),
-            PutOptions::new().expected_version_id(put_result.version.version_id),
+            PutOptions::new().with(|x| x.expected_version_id(put_result.version.version_id)),
         )
         .await?;
     assert_eq!(put_result2.version.modifications_count, 1);
@@ -95,7 +95,7 @@ async fn test_basic_crud_operations() -> Result<()> {
     client
         .delete_with_options(
             &key,
-            DeleteOptions::new().expected_version_id(put_result2.version.version_id),
+            DeleteOptions::new().with(|x| x.expected_version_id(put_result2.version.version_id)),
         )
         .await?;
 
@@ -122,14 +122,18 @@ async fn test_secondary_indexes() -> Result<()> {
             .put_with_options(
                 &primary_key,
                 value,
-                PutOptions::new().secondary_indexes([secondary_index]),
+                PutOptions::new().with(move |p| p.secondary_indexes([secondary_index])),
             )
             .await?;
     }
 
     // Test list with secondary index
     let list_result = client
-        .list_with_options("1", "4", ListOptions::new().secondary_index_name("val-idx"))
+        .list_with_options(
+            "1",
+            "4",
+            ListOptions::new().with(|x| x.secondary_index_name("val-idx")),
+        )
         .await?;
 
     let expected_keys = vec!["b".to_string(), "c".to_string(), "d".to_string()];
@@ -141,7 +145,7 @@ async fn test_secondary_indexes() -> Result<()> {
         .range_scan_with_options(
             "1",
             "4",
-            RangeScanOptions::new().secondary_index_name("val-idx"),
+            RangeScanOptions::new().with(|x| x.secondary_index_name("val-idx")),
         )
         .await?;
 
@@ -177,7 +181,7 @@ async fn test_key_comparisons() -> Result<()> {
     let result = client
         .get_with_options(
             "a",
-            GetOptions::new().comparison_type(KeyComparisonType::Equal),
+            GetOptions::new().with(|x| x.comparison_type(KeyComparisonType::Equal)),
         )
         .await?;
     assert!(result.is_some());
@@ -190,7 +194,7 @@ async fn test_key_comparisons() -> Result<()> {
     let result = client
         .get_with_options(
             "a",
-            GetOptions::new().comparison_type(KeyComparisonType::Floor),
+            GetOptions::new().with(|x| x.comparison_type(KeyComparisonType::Floor)),
         )
         .await?;
     assert!(result.is_some());
@@ -200,7 +204,7 @@ async fn test_key_comparisons() -> Result<()> {
     let result = client
         .get_with_options(
             "b",
-            GetOptions::new().comparison_type(KeyComparisonType::Ceiling),
+            GetOptions::new().with(|x| x.comparison_type(KeyComparisonType::Ceiling)),
         )
         .await?;
     assert!(result.is_some());
@@ -210,7 +214,7 @@ async fn test_key_comparisons() -> Result<()> {
     let result = client
         .get_with_options(
             "a",
-            GetOptions::new().comparison_type(KeyComparisonType::Higher),
+            GetOptions::new().with(|x| x.comparison_type(KeyComparisonType::Higher)),
         )
         .await?;
     assert!(result.is_some());
@@ -220,7 +224,7 @@ async fn test_key_comparisons() -> Result<()> {
     let result = client
         .get_with_options(
             "b",
-            GetOptions::new().comparison_type(KeyComparisonType::Lower),
+            GetOptions::new().with(|x| x.comparison_type(KeyComparisonType::Lower)),
         )
         .await?;
     assert!(result.is_some());
@@ -241,7 +245,11 @@ async fn test_partition_routing() -> Result<()> {
 
     // Put data with partition key
     client
-        .put_with_options("a", "0", PutOptions::new().partition_key(partition_key))
+        .put_with_options(
+            "a",
+            "0",
+            PutOptions::new().with(|x| x.partition_key(partition_key)),
+        )
         .await?;
 
     // Should not find without partition key
@@ -250,7 +258,10 @@ async fn test_partition_routing() -> Result<()> {
 
     // Should find with correct partition key
     let result = client
-        .get_with_options("a", GetOptions::new().partition_key(partition_key))
+        .get_with_options(
+            "a",
+            GetOptions::new().with(|x| x.partition_key(partition_key)),
+        )
         .await?;
     assert!(result.is_some());
     assert_eq!(result.unwrap().value.as_ref().unwrap(), &b"0"[..]);
@@ -262,14 +273,18 @@ async fn test_partition_routing() -> Result<()> {
             .put_with_options(
                 key,
                 format!("{i}"),
-                PutOptions::new().partition_key(partition_key),
+                PutOptions::new().with(|x| x.partition_key(partition_key)),
             )
             .await?;
     }
 
     // Test list with partition key
     let list_result = client
-        .list_with_options("a", "d", ListOptions::new().partition_key(partition_key))
+        .list_with_options(
+            "a",
+            "d",
+            ListOptions::new().with(|x| x.partition_key(partition_key)),
+        )
         .await?;
     assert_eq!(list_result.keys, vec!["a", "b", "c"]);
 
@@ -278,7 +293,7 @@ async fn test_partition_routing() -> Result<()> {
         .list_with_options(
             "a",
             "d",
-            ListOptions::new().partition_key("wrong-partition"),
+            ListOptions::new().with(|x| x.partition_key("wrong-partition")),
         )
         .await?;
     assert!(list_result.keys.is_empty());
@@ -297,9 +312,7 @@ async fn test_sequential_keys() -> Result<()> {
         .put_with_options(
             "a",
             "0",
-            PutOptions::new()
-                .partition_key(partition_key)
-                .sequence_key_deltas([1]),
+            PutOptions::new().with(|x| x.partition_key(partition_key).sequence_key_deltas([1])),
         )
         .await?;
 
@@ -311,9 +324,7 @@ async fn test_sequential_keys() -> Result<()> {
         .put_with_options(
             "a",
             "1",
-            PutOptions::new()
-                .partition_key(partition_key)
-                .sequence_key_deltas([3]),
+            PutOptions::new().with(|x| x.partition_key(partition_key).sequence_key_deltas([3])),
         )
         .await?;
 
@@ -325,9 +336,7 @@ async fn test_sequential_keys() -> Result<()> {
         .put_with_options(
             "a",
             "2",
-            PutOptions::new()
-                .partition_key(partition_key)
-                .sequence_key_deltas([1, 6]),
+            PutOptions::new().with(|x| x.partition_key(partition_key).sequence_key_deltas([1, 6])),
         )
         .await?;
 
@@ -338,7 +347,7 @@ async fn test_sequential_keys() -> Result<()> {
     let get_result = client
         .get_with_options(
             &expected_key1,
-            GetOptions::new().partition_key(partition_key),
+            GetOptions::new().with(|x| x.partition_key(partition_key)),
         )
         .await?;
     assert!(get_result.is_some());
@@ -355,7 +364,11 @@ async fn test_ephemeral_records() -> Result<()> {
 
     // Create ephemeral record
     let put_result = client
-        .put_with_options(&key, "ephemeral-value", PutOptions::new().ephemeral())
+        .put_with_options(
+            &key,
+            "ephemeral-value",
+            PutOptions::new().with(|x| x.ephemeral()),
+        )
         .await?;
 
     assert!(put_result.version.is_ephemeral());
@@ -475,14 +488,14 @@ async fn test_get_without_value() -> Result<()> {
 
     // Get with value included (default)
     let result = client
-        .get_with_options(&key, GetOptions::new().include_value())
+        .get_with_options(&key, GetOptions::new().with(|x| x.include_value()))
         .await?;
     assert!(result.is_some());
     assert!(result.as_ref().unwrap().value.is_some());
 
     // Get without value
     let result = client
-        .get_with_options(&key, GetOptions::new().exclude_value())
+        .get_with_options(&key, GetOptions::new().with(|x| x.exclude_value()))
         .await?;
     assert!(result.is_some());
     assert!(result.unwrap().value.is_none());
@@ -585,7 +598,7 @@ async fn test_error_conditions() -> Result<()> {
         .put_with_options(
             &key,
             "new-value",
-            PutOptions::new().expected_version_id(999_999), // Wrong version
+            PutOptions::new().with(|x| x.expected_version_id(999_999)), // Wrong version
         )
         .await;
 
@@ -655,9 +668,10 @@ async fn test_integration_scenario() -> Result<()> {
             .put_with_options(
                 *order_id,
                 format!("{{\"status\": \"{status}\", \"date\": \"{date}\"}}"),
-                PutOptions::new()
-                    .partition_key(partition_key)
-                    .secondary_indexes(secondary_indexes),
+                PutOptions::new().with(|p| {
+                    p.partition_key(partition_key)
+                        .secondary_indexes(secondary_indexes)
+                }),
             )
             .await?;
     }
@@ -667,9 +681,10 @@ async fn test_integration_scenario() -> Result<()> {
         .list_with_options(
             "pending",
             "pending~", // Use tilde to get all keys starting with "pending"
-            ListOptions::new()
-                .secondary_index_name("status-idx")
-                .partition_key(partition_key),
+            ListOptions::new().with(|p| {
+                p.secondary_index_name("status-idx")
+                    .partition_key(partition_key)
+            }),
         )
         .await?;
 
@@ -682,12 +697,12 @@ async fn test_integration_scenario() -> Result<()> {
         .put_with_options(
             "order-001",
             "{\"status\": \"shipped\", \"date\": \"2024-01-01\"}",
-            PutOptions::new()
-                .partition_key(partition_key)
-                .secondary_indexes(vec![
+            PutOptions::new().with(move |p| {
+                p.partition_key(partition_key).secondary_indexes(vec![
                     SecondaryIndex::new("status-idx", "shipped"),
                     SecondaryIndex::new("date-idx", "2024-01-01"),
-                ]),
+                ])
+            }),
         )
         .await?;
 
@@ -696,9 +711,10 @@ async fn test_integration_scenario() -> Result<()> {
         .range_scan_with_options(
             "2024-01-01",
             "2024-01-03",
-            RangeScanOptions::new()
-                .secondary_index_name("date-idx")
-                .partition_key(partition_key),
+            RangeScanOptions::new().with(|p| {
+                p.secondary_index_name("date-idx")
+                    .partition_key(partition_key)
+            }),
         )
         .await?;
 
