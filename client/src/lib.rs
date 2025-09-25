@@ -761,10 +761,22 @@ impl Client {
         }
     }
 
+    #[inline]
+    pub fn is_connected(&self) -> bool {
+        self.shard_manager.is_some()
+    }
+
     pub async fn connect(&mut self) -> Result<()> {
-        let shard_manager = shard::Manager::new(&self.config).await?;
-        self.shard_manager = Some(Arc::new(shard_manager));
+        if !self.is_connected() {
+            let sm = shard::Manager::new(&self.config).await?;
+            self.shard_manager = Some(Arc::new(sm));
+        }
         Ok(())
+    }
+
+    pub async fn reconnect(&mut self) -> Result<()> {
+        self.shard_manager = None;
+        self.connect().await
     }
 
     #[inline]
