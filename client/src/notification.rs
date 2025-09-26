@@ -198,7 +198,11 @@ impl NotificationsStream {
             shards[idx].state = state;
             if let Poll::Ready(None) = poll_result {
                 shards.swap_remove(idx);
-                next = idx;
+                if idx == shards.len() {
+                    next = 0;
+                } else {
+                    next = idx;
+                }
             } else if poll_result.is_ready() {
                 return (poll_result, StreamState::Active { shards, next });
             }
