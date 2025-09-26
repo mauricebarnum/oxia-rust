@@ -112,7 +112,7 @@ impl PutOptions {
         PutOptions::default()
     }
 
-    pub fn with(mut self, f: impl FnOnce(&mut Self) -> &mut Self) -> Self {
+    pub fn with(mut self, f: impl FnOnce(&mut Self)) -> Self {
         f(&mut self);
         self
     }
@@ -215,7 +215,7 @@ impl GetOptions {
         }
     }
 
-    pub fn with(mut self, f: impl FnOnce(&mut Self) -> &mut Self) -> Self {
+    pub fn with(mut self, f: impl FnOnce(&mut Self)) -> Self {
         f(&mut self);
         self
     }
@@ -360,7 +360,7 @@ impl DeleteOptions {
         Self::default()
     }
 
-    pub fn with(mut self, f: impl FnOnce(&mut Self) -> &mut Self) -> Self {
+    pub fn with(mut self, f: impl FnOnce(&mut Self)) -> Self {
         f(&mut self);
         self
     }
@@ -390,7 +390,7 @@ impl ListOptions {
         Self::default()
     }
 
-    pub fn with(mut self, f: impl FnOnce(&mut Self) -> &mut Self) -> Self {
+    pub fn with(mut self, f: impl FnOnce(&mut Self)) -> Self {
         f(&mut self);
         self
     }
@@ -488,7 +488,7 @@ impl RangeScanOptions {
         Self::default()
     }
 
-    pub fn with(mut self, f: impl FnOnce(&mut Self) -> &mut Self) -> Self {
+    pub fn with(mut self, f: impl FnOnce(&mut Self)) -> Self {
         f(&mut self);
         self
     }
@@ -584,7 +584,7 @@ impl DeleteRangeOptions {
         Self::default()
     }
 
-    pub fn with(mut self, f: impl FnOnce(&mut Self) -> &mut Self) -> Self {
+    pub fn with(mut self, f: impl FnOnce(&mut Self)) -> Self {
         f(&mut self);
         self
     }
