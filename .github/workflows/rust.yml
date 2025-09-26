@@ -54,6 +54,9 @@ jobs:
       - name: checkout
         uses: actions/checkout@v4
 
+      - name: set-cargo-release-flag
+        run: echo "RELEASE_FLAG=$(if [ '${GITHUB_REF}' = 'refs/heads/main' ]; then echo '--release'; else echo ''; fi)" >> $GITHUB_ENV
+
       - name: enable-sccache
         uses: actions/cache@v4
         with:
@@ -80,15 +83,15 @@ jobs:
           cargo update --dry-run --verbose # update crate index
           cargo fetch --locked   # fetch dependencies: last network dependency
 
-      - name: build
-        run: cargo build --frozen --all-targets
-
       - name: clippy
-        run: cargo clippy --no-deps --all-targets --all-features --frozen
+        run: cargo clippy $RELEASE_FLAG --no-deps --all-targets --all-features --frozen
+
+      - name: build
+        run: cargo build $RELEASE_FLAG --frozen --all-targets
 
       - name: test
         timeout-minutes: 10
-        run: cargo nextest run --frozen --no-fail-fast --verbose
+        run: cargo nextest run $RELEASE_FLAG --frozen --no-fail-fast --verbose
 
       - name: show-sccache-stats
         run: sccache --show-stats || true
