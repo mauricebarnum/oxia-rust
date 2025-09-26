@@ -1023,6 +1023,7 @@ mod searchable {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct NotificationsStream {
     inner: tonic::Streaming<oxia_proto::NotificationBatch>,
 }

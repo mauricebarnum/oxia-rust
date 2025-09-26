@@ -1,3 +1,4 @@
+use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Context;
@@ -28,6 +29,22 @@ enum ShardState {
     Done,
 }
 
+impl fmt::Debug for ShardState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ShardState::Start => write!(f, "Start"),
+            ShardState::Connecting { cause, .. } => f
+                .debug_struct("Connecting")
+                .field("fut", &"<BoxFuture>")
+                .field("cause", cause)
+                .finish(),
+            ShardState::Active(s) => f.debug_tuple("Active").field(s).finish(),
+            ShardState::Done => write!(f, "Done"),
+        }
+    }
+}
+
+#[derive(Debug)]
 struct ShardInfo {
     id: i64,
     offset: Option<i64>,
@@ -40,6 +57,21 @@ enum StreamState {
     Done,
 }
 
+impl fmt::Debug for StreamState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StreamState::Active { shards, next } => f
+                .debug_struct("Active")
+                .field("shards", shards)
+                .field("next", next)
+                .finish(),
+            StreamState::Building(_) => write!(f, "Building(<BoxFuture>)"),
+            StreamState::Done => write!(f, "Done"),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct NotificationsStream {
     config: Arc<config::Config>,
     shard_manager: Arc<shard::Manager>,
