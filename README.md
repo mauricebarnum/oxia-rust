@@ -6,33 +6,44 @@ Grpc support is based upon [tonic](https://github.com/hyperium/tonic).
 
 Support for all of the Oxia service is incomplete,
 
-
 # Layout
 
 * oxia-bin-util - testing support
-    * internal crate
-    * build an oxia server for running tests
-    * provide a compile-time path to the built binary
-    * Go sources are vendored from upstream
+  * internal crate
+  * build an oxia server for running tests
+  * provide a compile-time path to the built binary
+  * Go sources are vendored from upstream
 * common - low-level client
-    * crate: mauricebarnum-oxia-common
-    * provide grpc binding to the [OxiaClient](crates/common/proto/client.proto) service, using tonic
+  * crate: mauricebarnum-oxia-common
+  * provide grpc binding to the [OxiaClient](crates/common/proto/client.proto) service, using tonic
 * client - higher-level client
-    * crate: mauricebarnum-oxia-client
-    * implements sharding, dispatch, etc. intended to be more ergonomic than the raw grpc binding
-    * minimal exposure to tonic api
-    * async rt not exposed
+  * crate: mauricebarnum-oxia-client
+  * implements sharding, dispatch, etc. intended to be more ergonomic than the raw grpc binding
+  * minimal exposure to tonic api
+  * async rt not exposed
 * cmd
-    * crate: mauricebarnum-oxia-cmd
-    * oxia client cli
-    * unimplemented, intended as a test-bed/example for the client crate
+  * crate: mauricebarnum-oxia-cmd
+  * oxia client cli
+  * unimplemented, intended as a test-bed/example for the client crate
 
 # TODO
 
 1. Add robustness for transient errors
    1. don't fail assignment processing if unable to connect to a shard
    1. reconnect client when remote fails
+1. Command-client client
+    1. pretty output, configurable formats: JSON, raw, tabular
+    1. additional commands:
+        1. `shell`: REPL command to execute multiple commands with the same client.  consider using rustyline or similar for history and completion support.  create one context and share that with commands run from the shell
+        1. session support (requires REPL to be useful):
+          1. create, stop, list
+          1. `put` ephemeral keys
+        1. `put`: support secondary index
+1. instrument client library
+  1. collect metrics
+  1. add more tracing
 1. Fix flaky test:
+
 ```
         Sep  9 17:11:08.874154 INF Starting Oxia standalone config={"AuthOptions":{"ProviderName":"","ProviderParams":""},"DataDir":"/var/folders/c_/ffflkqfj25d590trtpmzss0w0000gn/T/.tmpyXa5uj/db","DbBlockCacheMB":100,"InternalServerTLS":null,"InternalServiceAddr":"","MetricsServiceAddr":"127.0.0.1:57803","NotificationsEnabled":true,"NotificationsRetentionTime":3600000000000,"NumShards":1,"PeerTLS":null,"PublicServiceAddr":"127.0.0.1:57802","ServerTLS":null,"WalDir":"/var/folders/c_/ffflkqfj25d590trtpmzss0w0000gn/T/.tmpyXa5uj/wal","WalRetentionTime":3600000000000,"WalSyncData":true}
         Sep  9 17:11:09.372626 INF Created leader controller component=leader-controller namespace=default shard=0 term=-1
@@ -77,4 +88,3 @@ Support for all of the Oxia service is incomplete,
 # Copying
 
 See (LICENSE)  
-

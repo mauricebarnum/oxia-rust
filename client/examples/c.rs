@@ -80,7 +80,9 @@ async fn main() -> Result<()> {
         .put_with_options(
             "ephemeral_key",
             Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            crate::PutOptions::new().with(|x| x.ephemeral()),
+            crate::PutOptions::new().with(|x| {
+                x.ephemeral();
+            }),
         )
         .await?;
     println!("put result: {result:?}");
