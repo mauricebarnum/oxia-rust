@@ -34,14 +34,12 @@ Support for all of the Oxia service is incomplete,
 1. Command-client client
     1. pretty output, configurable formats: JSON, raw, tabular
     1. additional commands:
-        1. `shell`: REPL command to execute multiple commands with the same client.  consider using rustyline or similar for history and completion support.  create one context and share that with commands run from the shell
-        1. session support (requires REPL to be useful):
-          1. create, stop, list
-          1. `put` ephemeral keys
+        1. `shell`: add tab completion
+        1. create, stop, list
         1. `put`: support secondary index
 1. instrument client library
-  1. collect metrics
-  1. add more tracing
+1. collect metrics
+1. add more tracing
 1. Fix flaky test:
 
 ```

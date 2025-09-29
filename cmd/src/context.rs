@@ -24,4 +24,10 @@ impl Context {
         self.client.connect().await?;
         Ok(&mut self.client)
     }
+
+    pub fn make_subcontext(&self) -> Context {
+        Self {
+            client: Client::new(self.client.config().clone()),
+        }
+    }
 }
