@@ -761,6 +761,10 @@ impl Client {
         }
     }
 
+    pub fn config(&self) -> &Arc<config::Config> {
+        &self.config
+    }
+
     #[inline]
     pub fn is_connected(&self) -> bool {
         self.shard_manager.is_some()
