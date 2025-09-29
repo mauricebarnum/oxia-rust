@@ -55,7 +55,12 @@ jobs:
         uses: actions/checkout@v4
 
       - name: set-cargo-release-flag
-        run: echo "RELEASE_FLAG=$(if [ \"${GITHUB_REF}\" = 'refs/heads/main' ]; then echo '--release'; else echo ''; fi)" >> $GITHUB_ENV
+        run: |
+          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            echo "RELEASE_FLAG=--release" >> $GITHUB_ENV
+          else
+            echo "RELEASE_FLAG=" >> $GITHUB_ENV
+          fi
 
       - name: enable-sccache
         uses: actions/cache@v4
