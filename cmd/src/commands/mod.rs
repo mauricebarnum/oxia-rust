@@ -23,6 +23,7 @@ mod list;
 mod notifications;
 mod put;
 mod range_scan;
+mod shell;
 
 pub use completions::CompletionsCommand;
 pub use delete::DeleteCommand;
@@ -32,6 +33,7 @@ pub use list::ListCommand;
 pub use notifications::NotificationsCommand;
 pub use put::PutCommand;
 pub use range_scan::RangeScanCommand;
+pub use shell::ShellCommand;
 
 #[async_trait]
 pub trait CommandRunnable {
@@ -50,6 +52,7 @@ pub enum Commands {
     Get(GetCommand),
 
     /// Delete one or more keys
+    #[clap(visible_alias = "del")]
     Delete(DeleteCommand),
 
     /// Delete one or more keys
@@ -60,8 +63,12 @@ pub enum Commands {
 
     /// Retrieve notifications from the server(s)
     Notifications(NotificationsCommand),
+
     /// Get values in range
     RangeScan(RangeScanCommand),
+
+    /// Start a shell to run commands
+    Shell(ShellCommand),
 }
 
 #[async_trait]
@@ -76,6 +83,7 @@ impl CommandRunnable for Commands {
             Commands::Notifications(cmd) => cmd.run(ctx).await,
             Commands::Put(cmd) => cmd.run(ctx).await,
             Commands::RangeScan(cmd) => cmd.run(ctx).await,
+            Commands::Shell(cmd) => cmd.run(ctx).await,
         }
     }
 }
