@@ -72,6 +72,10 @@ pub struct PutCommand {
     /// Sequence keys deltas
     #[arg(long,value_delimiter=',',value_parser=clap::value_parser!(u64))]
     pub sequence_keys_deltas: Option<Vec<u64>>,
+
+    /// Create an emphemeral key: tied to lifetime of the session
+    #[arg(long, default_value_t = false)]
+    pub ephemeral: bool,
 }
 
 #[async_trait::async_trait]
@@ -90,6 +94,10 @@ impl CommandRunnable for PutCommand {
 
             if let Some(deltas) = self.sequence_keys_deltas {
                 opts.sequence_key_deltas(deltas);
+            }
+
+            if self.ephemeral {
+                opts.ephemeral();
             }
         });
         let result = ctx
