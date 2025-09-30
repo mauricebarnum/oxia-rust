@@ -70,7 +70,7 @@ pub struct GetCommand {
 
 #[async_trait::async_trait]
 impl CommandRunnable for GetCommand {
-    async fn run(self, ctx: &mut crate::Context) -> anyhow::Result<()> {
+    async fn run(self, ctx: crate::Context) -> anyhow::Result<()> {
         trace!(?self, ?ctx, "params");
         let opts = GetOptions::new().with(|opts| {
             opts.comparison_type(self.key_comp.into());

@@ -1,10 +1,19 @@
+use std::sync::Arc;
+
+use tokio::sync::Mutex;
+
 use crate::client_lib::Client;
 use crate::client_lib::Result;
 use crate::client_lib::config;
 
-#[derive(Debug)]
-pub struct Context {
+#[derive(Clone, Debug)]
+struct State {
     client: Client,
+}
+
+#[derive(Clone, Debug)]
+pub struct Context {
+    state: Arc<Mutex<State>>,
 }
 
 impl Context {
@@ -17,17 +26,22 @@ impl Context {
             .build()?;
 
         let client = Client::new(config);
-        Ok(Self { client })
+        Ok(Self {
+            state: Arc::new(Mutex::new(State { client })),
+        })
     }
 
-    pub async fn client(&mut self) -> Result<&mut Client> {
-        self.client.connect().await?;
-        Ok(&mut self.client)
+    pub async fn client(&self) -> Result<Client> {
+        let mut state = self.state.lock().await;
+        state.client.connect().await?;
+        Ok(state.client.clone())
     }
 
-    pub fn make_subcontext(&self) -> Context {
+    pub async fn make_subcontext(&self) -> Context {
+        let state = self.state.lock().await;
+        let client = Client::new(state.client.config().clone());
         Self {
-            client: Client::new(self.client.config().clone()),
+            state: Arc::new(Mutex::new(State { client })),
         }
     }
 }

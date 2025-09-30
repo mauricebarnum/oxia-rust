@@ -30,7 +30,7 @@ pub struct CompletionsCommand {
 
 #[async_trait::async_trait]
 impl CommandRunnable for CompletionsCommand {
-    async fn run(self, _: &mut crate::Context) -> anyhow::Result<()> {
+    async fn run(self, _: crate::Context) -> anyhow::Result<()> {
         let mut cmd = Cli::command();
         let prog_name = cmd.get_name().to_string();
 

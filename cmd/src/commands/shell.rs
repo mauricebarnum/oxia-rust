@@ -18,6 +18,7 @@ use clap::Parser;
 use clap::Subcommand;
 use clap::error::ErrorKind;
 use rustyline::error::ReadlineError;
+use tokio::task;
 use tracing::trace;
 
 use super::CommandRunnable;
@@ -43,21 +44,20 @@ struct ShellParser {
 }
 
 impl ShellCommand {
-    async fn run_shell(ctx_arg: &mut Context) -> anyhow::Result<()> {
+    async fn run_shell(ctx_arg: Context) -> anyhow::Result<()> {
         let should_exit = |c: &mut Vec<Context>| -> bool {
-            let result = c.is_empty();
             c.pop();
-            result
+            c.is_empty()
         };
 
-        let mut ctxts: Vec<Context> = Vec::new();
+        let mut ctxts: Vec<Context> = vec![ctx_arg];
 
         let basic_prompt: &str = "oxia> ";
 
         let mut rl = rustyline::DefaultEditor::new()?;
         let mut prev: Option<String> = None;
         loop {
-            let depth = ctxts.len();
+            let depth = ctxts.len() - 1;
             let prompt = if depth == 0 {
                 basic_prompt.to_string()
             } else {
@@ -92,17 +92,13 @@ impl ShellCommand {
                             }
 
                             ShellCommands::Command(Commands::Shell(_)) => {
-                                let ctx = ctxts.last_mut().unwrap_or(ctx_arg).make_subcontext();
+                                let ctx = ctxts.last().unwrap().make_subcontext().await;
                                 ctxts.push(ctx);
                             }
 
                             ShellCommands::Command(cmd) => {
                                 let _ = rl.add_history_entry(line);
-                                // let nctx = ctxts.len();
-                                let ctx = ctxts.last_mut().unwrap_or(ctx_arg);
-                                if let Err(e) = cmd.run(ctx).await {
-                                    eprintln!("{e}");
-                                }
+                                run_cmd(&ctxts, cmd).await;
                             }
                         },
                         Err(e) => {
@@ -132,9 +128,33 @@ impl ShellCommand {
     }
 }
 
+async fn run_cmd(ctxts: &[Context], cmd: Commands) {
+    fn check(r: Result<anyhow::Result<()>, task::JoinError>) {
+        match r {
+            Ok(inner) => {
+                if let Err(e) = inner {
+                    eprintln!("{e}");
+                }
+            }
+            Err(e) if e.is_cancelled() => eprintln!(),
+            Err(e) => eprintln!("join error: {e}"),
+        }
+    }
+
+    let ctx = ctxts.last().unwrap();
+    let mut task = tokio::spawn(cmd.run(ctx.clone()));
+    tokio::select! {
+        r = &mut task => check(r),
+        _ = tokio::signal::ctrl_c() => {
+            task.abort();
+            check(task.await);
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl CommandRunnable for ShellCommand {
-    async fn run(self, ctx: &mut crate::Context) -> anyhow::Result<()> {
+    async fn run(self, ctx: crate::Context) -> anyhow::Result<()> {
         trace!(?self, ?ctx, "params");
         Self::run_shell(ctx).await
     }

@@ -37,7 +37,7 @@ pub use shell::ShellCommand;
 
 #[async_trait]
 pub trait CommandRunnable {
-    async fn run(self, ctx: &mut crate::Context) -> anyhow::Result<()>;
+    async fn run(self, ctx: crate::Context) -> anyhow::Result<()>;
 }
 
 #[derive(Subcommand)]
@@ -73,7 +73,7 @@ pub enum Commands {
 
 #[async_trait]
 impl CommandRunnable for Commands {
-    async fn run(self, ctx: &mut crate::Context) -> anyhow::Result<()> {
+    async fn run(self, ctx: crate::Context) -> anyhow::Result<()> {
         match self {
             Commands::Completions(cmd) => cmd.run(ctx).await,
             Commands::Delete(cmd) => cmd.run(ctx).await,

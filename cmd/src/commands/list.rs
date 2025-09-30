@@ -40,7 +40,7 @@ pub struct ListCommand {
 
 #[async_trait::async_trait]
 impl CommandRunnable for ListCommand {
-    async fn run(self, ctx: &mut crate::Context) -> anyhow::Result<()> {
+    async fn run(self, ctx: crate::Context) -> anyhow::Result<()> {
         trace!(?self, ?ctx, "params");
         let opts = ListOptions::new().with(|opts| {
             if let Some(pk) = self.partition {
