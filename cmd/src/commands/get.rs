@@ -90,7 +90,7 @@ impl CommandRunnable for GetCommand {
 
         let result = ctx.client().await?.get_with_options(self.key, opts).await;
         trace!(?result, "result");
-        println!("(stub) {result:?}");
+        println!("{result:?}");
         super::to_result(result)
     }
 }
