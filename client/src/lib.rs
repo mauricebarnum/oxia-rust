@@ -32,12 +32,38 @@ use crate::pool::ChannelPool;
 
 pub mod config;
 pub mod errors;
+mod instrumented_client;
+pub mod metrics;
+pub mod metrics_integration;
 mod notification;
 mod pool;
 mod shard;
+mod shard_with_metrics;
+mod traced_client;
+mod tracing_metrics;
 mod util;
 
 pub use errors::*;
+pub use instrumented_client::{
+    GrpcClientInstrumentation, InstrumentedClientFactory, InstrumentedGrpcClient,
+};
+pub use metrics::{
+    GrpcMetricsCollector, MetricLabels, MetricsTimer, OperationMetrics, global_metrics,
+    init_global_metrics,
+};
+pub use metrics_integration::{
+    MetricsConfig, MetricsConfigBuilder, MetricsEnabledClientFactory, OperationTimer,
+    create_grpc_client_with_metrics, setup_client_metrics,
+};
+pub use shard_with_metrics::{
+    MetricsEnabledShardClient, MetricsEnabledShardFactory, MetricsEnabledShardManager,
+    ShardClientMetricsExtension, create_metrics_enabled_shard_client,
+};
+pub use traced_client::{ClientTracingExtension, TracedClient, TracedClientFactory};
+pub use tracing_metrics::{
+    CompletedSpan, DistributedTracingCollector, OperationStats, SpanContext, TraceId,
+    TracedOperation,
+};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
