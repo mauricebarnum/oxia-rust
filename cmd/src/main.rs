@@ -57,6 +57,6 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     cli.log.setup("off")?;
 
-    let mut ctx = Context::new(&cli)?;
-    cli.command.run(&mut ctx).await
+    let ctx = Context::new(&cli)?;
+    cli.command.run(ctx).await
 }

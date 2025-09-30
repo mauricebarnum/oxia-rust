@@ -747,7 +747,7 @@ where
     util::with_timeout(timeout, util::with_retry(retry_config, retry_op)).await
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Client {
     shard_manager: Option<Arc<shard::Manager>>,
     config: Arc<config::Config>,

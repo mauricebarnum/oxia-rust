@@ -40,7 +40,7 @@ pub struct RangeScanCommand {
 
 #[async_trait::async_trait]
 impl CommandRunnable for RangeScanCommand {
-    async fn run(self, ctx: &mut crate::Context) -> anyhow::Result<()> {
+    async fn run(self, ctx: crate::Context) -> anyhow::Result<()> {
         trace!(?self, ?ctx, "params");
         let opts = RangeScanOptions::new().with(|opts| {
             if let Some(pk) = self.partition {

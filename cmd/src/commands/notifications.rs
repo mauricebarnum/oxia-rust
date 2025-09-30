@@ -24,7 +24,7 @@ pub struct NotificationsCommand {}
 
 #[async_trait::async_trait]
 impl CommandRunnable for NotificationsCommand {
-    async fn run(self, ctx: &mut crate::Context) -> anyhow::Result<()> {
+    async fn run(self, ctx: crate::Context) -> anyhow::Result<()> {
         trace!(?self, ?ctx, "params");
         let result = ctx.client().await?.create_notifications_stream();
         trace!(?result, "result");
