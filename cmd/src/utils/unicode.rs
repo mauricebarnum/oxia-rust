@@ -70,7 +70,7 @@ fn do_decode_escapes(s: &str) -> Result<Bytes> {
                     }
 
                     // Work directly with the 4-byte slice - bounds check eliminated
-                    let hex_slice = unsafe { input_bytes.get_unchecked(i..i + 4) };
+                    let hex_slice = &input_bytes[i..i + 4];
                     let code_point = parse_hex_u32(hex_slice, i)?;
                     i += 4;
 
@@ -89,7 +89,7 @@ fn do_decode_escapes(s: &str) -> Result<Bytes> {
                     }
 
                     // Work directly with the 8-byte slice - bounds check eliminated
-                    let hex_slice = unsafe { input_bytes.get_unchecked(i..i + 8) };
+                    let hex_slice = &input_bytes[i..i + 8];
                     let code_point = parse_hex_u32(hex_slice, i)?;
                     i += 8;
 
