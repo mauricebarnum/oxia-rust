@@ -22,7 +22,7 @@ use super::CommandRunnable;
 
 // TODO: move this to a common module?
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
-pub enum KeyCompareArg {
+enum KeyCompareArg {
     Equal,
     Floor,
     Ceiling,
@@ -45,27 +45,27 @@ impl From<KeyCompareArg> for KeyComparisonType {
 #[derive(Args, Debug)]
 pub struct GetCommand {
     /// Key to retrieve
-    pub key: String,
+    key: String,
 
     /// Partition key to override shard routing
     #[arg(short, long)]
-    pub partition: Option<String>,
+    partition: Option<String>,
 
     /// Secondary index key
     #[arg(short, long)]
-    pub index: Option<String>,
+    index: Option<String>,
 
     /// Indicate if key exists, don't return a value
     #[arg(short, long, default_value_t = false)]
-    pub exists: bool,
+    exists: bool,
 
     /// Key comparison to use
     #[arg(short, long, value_enum, default_value_t = KeyCompareArg::Equal)]
-    pub key_comp: KeyCompareArg,
+    key_comp: KeyCompareArg,
 
     /// Include the record version
     #[arg(short, long("include-version"), default_value_t = false)]
-    pub version: bool,
+    version: bool,
 }
 
 #[async_trait::async_trait]

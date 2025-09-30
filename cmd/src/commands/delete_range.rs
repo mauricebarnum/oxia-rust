@@ -23,15 +23,15 @@ use crate::client_lib::DeleteRangeOptions;
 pub struct DeleteRangeCommand {
     /// Key range minimum (inclusive)
     #[arg(short('m'), long, default_value = "")]
-    pub key_min: String,
+    key_min: String,
 
     /// Key range maximum (exclusive)
     #[arg(short('n'), long, default_value = "")]
-    pub key_max: String,
+    key_max: String,
 
     /// Partition key to override shard routing
     #[arg(short, long)]
-    pub partition: Option<String>,
+    partition: Option<String>,
 }
 
 #[async_trait::async_trait]

@@ -21,15 +21,15 @@ use crate::client_lib::DeleteOptions;
 #[derive(Args, Debug)]
 pub struct DeleteCommand {
     /// Key to delete
-    pub key: String,
+    key: String,
 
     /// Partition key to override shard routing
     #[arg(short, long)]
-    pub partition: Option<String>,
+    partition: Option<String>,
 
     /// Expected version
     #[arg(long)]
-    pub expected_version: Option<i64>,
+    expected_version: Option<i64>,
 }
 
 #[async_trait::async_trait]
