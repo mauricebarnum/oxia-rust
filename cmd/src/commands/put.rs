@@ -25,7 +25,7 @@ use crate::client_lib::PutOptions;
 use crate::utils::unicode;
 
 #[derive(ValueEnum, Clone, Copy, Debug)]
-pub enum ValueEncoding {
+enum ValueEncoding {
     None,
     #[value(alias = "b64")]
     Base64Url,
@@ -52,30 +52,30 @@ fn decode(enc: ValueEncoding, s: String) -> anyhow::Result<Bytes> {
 #[derive(Args, Debug)]
 pub struct PutCommand {
     /// Key to insert
-    pub key: String,
+    key: String,
 
     /// Value to insert
-    pub value: String,
+    value: String,
 
     /// Encoding to use for the value
     #[arg(short, long, value_enum, default_value_t = ValueEncoding::None)]
-    pub encoding: ValueEncoding,
+    encoding: ValueEncoding,
 
     /// Partition key to override shard routing
     #[arg(short, long)]
-    pub partition: Option<String>,
+    partition: Option<String>,
 
     /// Expected version
     #[arg(long)]
-    pub expected_version: Option<i64>,
+    expected_version: Option<i64>,
 
     /// Sequence keys deltas
     #[arg(long,value_delimiter=',',value_parser=clap::value_parser!(u64))]
-    pub sequence_keys_deltas: Option<Vec<u64>>,
+    sequence_keys_deltas: Option<Vec<u64>>,
 
     /// Create an ephemeral key: tied to lifetime of the session
     #[arg(long, default_value_t = false)]
-    pub ephemeral: bool,
+    ephemeral: bool,
 }
 
 #[async_trait::async_trait]

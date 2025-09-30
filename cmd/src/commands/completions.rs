@@ -25,7 +25,7 @@ use crate::Cli;
 #[derive(Args)]
 pub struct CompletionsCommand {
     /// Shell to generate completions for (bash, zsh, fish, powershell, elvish)
-    pub shell: String,
+    shell: String,
 }
 
 #[async_trait::async_trait]
