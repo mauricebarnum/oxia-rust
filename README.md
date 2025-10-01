@@ -40,6 +40,7 @@ Support for all of the Oxia service is incomplete,
 1. instrument client library
 1. collect metrics
 1. add more tracing
+1. Consider adding pipeline support:  the Go client keeps read and write streams open to the shards and pipelines requests to them.  I don't know if the complexity is worth it, but first I need instrumentation to be able to measure the effect.  For now, it seems more worthwhile to continue experiment with fleshing out the functional bits.
 1. Fix flaky test:
 
 ```
@@ -83,6 +84,8 @@ Support for all of the Oxia service is incomplete,
 
 ```
 
+# Open question
+   1. Is it sensible to implement this with directly using async support?  If a different GRPC framework is used (does a well supported one exist right now?), maybe a thread-per-core model on top of which one could bolt an async friendly binding would be better.  There are definitely some extra data copies involved to workaround the lack of scoped async tasks in tokio.
 # Copying
 
 See (LICENSE)  
