@@ -23,8 +23,11 @@ Support for all of the Oxia service is incomplete,
   * async rt not exposed
 * cmd
   * crate: mauricebarnum-oxia-cmd
-  * oxia client cli
-  * unimplemented, intended as a test-bed/example for the client crate
+  * oxia client cli: oxia-cmd
+  * implemented commands: get, put, delete,
+list (keys), range scan, range delete, notifications
+  * not yet: batch read, batch write, write secondary index
+  
 
 # TODO
 
