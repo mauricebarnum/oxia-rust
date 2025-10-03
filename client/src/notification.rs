@@ -14,6 +14,7 @@ use tracing::info;
 use crate::Error;
 use crate::NotificationBatch;
 use crate::Result;
+use crate::ShardId;
 use crate::config;
 use crate::config::Config;
 use crate::errors;
@@ -46,7 +47,7 @@ impl fmt::Debug for ShardState {
 
 #[derive(Debug)]
 struct ShardInfo {
-    id: i64,
+    id: ShardId,
     offset: Option<i64>,
     state: ShardState,
 }

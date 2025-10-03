@@ -19,6 +19,7 @@ use std::sync::Arc;
 use thiserror::Error as ThisError;
 
 use crate::KeyComparisonType;
+use crate::ShardId;
 
 /// Errors that map directly from the Oxia gRPC service responses (excluding success/OK)
 #[derive(ThisError, Debug, PartialEq, Eq)]
@@ -105,7 +106,7 @@ pub enum UnexpectedServerResponse {
     InvalidMaxBoundary { boundary: u32 },
 
     #[error("Duplicate shard ID: {0}")]
-    DuplicateShardId(i64),
+    DuplicateShardId(ShardId),
 
     #[error("Overlapping shard ranges: {0}")]
     OverlappingRanges(Box<OverlappingRangesData>),
@@ -113,7 +114,7 @@ pub enum UnexpectedServerResponse {
 
 #[derive(Debug)]
 pub struct ShardError {
-    pub shard: i64,
+    pub shard: ShardId,
     pub err: Error,
 }
 
@@ -142,7 +143,7 @@ pub enum Error {
     UnexpectedServerResponse(#[from] UnexpectedServerResponse),
 
     #[error("No shard mapping for {0}")]
-    NoShardMapping(i64),
+    NoShardMapping(ShardId),
 
     #[error("Custom error: {0}")]
     Custom(String),
@@ -299,7 +300,7 @@ mod tests {
     fn test_error_is_retryable_false() {
         let errs = [
             Error::Custom("not retriable".into()),
-            Error::NoShardMapping(-1),
+            Error::NoShardMapping(ShardId::INVALID),
             Error::NoServiceAddress,
             Error::Client(ClientError::Internal("client error".into())),
             Error::MultipleShardError(vec![]),

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -59,6 +60,36 @@ use crate::config;
 use crate::create_grpc_client;
 use crate::pool::ChannelPool;
 
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct ShardId(i64);
+
+impl ShardId {
+    pub const fn new(val: i64) -> Self {
+        ShardId(val)
+    }
+
+    pub const INVALID: ShardId = ShardId(-1);
+}
+
+impl From<i64> for ShardId {
+    fn from(val: i64) -> Self {
+        ShardId(val)
+    }
+}
+
+impl From<ShardId> for i64 {
+    fn from(my: ShardId) -> Self {
+        my.0
+    }
+}
+
+impl fmt::Display for ShardId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Constants for Oxia protocol
 const STATUS_OK: i32 = 0;
 
@@ -78,7 +109,7 @@ impl Drop for Session {
 struct ClientData {
     config: Arc<config::Config>,
     grpc: GrpcClient,
-    shard_id: i64,
+    shard_id: ShardId,
     #[allow(dead_code)] // this is actually used
     leader: String,
     meta: tonic::metadata::MetadataMap,
@@ -88,7 +119,7 @@ impl ClientData {
     pub fn new(
         config: Arc<config::Config>,
         grpc: GrpcClient,
-        shard_id: i64,
+        shard_id: ShardId,
         leader: impl Into<String>,
         meta: tonic::metadata::MetadataMap,
     ) -> Self {
@@ -216,7 +247,10 @@ impl Client {
                 let req = tonic::Request::from_parts(
                     meta.clone(),
                     tonic::Extensions::default(),
-                    oxia_proto::SessionHeartbeat { session_id, shard },
+                    oxia_proto::SessionHeartbeat {
+                        session_id,
+                        shard: shard.into(),
+                    },
                 );
                 let rsp = grpc.keep_alive(req).await;
                 debug!(?rsp, "grpc.keep_alive");
@@ -233,12 +267,12 @@ impl Client {
     pub(crate) fn new(
         grpc: GrpcClient,
         config: Arc<config::Config>,
-        shard_id: i64,
+        shard_id: ShardId,
         dest: impl Into<String>,
     ) -> Result<Self> {
         // Create metadata with shard ID and namespace
         let mut meta = tonic::metadata::MetadataMap::new();
-        meta.insert("shard-id", MetadataValue::from(shard_id));
+        meta.insert("shard-id", MetadataValue::from(shard_id.0));
         meta.insert(
             "namespace",
             MetadataValue::from_str(config.namespace())
@@ -251,7 +285,7 @@ impl Client {
         })
     }
 
-    pub(crate) fn id(&self) -> i64 {
+    pub(crate) fn id(&self) -> ShardId {
         self.data.shard_id
     }
 
@@ -264,7 +298,7 @@ impl Client {
             .create_session(self.create_request(oxia_proto::CreateSessionRequest {
                 session_timeout_ms: config.session_timeout().as_millis() as u32,
                 client_identity: config.identity().into(),
-                shard: data.shard_id,
+                shard: data.shard_id.0,
             }))
             .await?
             .into_inner();
@@ -290,7 +324,7 @@ impl Client {
     fn make_get_req(&self, opts: &GetOptions, k: &str) -> oxia_proto::ReadRequest {
         let data = &self.data;
         oxia_proto::ReadRequest {
-            shard: Some(data.shard_id),
+            shard: Some(data.shard_id.0),
             gets: vec![oxia_proto::GetRequest {
                 key: k.to_string(),
                 include_value: opts.include_value,
@@ -310,7 +344,7 @@ impl Client {
     ) -> oxia_proto::WriteRequest {
         let data = &self.data;
         oxia_proto::WriteRequest {
-            shard: Some(data.shard_id),
+            shard: Some(data.shard_id.0),
             puts: vec![oxia_proto::PutRequest {
                 key: k.to_string(),
                 value: v,
@@ -333,7 +367,7 @@ impl Client {
     fn make_delete_req(&self, opts: &DeleteOptions, k: &str) -> oxia_proto::WriteRequest {
         let data = &self.data;
         oxia_proto::WriteRequest {
-            shard: Some(data.shard_id),
+            shard: Some(data.shard_id.0),
             puts: vec![],
             deletes: vec![oxia_proto::DeleteRequest {
                 key: k.to_string(),
@@ -352,7 +386,7 @@ impl Client {
     ) -> oxia_proto::WriteRequest {
         let data = &self.data;
         oxia_proto::WriteRequest {
-            shard: Some(data.shard_id),
+            shard: Some(data.shard_id.0),
             puts: vec![],
             deletes: vec![],
             delete_ranges: vec![oxia_proto::DeleteRangeRequest {
@@ -371,7 +405,7 @@ impl Client {
     ) -> oxia_proto::ListRequest {
         let data = &self.data;
         oxia_proto::ListRequest {
-            shard: Some(data.shard_id),
+            shard: Some(data.shard_id.0),
             start_inclusive: start_inclusive.to_string(),
             end_exclusive: end_exclusive.to_string(),
             secondary_index_name: opts.secondary_index_name.clone(),
@@ -397,7 +431,7 @@ impl Client {
         };
 
         oxia_proto::RangeScanRequest {
-            shard: Some(data.shard_id),
+            shard: Some(data.shard_id.0),
             start_inclusive: start_inclusive.to_string(),
             end_exclusive: effective_end,
             secondary_index_name: opts.secondary_index_name.clone(),
@@ -424,7 +458,7 @@ impl Client {
         let data = &self.data;
 
         let write_req = oxia_proto::WriteRequest {
-            shard: Some(data.shard_id),
+            shard: Some(data.shard_id.0),
             ..write_req
         };
 
@@ -695,7 +729,7 @@ impl Client {
         start_offset_exclusive: Option<i64>,
     ) -> Result<NotificationsStream> {
         let req = oxia_proto::NotificationsRequest {
-            shard: self.data.shard_id,
+            shard: self.data.shard_id.0,
             start_offset_exclusive,
         };
 
@@ -721,7 +755,7 @@ trait ShardMapper {
     fn new_builder(n: &oxia_proto::NamespaceShardsAssignment) -> Result<Self::Builder>;
 
     /// Get the shard ID for a given key.
-    fn get_shard_id(&self, key: &str) -> Option<i64>;
+    fn get_shard_id(&self, key: &str) -> Option<ShardId>;
 }
 
 /// Trait for building a `ShardMapper`.
@@ -738,6 +772,7 @@ trait ShardMapperBuilder {
 }
 
 mod int32_hash_range {
+    use crate::ShardId;
     use crate::UnexpectedServerResponse;
 
     use super::{Result, ShardMapper, ShardMapperBuilder};
@@ -749,7 +784,7 @@ mod int32_hash_range {
     struct Range {
         min: u32,
         max: u32,
-        id: i64,
+        id: ShardId,
     }
 
     #[derive(Debug, Default)]
@@ -783,7 +818,7 @@ mod int32_hash_range {
             })
         }
 
-        fn get_shard_id(&self, key: &str) -> Option<i64> {
+        fn get_shard_id(&self, key: &str) -> Option<ShardId> {
             let h = Self::hash(key);
             let found = self.ranges.binary_search_by(|x| {
                 if x.max < h {
@@ -857,7 +892,7 @@ mod int32_hash_range {
             self.ranges.push(Range {
                 min: r.min_hash_inclusive,
                 max: r.max_hash_inclusive,
-                id: a.shard,
+                id: a.shard.into(),
             });
             Ok(())
         }
@@ -883,12 +918,12 @@ mod int32_hash_range {
                     Range {
                         min: 0,
                         max: 2,
-                        id: 0,
+                        id: ShardId::new(0),
                     },
                     Range {
                         min: 1,
                         max: 3,
-                        id: 1,
+                        id: ShardId::new(1),
                     },
                 ],
             }
@@ -904,23 +939,23 @@ mod int32_hash_range {
                     Range {
                         min: 0,
                         max: 1_431_655_765u32,
-                        id: 0,
+                        id: ShardId::new(0),
                     },
                     Range {
                         min: 1_431_655_766,
                         max: 2_863_311_531,
-                        id: 1,
+                        id: ShardId::new(1),
                     },
                     Range {
                         min: 2_863_311_532,
                         max: 3_015_596_446,
-                        id: 2,
+                        id: ShardId::new(2),
                     },
                     // hole! [3_015_596_447, 3_015_596_448]
                     Range {
                         min: 3_015_596_449,
                         max: 4_294_967_295,
-                        id: 2,
+                        id: ShardId::new(2),
                     },
                 ],
             }
@@ -935,33 +970,33 @@ mod int32_hash_range {
                     Range {
                         min: 0,
                         max: 1_431_655_765,
-                        id: 0,
+                        id: ShardId::new(0),
                     },
                     Range {
                         min: 1_431_655_766,
                         max: 2_863_311_531,
-                        id: 1,
+                        id: ShardId::new(1),
                     },
                     Range {
                         min: 2_863_311_532,
                         max: 3_015_596_446,
-                        id: 2,
+                        id: ShardId::new(2),
                     },
                     // hole! [3_015_596_447, 3_015_596_448]
                     Range {
                         min: 3_015_596_449,
                         max: 4_294_967_295,
-                        id: 3,
+                        id: ShardId::new(3),
                     },
                 ],
             }
             .build()
             .unwrap();
 
-            assert_eq!(1, mapper.get_shard_id("foo-0").unwrap());
-            assert_eq!(3, mapper.get_shard_id("foo-4").unwrap());
-            assert_eq!(0, mapper.get_shard_id("foo-5").unwrap());
-            assert_eq!(2, mapper.get_shard_id("e199").unwrap());
+            assert_eq!(1, mapper.get_shard_id("foo-0").unwrap().0);
+            assert_eq!(3, mapper.get_shard_id("foo-4").unwrap().0);
+            assert_eq!(0, mapper.get_shard_id("foo-5").unwrap().0);
+            assert_eq!(2, mapper.get_shard_id("e199").unwrap().0);
             assert!(mapper.get_shard_id("foo-3").is_none());
         }
     }
@@ -969,11 +1004,13 @@ mod int32_hash_range {
 
 #[derive(Clone, Debug)]
 struct Shard {
-    id: i64,
+    id: ShardId,
     client: Client,
 }
 
 mod searchable {
+    use crate::ShardId;
+
     use super::{Client, Error, Result, Shard, ShardMapper, int32_hash_range};
 
     // Linear or binary search for shards?  It depends.  Since it's easy let's just code up both and make
@@ -994,7 +1031,7 @@ mod searchable {
             Self { shards, mapper }
         }
 
-        pub(super) fn find_by_id(&self, id: i64) -> Result<Client> {
+        pub(super) fn find_by_id(&self, id: ShardId) -> Result<Client> {
             let s = if self.shards.len() > BINARY_SEARCH_CROSSOVER {
                 self.shards
                     .binary_search_by_key(&id, |s| s.id)
@@ -1095,9 +1132,9 @@ impl ShardAssignmentTask {
         for a in &ns.assignments {
             info!(?a, "processing assignments");
             let grpc = create_grpc_client(&a.leader, &self.channel_pool).await?;
-            let client = Client::new(grpc, self.config.clone(), a.shard, &a.leader)?;
+            let client = Client::new(grpc, self.config.clone(), a.shard.into(), &a.leader)?;
             shards.push(Shard {
-                id: a.shard,
+                id: a.shard.into(),
                 client,
             });
         }
@@ -1181,7 +1218,7 @@ impl Manager {
     }
 
     /// Gets a client by shard id
-    pub(crate) async fn get_client_by_shard_id(&self, id: i64) -> Result<Client> {
+    pub(crate) async fn get_client_by_shard_id(&self, id: ShardId) -> Result<Client> {
         self.shards.lock().await.find_by_id(id)
     }
 
