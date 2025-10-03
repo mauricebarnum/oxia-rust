@@ -38,6 +38,7 @@ mod shard;
 mod util;
 
 pub use errors::*;
+pub use shard::ShardId;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -666,7 +667,7 @@ impl Notification {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct NotificationBatch {
-    pub shard: i64,
+    pub shard: ShardId,
     pub offset: i64,
     pub timestamp: u64,
     pub notifications: HashMap<String, Notification>,
@@ -675,7 +676,7 @@ pub struct NotificationBatch {
 impl NotificationBatch {
     fn from_proto(x: oxia_proto::NotificationBatch) -> Self {
         Self {
-            shard: x.shard,
+            shard: x.shard.into(),
             offset: x.offset,
             timestamp: x.timestamp,
             notifications: x
@@ -795,7 +796,7 @@ impl Client {
         Ok(shard)
     }
 
-    async fn get_shard_by_id(&self, id: i64) -> Result<shard::Client> {
+    async fn get_shard_by_id(&self, id: ShardId) -> Result<shard::Client> {
         let shard = self.get_shard_manager()?.get_client_by_shard_id(id).await?;
         Ok(shard)
     }
@@ -939,7 +940,7 @@ impl Client {
             if let Some(pk) = options.partition_key.as_deref() {
                 Some(self.get_shard(pk).await?)
             } else if let Some(id) = options.shard {
-                Some(self.get_shard_by_id(id).await?)
+                Some(self.get_shard_by_id(id.into()).await?)
             } else {
                 None
             }
