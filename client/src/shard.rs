@@ -480,9 +480,10 @@ impl Client {
             Some(Ok(response)) => response,
             Some(Err(err)) => return Err(err.into()),
             None => {
-                return Err(Error::Custom(
-                    "Server returned no response for get".to_string(),
-                ));
+                return Err(Error::NoResponseFromServer(format!(
+                    "server {} op 'get'",
+                    self.data.leader
+                )));
             }
         };
 
