@@ -15,6 +15,7 @@
 use async_trait::async_trait;
 use clap::Subcommand;
 
+mod batch_get;
 mod completions;
 mod delete;
 mod delete_range;
@@ -25,6 +26,7 @@ mod put;
 mod range_scan;
 mod shell;
 
+pub use batch_get::BatchGetCommand;
 pub use completions::CompletionsCommand;
 pub use delete::DeleteCommand;
 pub use delete_range::DeleteRangeCommand;
@@ -42,13 +44,16 @@ pub trait CommandRunnable {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Get one or more keys
+    BatchGet(BatchGetCommand),
+
     /// Generate shell completions
     Completions(CompletionsCommand),
 
     /// Put a key-value pair
     Put(PutCommand),
 
-    /// Get one or more keys
+    /// Get a key
     Get(GetCommand),
 
     /// Delete one or more keys
@@ -75,6 +80,7 @@ pub enum Commands {
 impl CommandRunnable for Commands {
     async fn run(self, ctx: crate::Context) -> anyhow::Result<()> {
         match self {
+            Commands::BatchGet(cmd) => cmd.run(ctx).await,
             Commands::Completions(cmd) => cmd.run(ctx).await,
             Commands::Delete(cmd) => cmd.run(ctx).await,
             Commands::DeleteRange(cmd) => cmd.run(ctx).await,

@@ -43,5 +43,6 @@ itertools = "0.14.0"
 allowed_external_types = [
     "bytes::bytes::Bytes",
     "tonic::status::Status",
-    "tonic::transport::error::*",
+    "tonic::transport::error::Error",
+    "futures_core::stream::Stream",
 ]

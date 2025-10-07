@@ -30,6 +30,7 @@ use mauricebarnum_oxia_common::proto as oxia_proto;
 use crate::notification::NotificationsStream;
 use crate::pool::ChannelPool;
 
+pub mod batch_get;
 pub mod config;
 pub mod errors;
 mod notification;
@@ -860,6 +861,66 @@ impl Client {
 
     pub async fn get(&self, k: impl Into<String>) -> Result<Option<GetResponse>> {
         self.get_with_options(k, GetOptions::default()).await
+    }
+
+    /// batch_get request multiple keys, minimizing requests to the backend
+    ///
+    /// On success, the result stream will yield one item per key, even in the event
+    /// of a network failure or timeout.  The order of returned keys is not specified.
+    ///
+    /// Only KeyComparisonType::Equal is accepted.
+    pub async fn batch_get(
+        &self,
+        req: batch_get::Request,
+    ) -> Result<impl futures::stream::Stream<Item = batch_get::ResponseItem> + use<>> {
+        let shard_manager = self.get_shard_manager()?;
+        let (batch_get_futures, failures) = batch_get::prepare_requests(req, shard_manager).await?;
+
+        // Send the request to all of the shards in parallel.  This will block until the initial
+        // backend calls return either a stream or an error.  A remote error will be demuxed into
+        // per-key errors, see shard::Client::batch_get()
+        let batch_get_stream = if batch_get_futures.is_empty() {
+            None
+        } else {
+            Some(
+                futures::stream::iter(batch_get_futures)
+                    .buffer_unordered(self.config.max_parallel_requests())
+                    .flatten_unordered(None),
+            )
+        };
+
+        let failures_stream = if failures.is_empty() {
+            None
+        } else {
+            Some(futures::stream::iter(failures))
+        };
+
+        // Finally, return a stream that will collect results from each shard as they become
+        // available.  Per-shard ordering is as defined by the Oxia server (as of this writing,
+        // they should be in the same order).  The ordering of responses between shards and the early failures
+        // already collected is unspecified.
+        //
+        // All of this syntatic mess lets us return precisely the stream we need without boxing it.
+        // The only overhead is reading it, which hopefully will be done just this once.
+
+        use futures::future::Either::Left;
+        use futures::future::Either::Right;
+
+        let final_stream = match (batch_get_stream, failures_stream) {
+            // Requests, no early failures
+            (Some(b), None) => Left(b),
+
+            // Requests and early failures
+            (Some(b), Some(f)) => Right(Left(Left(futures::stream::select(b, f)))),
+
+            // All failures
+            (None, Some(f)) => Right(Left(Right(f))),
+
+            // Empty requests? Should be rare
+            (None, None) => Right(Right(futures::stream::empty())),
+        };
+
+        Ok(final_stream)
     }
 
     pub async fn put_with_options(
