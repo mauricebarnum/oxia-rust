@@ -836,24 +836,24 @@ impl Client {
             n => n,
         };
 
-        let best_response = self
-            .get_shard_manager()?
-            .shard_stream()
-            .await
-            .map(|shard| execute_get(shard, key.clone(), options.clone()))
-            .buffer_unordered(max_parallel)
-            .try_fold(None, |best, response| async {
-                Ok(match response {
-                    Some(candidate) => Some(match best {
-                        None => candidate,
-                        Some(prev) => {
-                            util::select_response(Some(prev), candidate, options.comparison_type)
-                        }
-                    }),
-                    None => best,
+        let best_response =
+            futures::stream::iter(self.get_shard_manager()?.get_shard_clients().await)
+                .map(|shard| execute_get(shard, key.clone(), options.clone()))
+                .buffer_unordered(max_parallel)
+                .try_fold(None, |best, response| async {
+                    Ok(match response {
+                        Some(candidate) => Some(match best {
+                            None => candidate,
+                            Some(prev) => util::select_response(
+                                Some(prev),
+                                candidate,
+                                options.comparison_type,
+                            ),
+                        }),
+                        None => best,
+                    })
                 })
-            })
-            .await?;
+                .await?;
 
         Ok(best_response)
     }
@@ -953,12 +953,10 @@ impl Client {
             n => n,
         };
 
-        let mut result_stream = self
-            .get_shard_manager()?
-            .shard_stream()
-            .await
-            .map(|shard| do_delete_range(shard, start.clone(), end.clone(), options.clone()))
-            .buffer_unordered(n);
+        let mut result_stream =
+            futures::stream::iter(self.get_shard_manager()?.get_shard_clients().await)
+                .map(|shard| do_delete_range(shard, start.clone(), end.clone(), options.clone()))
+                .buffer_unordered(n);
 
         let mut errs = Vec::new();
         while let Some(shard_result) = result_stream.next().await {
@@ -1022,12 +1020,10 @@ impl Client {
             n => n,
         };
 
-        let mut result_stream = self
-            .get_shard_manager()?
-            .shard_stream()
-            .await
-            .map(|shard| do_list(shard, start.clone(), end.clone(), options.clone()))
-            .buffer_unordered(n);
+        let mut result_stream =
+            futures::stream::iter(self.get_shard_manager()?.get_shard_clients().await)
+                .map(|shard| do_list(shard, start.clone(), end.clone(), options.clone()))
+                .buffer_unordered(n);
 
         let mut response = ListResponse::default();
         while let Some(shard_result) = result_stream.next().await {
@@ -1089,12 +1085,10 @@ impl Client {
             n => n,
         };
 
-        let mut result_stream = self
-            .get_shard_manager()?
-            .shard_stream()
-            .await
-            .map(|shard| do_range_scan(shard, start.clone(), end.clone(), options.clone()))
-            .buffer_unordered(n);
+        let mut result_stream =
+            futures::stream::iter(self.get_shard_manager()?.get_shard_clients().await)
+                .map(|shard| do_range_scan(shard, start.clone(), end.clone(), options.clone()))
+                .buffer_unordered(n);
 
         let mut response = RangeScanResponse::default();
         while let Some(shard_result) = result_stream.next().await {

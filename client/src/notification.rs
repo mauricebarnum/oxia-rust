@@ -191,8 +191,9 @@ impl NotificationsStream {
         StreamState::Building(
             async move {
                 shard_manager
-                    .shard_stream()
+                    .get_shard_clients()
                     .await
+                    .into_iter()
                     .map(|shard| ShardInfo {
                         id: shard.id(),
                         offset: offsets
@@ -202,7 +203,6 @@ impl NotificationsStream {
                         state: ShardState::Start,
                     })
                     .collect()
-                    .await
             }
             .boxed(),
         )
