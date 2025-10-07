@@ -173,6 +173,9 @@ pub enum Error {
 
     #[error("No shard mapping for key {0}")]
     NoShardMappingForKey(String),
+
+    #[error("No response from server for {0}")]
+    NoResponseFromServer(String),
 }
 
 impl Error {
