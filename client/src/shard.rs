@@ -21,7 +21,8 @@ use std::task::Poll;
 use std::time::Duration;
 
 use bytes::Bytes;
-use futures::StreamExt;
+use futures::stream::Stream;
+use futures::stream::StreamExt;
 use rand::SeedableRng;
 use rand::distr::Distribution;
 use rand::distr::Uniform;
@@ -31,7 +32,6 @@ use tokio::sync::OnceCell;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
-use tokio_stream::Stream;
 use tonic::Streaming;
 use tonic::metadata::MetadataValue;
 use tracing::debug;

@@ -21,8 +21,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use bytes::Bytes;
-use futures::StreamExt;
-use futures::TryStreamExt;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
 use tonic::transport::Channel;
 
 use mauricebarnum_oxia_common::proto as oxia_proto;
