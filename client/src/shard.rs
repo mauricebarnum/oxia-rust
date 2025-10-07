@@ -21,6 +21,7 @@ use std::task::Poll;
 use std::time::Duration;
 
 use bytes::Bytes;
+use futures::future::Either;
 use futures::stream::Stream;
 use futures::stream::StreamExt;
 use rand::SeedableRng;
@@ -56,6 +57,7 @@ use crate::RangeScanOptions;
 use crate::RangeScanResponse;
 use crate::Result;
 use crate::SecondaryIndex;
+use crate::batch_get;
 use crate::config;
 use crate::create_grpc_client;
 use crate::pool::ChannelPool;
@@ -87,6 +89,15 @@ impl From<ShardId> for i64 {
 impl fmt::Display for ShardId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+fn get_response_as_result(r: oxia_proto::GetResponse) -> Result<Option<GetResponse>> {
+    use oxia_proto::Status;
+    match Status::try_from(r.status) {
+        Ok(Status::Ok) => Ok(Some(GetResponse::from_proto(r))),
+        Ok(Status::KeyNotFound) => Ok(None),
+        _ => Err(OxiaError::from(r.status).into()),
     }
 }
 
@@ -320,17 +331,21 @@ impl Client {
         Ok(s.as_ref().map(|session| session.id))
     }
 
+    fn make_proto_get_req(opts: &GetOptions, k: impl Into<String>) -> oxia_proto::GetRequest {
+        oxia_proto::GetRequest {
+            key: k.into(),
+            include_value: opts.include_value,
+            comparison_type: opts.comparison_type.into(),
+            secondary_index_name: None,
+        }
+    }
+
     /// Creates a `GetRequest` with the appropriate options
-    fn make_get_req(&self, opts: &GetOptions, k: &str) -> oxia_proto::ReadRequest {
+    fn make_get_req(&self, opts: &GetOptions, k: impl Into<String>) -> oxia_proto::ReadRequest {
         let data = &self.data;
         oxia_proto::ReadRequest {
             shard: Some(data.shard_id.0),
-            gets: vec![oxia_proto::GetRequest {
-                key: k.to_string(),
-                include_value: opts.include_value,
-                comparison_type: opts.comparison_type.into(),
-                secondary_index_name: None,
-            }],
+            gets: vec![Self::make_proto_get_req(opts, k)],
         }
     }
 
@@ -505,8 +520,6 @@ impl Client {
 
     /// Retrieves a key with the given options
     pub(crate) async fn get(&self, k: &str, opts: &GetOptions) -> Result<Option<GetResponse>> {
-        use oxia_proto::Status;
-
         let req = self.create_request(self.make_get_req(opts, k));
         let mut rsp_stream = self.data.grpc.clone().read(req).await?.into_inner();
 
@@ -536,62 +549,81 @@ impl Client {
             )));
         }
 
-        let r = rsp.gets.into_iter().next().unwrap();
-        match Status::try_from(r.status) {
-            Ok(Status::Ok) => Ok(Some(GetResponse::from_proto(r))),
-            Ok(Status::KeyNotFound) => Ok(None),
-            _ => Err(OxiaError::from(r.status).into()),
-        }
+        get_response_as_result(rsp.gets.into_iter().next().unwrap())
     }
 
-    // /// Gets multiple keys in a single batch request
-    // pub(crate) async fn batch_get(
-    //     &self,
-    //     keys: Vec<String>,
-    //     opts: GetOptions,
-    // ) -> Result<Vec<Result<GetResponse>>> {
-    //     // Create get requests for each key
-    //     let mut gets = Vec::with_capacity(keys.len());
-    //     for key in keys {
-    //         gets.push(oxia_proto::GetRequest {
-    //             key,
-    //             include_value: opts.include_value,
-    //             comparison_type: opts.comparison_type as i32,
-    //             secondary_index_name: None,
-    //         });
-    //     }
-    //
-    //     let data = &self.data;
-    //
-    //     // Create the read request with all gets
-    //     let read_req = oxia_proto::ReadRequest {
-    //         shard: Some(data.shard_id),
-    //         gets,
-    //     };
-    //
-    //     // Send the request
-    //     let req = self.create_request(read_req);
-    //     let mut results = Vec::new();
-    //     let mut rsp_stream = data.grpc.clone().read(req).await?.into_inner();
-    //
-    //     // Process all responses
-    //     while let Some(rsp) = rsp_stream.next().await {
-    //         match rsp {
-    //             Ok(rsp) => {
-    //                 for get in rsp.gets {
-    //                     if get.status != STATUS_OK {
-    //                         results.push(Err(OxiaError::from(get.status).into()));
-    //                     } else {
-    //                         results.push(Ok(get.into()));
-    //                     }
-    //                 }
-    //             }
-    //             Err(err) => return Err(err.into()),
-    //         }
-    //     }
-    //
-    //     Ok(results)
-    // }
+    pub(crate) async fn batch_get(
+        &self,
+        req: batch_get::Request,
+    ) -> impl Stream<Item = crate::batch_get::ResponseItem> + use<> {
+        let def_opts = GetOptions::default();
+
+        let keys: Vec<Arc<str>> = req.items.iter().map(|item| item.key.clone()).collect();
+
+        // Error stream producing failed responses for all keys
+        fn error_stream<E: Into<Error>>(
+            e: E,
+            keys: Vec<Arc<str>>,
+        ) -> impl Stream<Item = crate::batch_get::ResponseItem> {
+            let e = Arc::new(e.into());
+            futures::stream::iter(
+                keys.into_iter()
+                    .map(move |k| crate::batch_get::ResponseItem::failed(k, e.clone().into())),
+            )
+        }
+
+        // Build GetRequest messages
+        let gets: Vec<oxia_proto::GetRequest> = req
+            .items
+            .into_iter()
+            .map(|item| {
+                let opts = item
+                    .opts
+                    .as_ref()
+                    .unwrap_or_else(|| req.opts.as_ref().unwrap_or(&def_opts));
+                Self::make_proto_get_req(opts, item.key.to_string())
+            })
+            .collect();
+
+        let shard = Some(self.data.shard_id.0);
+        let req = oxia_proto::ReadRequest { shard, gets };
+
+        // Await the gRPC read call
+        match self.data.grpc.clone().read(req).await {
+            Err(e) => Either::Left(error_stream(e, keys)),
+
+            Ok(read_result) => {
+                // Extract the next response from the stream asynchronously
+                let rsp_result = read_result
+                    .into_inner()
+                    .next()
+                    .await
+                    .ok_or_else(|| {
+                        Error::NoResponseFromServer(format!(
+                            "server {} op 'batch get'",
+                            self.data.leader
+                        ))
+                    })
+                    .and_then(|r| r.map_err(Into::into));
+
+                // Map the response into a stream of ResponseItem or error stream
+                let stream = match rsp_result {
+                    Ok(rr) => {
+                        // oxia client.proto documents that responses are in the same order as
+                        // requests
+                        let items =
+                            std::iter::zip(keys.into_iter(), rr.gets.into_iter()).map(|(k, r)| {
+                                crate::batch_get::ResponseItem::new(k, get_response_as_result(r))
+                            });
+                        Either::Left(futures::stream::iter(items))
+                    }
+                    Err(e) => Either::Right(error_stream(e, keys)),
+                };
+
+                Either::Right(stream)
+            }
+        }
+    }
 
     /// Puts a value with the given options
     pub(crate) async fn put(
@@ -1218,6 +1250,12 @@ impl Manager {
             task_handle,
             changed,
         })
+    }
+
+    /// Maps a key to a shard id.  This is a volatile mapping, callers must be prepared for the
+    /// mapping to be invalid by the time it is used.
+    pub(crate) async fn get_shard_id(&self, key: &str) -> Option<ShardId> {
+        self.shards.lock().await.get_shard_id(key)
     }
 
     /// Gets a client by shard id

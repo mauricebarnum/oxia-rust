@@ -26,9 +26,8 @@ Support for all of the Oxia service is incomplete,
   * oxia client cli: oxia-cmd
   * implemented commands: get, put, delete,
 list (keys), range scan, range delete, notifications
-  * not yet: batch read, batch write, write secondary index
+  * not yet: batch write, write secondary index
   
-
 # TODO
 
 1. Add robustness for transient errors
