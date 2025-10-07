@@ -1044,9 +1044,12 @@ mod searchable {
                 .ok_or_else(|| Error::NoShardMapping(id))
         }
 
+        pub(super) fn get_shard_id(&self, key: &str) -> Option<ShardId> {
+            self.mapper.get_shard_id(key)
+        }
+
         pub(super) fn find_by_key(&self, key: &str) -> Result<Client> {
             let id = self
-                .mapper
                 .get_shard_id(key)
                 .ok_or_else(|| Error::NoShardMappingForKey(key.into()))?;
             self.find_by_id(id)
@@ -1227,14 +1230,14 @@ impl Manager {
         self.shards.lock().await.find_by_key(key)
     }
 
-    /// Returns a stream containing a snapshot of the current clients.  Use `for_each_shard` to
-    /// work on a locked shards.
-    pub(crate) async fn shard_stream(&self) -> impl Stream<Item = Client> + use<> {
+    /// Returns the current clients sorted by shard id.  The shard mapping is volatile, so callers
+    /// must be prepared.
+    pub(crate) async fn get_shard_clients(&self) -> Vec<Client> {
         let clients: Vec<Client> = {
             let lock = self.shards.lock().await;
             lock.iter().map(|s| s.client.clone()).collect()
         };
-        tokio_stream::iter(clients)
+        clients
     }
 
     /// Returns the number of shards at the moment
