@@ -170,6 +170,9 @@ pub enum Error {
 
     #[error("Invalid KeyComparisonType value {0}")]
     InvalidKeyComparisonTypeValue(i32),
+
+    #[error("No shard mapping for key {0}")]
+    NoShardMappingForKey(String),
 }
 
 impl Error {

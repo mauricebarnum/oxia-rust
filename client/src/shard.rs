@@ -1010,7 +1010,7 @@ mod searchable {
             let id = self
                 .mapper
                 .get_shard_id(key)
-                .ok_or_else(|| Error::Custom(format!("unable to map {key} to shard")))?;
+                .ok_or_else(|| Error::NoShardMappingForKey(key.into()))?;
             self.find_by_id(id)
         }
     }
