@@ -89,7 +89,7 @@ impl Builder {
                 namespace: String::new(),
                 identity: String::new(),
                 session_timeout: Duration::default(),
-                max_parallel_requests: 0,
+                max_parallel_requests: 1,
                 request_timeout: None,
                 retry: None,
             },
@@ -126,7 +126,7 @@ impl Builder {
 
     #[must_use]
     pub fn max_parallel_requests(mut self, x: usize) -> Self {
-        self.c.max_parallel_requests = x;
+        self.c.max_parallel_requests = x.min(1);
         self
     }
 
