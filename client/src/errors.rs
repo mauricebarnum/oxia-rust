@@ -154,7 +154,7 @@ pub enum Error {
     MultipleShardError(Vec<ShardError>),
 
     #[error("Shard error")]
-    ShardError(Box<crate::ShardError>),
+    ShardError(Box<ShardError>),
 
     #[error("Request time out")]
     RequestTimeout {
@@ -212,7 +212,7 @@ impl Error {
 
         let mut source = Some(self as &dyn std::error::Error);
         while let Some(err) = source {
-            if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
+            if let Some(io_err) = err.downcast_ref::<io::Error>() {
                 return Some(io_err);
             }
             source = err.source();
@@ -277,11 +277,11 @@ mod tests {
             Error::TonicStatus(tonic::Status::new(tonic::Code::Internal, "").into()),
             Error::TonicStatus(tonic::Status::new(tonic::Code::Unavailable, "").into()),
             Error::TonicStatus(tonic::Status::new(tonic::Code::Unknown, "").into()),
-            Error::Io(std::io::ErrorKind::BrokenPipe.into()),
-            Error::Io(std::io::ErrorKind::ConnectionAborted.into()),
-            Error::Io(std::io::ErrorKind::ConnectionReset.into()),
-            Error::Io(std::io::ErrorKind::NotConnected.into()),
-            Error::Io(std::io::ErrorKind::WouldBlock.into()),
+            Error::Io(io::ErrorKind::BrokenPipe.into()),
+            Error::Io(io::ErrorKind::ConnectionAborted.into()),
+            Error::Io(io::ErrorKind::ConnectionReset.into()),
+            Error::Io(io::ErrorKind::NotConnected.into()),
+            Error::Io(io::ErrorKind::WouldBlock.into()),
         ];
         for e in &errs {
             info!(?e);
@@ -295,10 +295,10 @@ mod tests {
             Error::Custom("not retriable".into()),
             Error::NoShardMapping(-1),
             Error::NoServiceAddress,
-            Error::Client(crate::ClientError::Internal("client error".into())),
+            Error::Client(ClientError::Internal("client error".into())),
             Error::MultipleShardError(vec![]),
             Error::RequestTimeout {
-                source: Box::new(std::io::Error::new(std::io::ErrorKind::TimedOut, "")),
+                source: Box::new(io::Error::new(io::ErrorKind::TimedOut, "")),
             },
         ];
         for e in &errs {
