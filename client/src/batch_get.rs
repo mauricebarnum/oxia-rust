@@ -15,7 +15,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use futures::stream::Stream;
+use futures::stream::BoxStream;
+use futures::stream::StreamExt;
 
 use crate::ClientError;
 use crate::Error;
@@ -134,7 +135,7 @@ pub(super) async fn prepare_requests(
     client_req: Request,
     shard_manager: Arc<shard::Manager>,
 ) -> Result<(
-    Vec<impl Future<Output = impl Stream<Item = ResponseItem>>>,
+    Vec<impl Future<Output = BoxStream<'static, ResponseItem>>>,
     Vec<ResponseItem>,
 )> {
     let mut failures: Vec<ResponseItem> = Vec::new();
@@ -173,7 +174,7 @@ pub(super) async fn prepare_requests(
     for (shard_id, req) in reqs {
         match shard_manager.get_client_by_shard_id(shard_id).await {
             Ok(shard) => {
-                batch_get_futures.push(async move { shard.batch_get(req).await });
+                batch_get_futures.push(async move { shard.batch_get(req).await.boxed() });
             }
             Err(err) => {
                 let shared_err = Arc::new(err);

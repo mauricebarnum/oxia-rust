@@ -21,7 +21,6 @@ use std::task::Poll;
 use std::time::Duration;
 
 use bytes::Bytes;
-use futures::future::Either;
 use futures::stream::Stream;
 use futures::stream::StreamExt;
 use rand::SeedableRng;
@@ -219,6 +218,12 @@ fn check_delete_range_response(r: &oxia_proto::WriteResponse) -> Option<Error> {
         return Some(OxiaError::from(d.status).into());
     }
     None
+}
+
+#[inline]
+fn no_response_error(server: &str, shard_id: ShardId) -> Error {
+    let msg = format!("server={server} shard={shard_id}");
+    Error::NoResponseFromServer(msg)
 }
 
 const INTERNAL_KEY_PREFIX: &str = "__oxia/";
@@ -527,10 +532,7 @@ impl Client {
             Some(Ok(response)) => response,
             Some(Err(err)) => return Err(err.into()),
             None => {
-                return Err(Error::NoResponseFromServer(format!(
-                    "server {} op 'get'",
-                    self.data.leader
-                )));
+                return Err(no_response_error(&self.data.leader, self.data.shard_id));
             }
         };
 
@@ -552,77 +554,134 @@ impl Client {
         get_response_as_result(rsp.gets.into_iter().next().unwrap())
     }
 
-    pub(crate) async fn batch_get(
-        &self,
-        req: batch_get::Request,
-    ) -> impl Stream<Item = crate::batch_get::ResponseItem> + use<> {
-        let def_opts = GetOptions::default();
-
-        let keys: Vec<Arc<str>> = req.items.iter().map(|item| item.key.clone()).collect();
-
-        // Error stream producing failed responses for all keys
-        fn error_stream<E: Into<Error>>(
-            e: E,
-            keys: Vec<Arc<str>>,
-        ) -> impl Stream<Item = crate::batch_get::ResponseItem> {
-            let e = Arc::new(e.into());
-            futures::stream::iter(
-                keys.into_iter()
-                    .map(move |k| crate::batch_get::ResponseItem::failed(k, e.clone().into())),
-            )
+    async fn demux_stream(
+        context: Arc<ClientData>,
+        keys: Vec<Arc<str>>,
+        read_response: Result<tonic::Response<tonic::Streaming<oxia_proto::ReadResponse>>>,
+    ) -> impl Stream<Item = batch_get::ResponseItem> {
+        enum State {
+            Demuxing {
+                context: Arc<ClientData>,
+                keys_iter: std::vec::IntoIter<Arc<str>>,
+                gets_iter: std::vec::IntoIter<oxia_proto::GetResponse>,
+            },
+            Failing {
+                keys_iter: std::vec::IntoIter<Arc<str>>,
+                err: Arc<Error>,
+            },
         }
 
-        // Build GetRequest messages
-        let gets: Vec<oxia_proto::GetRequest> = req
+        let keys_iter = keys.into_iter();
+        let state = match read_response {
+            Ok(s) => match s.into_inner().next().await {
+                Some(Ok(rr)) => State::Demuxing {
+                    context,
+                    keys_iter,
+                    gets_iter: rr.gets.into_iter(),
+                },
+                Some(Err(status)) => State::Failing {
+                    keys_iter,
+                    err: Arc::<Error>::new(status.into()),
+                },
+                None => State::Failing {
+                    keys_iter,
+                    err: no_response_error(&context.leader, context.shard_id).into(),
+                },
+            },
+            Err(err) => State::Failing {
+                keys_iter,
+                err: err.into(),
+            },
+        };
+
+        futures::stream::unfold(state, move |mut state| async move {
+            loop {
+                match state {
+                    State::Demuxing {
+                        context,
+                        mut keys_iter,
+                        mut gets_iter,
+                    } => {
+                        let Some(r) = gets_iter.next() else {
+                            if keys_iter.len() == 0 {
+                                return None;
+                            }
+                            // gets exhausted early; fail remaining keys
+                            let err: Arc<Error> =
+                                no_response_error(&context.leader, context.shard_id).into();
+                            state = State::Failing { keys_iter, err };
+                            continue;
+                        };
+
+                        let Some(k) = keys_iter.next() else {
+                            warn!(?r, remaining = %gets_iter.len(), "protocol error: response without matching request key");
+                            if gets_iter.len() > 0 {
+                                debug!("unmatched responses: {:?}", gets_iter.collect::<Vec<_>>());
+                            }
+                            return None;
+                        };
+
+                        let item = batch_get::ResponseItem::new(
+                            k,
+                            crate::shard::get_response_as_result(r),
+                        );
+                        let next = State::Demuxing {
+                            context,
+                            keys_iter,
+                            gets_iter,
+                        };
+                        return Some((item, next));
+                    }
+                    State::Failing { mut keys_iter, err } => {
+                        let key = keys_iter.next()?;
+                        let failed = batch_get::ResponseItem::failed(key, err.clone().into());
+                        return Some((failed, State::Failing { keys_iter, err }));
+                    }
+                };
+            }
+        })
+    }
+
+    pub(crate) async fn batch_get(
+        &self,
+        batch_req: batch_get::Request,
+    ) -> impl Stream<Item = batch_get::ResponseItem> + use<> {
+        let def_opts = GetOptions::default();
+
+        let keys: Vec<Arc<str>> = batch_req
+            .items
+            .iter()
+            .map(|item| item.key.clone())
+            .collect();
+
+        let gets: Vec<oxia_proto::GetRequest> = batch_req
             .items
             .into_iter()
             .map(|item| {
                 let opts = item
                     .opts
                     .as_ref()
-                    .unwrap_or_else(|| req.opts.as_ref().unwrap_or(&def_opts));
+                    .unwrap_or_else(|| batch_req.opts.as_ref().unwrap_or(&def_opts));
                 Self::make_proto_get_req(opts, item.key.to_string())
             })
             .collect();
 
-        let shard = Some(self.data.shard_id.0);
-        let req = oxia_proto::ReadRequest { shard, gets };
+        let read_req = oxia_proto::ReadRequest {
+            shard: Some(self.data.shard_id.into()),
+            gets,
+        };
 
-        // Await the gRPC read call
-        match self.data.grpc.clone().read(req).await {
-            Err(e) => Either::Left(error_stream(e, keys)),
-
-            Ok(read_result) => {
-                // Extract the next response from the stream asynchronously
-                let rsp_result = read_result
-                    .into_inner()
-                    .next()
-                    .await
-                    .ok_or_else(|| {
-                        Error::NoResponseFromServer(format!(
-                            "server {} op 'batch get'",
-                            self.data.leader
-                        ))
-                    })
-                    .and_then(|r| r.map_err(Into::into));
-
-                // Map the response into a stream of ResponseItem or error stream
-                let stream = match rsp_result {
-                    Ok(rr) => {
-                        // oxia client.proto documents that responses are in the same order as
-                        // requests
-                        let items =
-                            std::iter::zip(keys.into_iter(), rr.gets.into_iter()).map(|(k, r)| {
-                                crate::batch_get::ResponseItem::new(k, get_response_as_result(r))
-                            });
-                        Either::Left(futures::stream::iter(items))
-                    }
-                    Err(e) => Either::Right(error_stream(e, keys)),
-                };
-
-                Either::Right(stream)
-            }
-        }
+        Self::demux_stream(
+            self.data.clone(),
+            keys,
+            self.data
+                .grpc
+                .clone()
+                .read(read_req)
+                .await
+                .map_err(|s| s.into()),
+        )
+        .await
     }
 
     /// Puts a value with the given options
