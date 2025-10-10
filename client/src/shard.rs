@@ -21,7 +21,7 @@ use std::task::Poll;
 use std::time::Duration;
 
 use bytes::Bytes;
-use futures::future::Either;
+use futures::stream::BoxStream;
 use futures::stream::Stream;
 use futures::stream::StreamExt;
 use rand::SeedableRng;
@@ -92,7 +92,8 @@ impl fmt::Display for ShardId {
     }
 }
 
-fn get_response_as_result(r: oxia_proto::GetResponse) -> Result<Option<GetResponse>> {
+#[inline]
+pub(crate) fn get_response_as_result(r: oxia_proto::GetResponse) -> Result<Option<GetResponse>> {
     use oxia_proto::Status;
     match Status::try_from(r.status) {
         Ok(Status::Ok) => Ok(Some(GetResponse::from_proto(r))),
@@ -554,75 +555,32 @@ impl Client {
 
     pub(crate) async fn batch_get(
         &self,
-        req: batch_get::Request,
-    ) -> impl Stream<Item = crate::batch_get::ResponseItem> + use<> {
+        batch_req: batch_get::Request,
+    ) -> BoxStream<'static, crate::batch_get::ResponseItem> {
         let def_opts = GetOptions::default();
 
-        let keys: Vec<Arc<str>> = req.items.iter().map(|item| item.key.clone()).collect();
-
-        // Error stream producing failed responses for all keys
-        fn error_stream<E: Into<Error>>(
-            e: E,
-            keys: Vec<Arc<str>>,
-        ) -> impl Stream<Item = crate::batch_get::ResponseItem> {
-            let e = Arc::new(e.into());
-            futures::stream::iter(
-                keys.into_iter()
-                    .map(move |k| crate::batch_get::ResponseItem::failed(k, e.clone().into())),
-            )
-        }
+        let keys: Vec<Arc<str>> = batch_req
+            .items
+            .iter()
+            .map(|item| item.key.clone())
+            .collect();
 
         // Build GetRequest messages
-        let gets: Vec<oxia_proto::GetRequest> = req
+        let gets: Vec<oxia_proto::GetRequest> = batch_req
             .items
             .into_iter()
             .map(|item| {
                 let opts = item
                     .opts
                     .as_ref()
-                    .unwrap_or_else(|| req.opts.as_ref().unwrap_or(&def_opts));
+                    .unwrap_or_else(|| batch_req.opts.as_ref().unwrap_or(&def_opts));
                 Self::make_proto_get_req(opts, item.key.to_string())
             })
             .collect();
 
         let shard = Some(self.data.shard_id.0);
-        let req = oxia_proto::ReadRequest { shard, gets };
-
-        // Await the gRPC read call
-        match self.data.grpc.clone().read(req).await {
-            Err(e) => Either::Left(error_stream(e, keys)),
-
-            Ok(read_result) => {
-                // Extract the next response from the stream asynchronously
-                let rsp_result = read_result
-                    .into_inner()
-                    .next()
-                    .await
-                    .ok_or_else(|| {
-                        Error::NoResponseFromServer(format!(
-                            "server {} op 'batch get'",
-                            self.data.leader
-                        ))
-                    })
-                    .and_then(|r| r.map_err(Into::into));
-
-                // Map the response into a stream of ResponseItem or error stream
-                let stream = match rsp_result {
-                    Ok(rr) => {
-                        // oxia client.proto documents that responses are in the same order as
-                        // requests
-                        let items =
-                            std::iter::zip(keys.into_iter(), rr.gets.into_iter()).map(|(k, r)| {
-                                crate::batch_get::ResponseItem::new(k, get_response_as_result(r))
-                            });
-                        Either::Left(futures::stream::iter(items))
-                    }
-                    Err(e) => Either::Right(error_stream(e, keys)),
-                };
-
-                Either::Right(stream)
-            }
-        }
+        let read_req = oxia_proto::ReadRequest { shard, gets };
+        batch_get::response_stream(keys, self.data.grpc.clone().read(read_req).await).await
     }
 
     /// Puts a value with the given options

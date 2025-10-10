@@ -885,7 +885,8 @@ impl Client {
             Some(
                 futures::stream::iter(batch_get_futures)
                     .buffer_unordered(self.config.max_parallel_requests())
-                    .flatten_unordered(None),
+                    .flatten_unordered(None)
+                    .boxed(),
             )
         };
 
