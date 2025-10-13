@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -70,7 +71,12 @@ impl ShardId {
         ShardId(val)
     }
 
+    // A canonical invalid value
     pub const INVALID: ShardId = ShardId(-1);
+
+    pub fn is_invalid(self) -> bool {
+        self.0 < 0
+    }
 }
 
 impl From<i64> for ShardId {
@@ -82,6 +88,13 @@ impl From<i64> for ShardId {
 impl From<ShardId> for i64 {
     fn from(my: ShardId) -> Self {
         my.0
+    }
+}
+
+impl From<ShardId> for usize {
+    #[inline]
+    fn from(my: ShardId) -> Self {
+        my.0 as usize
     }
 }
 
@@ -97,6 +110,128 @@ fn get_response_as_result(r: oxia_proto::GetResponse) -> Result<Option<GetRespon
         Ok(Status::Ok) => Ok(Some(GetResponse::from_proto(r))),
         Ok(Status::KeyNotFound) => Ok(None),
         _ => Err(OxiaError::from(r.status).into()),
+    }
+}
+
+const DIRECT_ID_MAX: usize = 20;
+
+// ShardIdMap<T> we map shard ids to things in seveal "hot" places.  This map should be suitable
+// for all, or most, of those uses.
+pub struct ShardIdMap<T> {
+    // Array for O(1) direct lookup (Small, dense IDs)
+    direct: [Option<T>; DIRECT_ID_MAX],
+    // BTreeMap for O(log N) lookup (Larger, sparse IDs)
+    spilled: BTreeMap<ShardId, T>,
+    #[cfg(accept_invalid_shard_ids)]
+    // BTreeMap for invalid IDs
+    invalid: BTreeMap<ShardId, T>,
+}
+
+impl<T: fmt::Debug> fmt::Debug for ShardIdMap<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShardIdMap")
+            .field("direct", &self.direct)
+            .field("spilled", &self.spilled)
+            .finish()
+    }
+}
+
+impl<T> Default for ShardIdMap<T> {
+    fn default() -> Self {
+        Self {
+            direct: std::array::from_fn(|_| None),
+            spilled: BTreeMap::new(),
+            #[cfg(accept_invalid_shard_ids)]
+            invalid: BTreeMap::new(),
+        }
+    }
+}
+
+impl<T> ShardIdMap<T> {
+    fn len(&self) -> usize {
+        let result = self.direct.iter().filter(|x| x.is_some()).count() + self.spilled.len();
+        #[cfg(accept_invalid_shard_ids)]
+        return result + self.invalid.len();
+        #[cfg(not(accept_invalid_shard_ids))]
+        return result;
+    }
+
+    // Check if ID is small enough for the direct array
+    #[inline]
+    fn direct_index(id: ShardId) -> Option<usize> {
+        let idx: usize = id.into();
+        (idx < DIRECT_ID_MAX).then_some(idx)
+    }
+
+    pub fn insert(&mut self, id: ShardId, value: T) -> bool {
+        if id.is_invalid() {
+            #[cfg(accept_invalid_shard_ids)]
+            {
+                self.invalid.insert(id, value);
+                return true;
+            }
+            #[cfg(not(accept_invalid_shard_ids))]
+            return false;
+        }
+        if let Some(i) = Self::direct_index(id) {
+            self.direct[i] = Some(value);
+        } else {
+            self.spilled.insert(id, value);
+        }
+        true
+    }
+
+    pub fn get(&self, id: ShardId) -> Option<&T> {
+        if let Some(i) = Self::direct_index(id) {
+            self.direct[i].as_ref()
+        } else {
+            #[cfg(accept_invalid_shard_ids)]
+            if id.is_invalid() {
+                let v = self.invalid.get(&id);
+                if v.is_some() {
+                    return v;
+                }
+            }
+            self.spilled.get(&id)
+        }
+    }
+
+    pub fn remove(&mut self, id: ShardId) {
+        if let Some(i) = Self::direct_index(id) {
+            self.direct[i] = None;
+        } else {
+            #[cfg(accept_invalid_shard_ids)]
+            if id.is_invalid() {
+                let v = self.invalid.remove(&id);
+                return;
+            }
+            self.spilled.remove(&id);
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (ShardId, &T)> + '_ {
+        // Direct Array Iterator (Filters out None and maps index to ShardId)
+        let direct_iter = self
+            .direct
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, opt_val)| opt_val.as_ref().map(|val| (ShardId(idx as i64), val)))
+            .fuse(); // Keep .fuse() for correctness
+
+        // Spilled BTreeMap Iterator (Clones ShardId)
+        let spilled_iter = self.spilled.iter().map(|(&id, val)| (id, val));
+
+        // Chain them together
+        let chained_iter = direct_iter.chain(spilled_iter);
+
+        #[cfg(accept_invalid_shard_ids)]
+        // Invalid the negative ids if we accepted them
+        let chained_iter = {
+            let invalid_iter = self.invalid.iter().map(|(&id, val)| (id, val));
+            invalid_iter.chain(chained_iter)
+        };
+
+        chained_iter
     }
 }
 
@@ -1093,45 +1228,26 @@ mod int32_hash_range {
     }
 } // mod int32_hash_range
 
-#[derive(Clone, Debug)]
-struct Shard {
-    id: ShardId,
-    client: Client,
-}
-
 mod searchable {
     use crate::ShardId;
 
-    use super::{Client, Error, Result, Shard, ShardMapper, int32_hash_range};
-
-    // Linear or binary search for shards?  It depends.  Since it's easy let's just code up both and make
-    // it someone else's problem to pick the crossover
-    const BINARY_SEARCH_CROSSOVER: usize = 16;
+    use super::{Client, Error, Result, ShardIdMap, ShardMapper, int32_hash_range};
 
     #[derive(Debug, Default)]
     pub(super) struct Shards {
-        shards: Vec<super::Shard>,
+        shards: ShardIdMap<Client>,
         mapper: int32_hash_range::Mapper,
     }
 
     impl Shards {
-        pub(super) fn new(mut shards: Vec<Shard>, mapper: int32_hash_range::Mapper) -> Self {
-            if shards.len() > BINARY_SEARCH_CROSSOVER {
-                shards.sort_unstable_by_key(|c| c.id);
-            }
+        pub(super) fn new(shards: ShardIdMap<Client>, mapper: int32_hash_range::Mapper) -> Self {
             Self { shards, mapper }
         }
 
         pub(super) fn find_by_id(&self, id: ShardId) -> Result<Client> {
-            let s = if self.shards.len() > BINARY_SEARCH_CROSSOVER {
-                self.shards
-                    .binary_search_by_key(&id, |s| s.id)
-                    .ok()
-                    .map(|i| &self.shards[i])
-            } else {
-                self.shards.iter().find(|s| s.id == id)
-            };
-            s.map(|s| s.client.clone())
+            self.shards
+                .get(id)
+                .cloned()
                 .ok_or_else(|| Error::NoShardMapping(id))
         }
 
@@ -1145,12 +1261,13 @@ mod searchable {
                 .ok_or_else(|| Error::NoShardMappingForKey(key.into()))?;
             self.find_by_id(id)
         }
-    }
 
-    impl std::ops::Deref for Shards {
-        type Target = [Shard];
-        fn deref(&self) -> &Self::Target {
-            &self.shards
+        pub(super) fn iter(&self) -> impl Iterator<Item = (ShardId, &Client)> + '_ {
+            self.shards.iter()
+        }
+
+        pub(super) fn len(&self) -> usize {
+            self.shards.len()
         }
     }
 }
@@ -1222,15 +1339,13 @@ impl ShardAssignmentTask {
         let mapper = Self::make_mapper(&ns)?;
 
         // Now potentially make network calls to connect clients.
-        let mut shards = Vec::with_capacity(ns.assignments.len());
+        // let mut shards = Vec::with_capacity(ns.assignments.len());
+        let mut shards = ShardIdMap::<Client>::default();
         for a in &ns.assignments {
             info!(?a, "processing assignments");
             let grpc = create_grpc_client(&a.leader, &self.channel_pool).await?;
             let client = Client::new(grpc, self.config.clone(), a.shard.into(), &a.leader)?;
-            shards.push(Shard {
-                id: a.shard.into(),
-                client,
-            });
+            shards.insert(a.shard.into(), client);
         }
 
         let mut guard = self.shards.lock().await;
@@ -1332,7 +1447,9 @@ impl Manager {
     pub(crate) async fn get_shard_clients(&self) -> Vec<Client> {
         let clients: Vec<Client> = {
             let lock = self.shards.lock().await;
-            lock.iter().map(|s| s.client.clone()).collect()
+            let mut clients = Vec::with_capacity(lock.len());
+            clients.extend(lock.iter().map(|(_, c)| c.clone()));
+            clients
         };
         clients
     }
@@ -1383,5 +1500,58 @@ impl Drop for Manager {
     fn drop(&mut self) {
         self.shutdown_requested.store(true, Ordering::Relaxed);
         self.task_handle.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_shard_id_map() {
+        use crate::ShardId;
+        let mut offsets = ShardIdMap::<i32>::default();
+
+        let id_negative: ShardId = (-3_i64).into();
+        assert!(offsets.get(id_negative).is_none());
+        let r = offsets.insert(id_negative, 42);
+        #[cfg(accept_invalid_shard_ids)]
+        {
+            assert!(r);
+            assert_eq!(*offsets.get(id_negative).unwrap(), 42);
+        }
+        #[cfg(not(accept_invalid_shard_ids))]
+        assert!(!r);
+
+        offsets.remove(id_negative);
+        assert!(offsets.get(id_negative).is_none());
+
+        let id_zero: ShardId = 0.into();
+        assert!(offsets.get(id_zero).is_none());
+        offsets.insert(id_zero, 42);
+        assert_eq!(*offsets.get(id_zero).unwrap(), 42);
+        offsets.remove(id_zero);
+        assert!(offsets.get(id_zero).is_none());
+
+        let id_direct: ShardId = (DIRECT_ID_MAX as i64 - 2).into();
+        assert!(offsets.get(id_direct).is_none());
+        offsets.insert(id_direct, 42);
+        assert_eq!(*offsets.get(id_direct).unwrap(), 42);
+        offsets.remove(id_direct);
+        assert!(offsets.get(id_direct).is_none());
+
+        let id_spilled: ShardId = (DIRECT_ID_MAX as i64 + 13).into();
+        assert!(offsets.get(id_spilled).is_none());
+        offsets.insert(id_spilled, 42);
+        assert_eq!(*offsets.get(id_spilled).unwrap(), 42);
+        offsets.remove(id_spilled);
+        assert!(offsets.get(id_spilled).is_none());
+
+        let id_very_large: ShardId = i64::MAX.into();
+        assert!(offsets.get(id_very_large).is_none());
+        offsets.insert(id_very_large, 42);
+        assert_eq!(*offsets.get(id_very_large).unwrap(), 42);
+        offsets.remove(id_very_large);
+        assert!(offsets.get(id_very_large).is_none());
     }
 }
