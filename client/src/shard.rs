@@ -80,12 +80,14 @@ impl ShardId {
 }
 
 impl From<i64> for ShardId {
+    #[inline]
     fn from(val: i64) -> Self {
         ShardId(val)
     }
 }
 
 impl From<ShardId> for i64 {
+    #[inline]
     fn from(my: ShardId) -> Self {
         my.0
     }
@@ -117,6 +119,11 @@ const DIRECT_ID_MAX: usize = 20;
 
 // ShardIdMap<T> we map shard ids to things in seveal "hot" places.  This map should be suitable
 // for all, or most, of those uses.
+//
+// Shard ids should be small integers, nearly contiguous.  Or so we think:  the ids are generated
+// by the Oxia server, so we need to be careful to avoid being poisoned with data that causes
+// memory consumption to go crazy or leading to bogus indexing.  The approach here is to hope we
+// have a small set of contigous ids and they are directly mapped to values.
 pub struct ShardIdMap<T> {
     // Array for O(1) direct lookup (Small, dense IDs)
     direct: [Option<T>; DIRECT_ID_MAX],
@@ -129,10 +136,20 @@ pub struct ShardIdMap<T> {
 
 impl<T: fmt::Debug> fmt::Debug for ShardIdMap<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ShardIdMap")
+        #[cfg(not(accept_invalid_shard_ids))]
+        return f
+            .debug_struct("ShardIdMap")
             .field("direct", &self.direct)
             .field("spilled", &self.spilled)
-            .finish()
+            .finish();
+
+        #[cfg(accept_invalid_shard_ids)]
+        return f
+            .debug_struct("ShardIdMap")
+            .field("direct", &self.direct)
+            .field("spilled", &self.spilled)
+            .field("invalid", &self.invalid)
+            .finish();
     }
 }
 
@@ -202,7 +219,7 @@ impl<T> ShardIdMap<T> {
         } else {
             #[cfg(accept_invalid_shard_ids)]
             if id.is_invalid() {
-                let v = self.invalid.remove(&id);
+                self.invalid.remove(&id);
                 return;
             }
             self.spilled.remove(&id);
@@ -210,7 +227,6 @@ impl<T> ShardIdMap<T> {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (ShardId, &T)> + '_ {
-        // Direct Array Iterator (Filters out None and maps index to ShardId)
         let direct_iter = self
             .direct
             .iter()
@@ -218,14 +234,14 @@ impl<T> ShardIdMap<T> {
             .filter_map(|(idx, opt_val)| opt_val.as_ref().map(|val| (ShardId(idx as i64), val)))
             .fuse(); // Keep .fuse() for correctness
 
-        // Spilled BTreeMap Iterator (Clones ShardId)
-        let spilled_iter = self.spilled.iter().map(|(&id, val)| (id, val));
+        // The order of chaining these is important to ensure the order is preserved among the
+        // buckets.  `invalid` comes first, if it exists, as those are the negative ids.  Next is
+        // are the directly mapped ids, and finally the spilled arena.
 
-        // Chain them together
+        let spilled_iter = self.spilled.iter().map(|(&id, val)| (id, val));
         let chained_iter = direct_iter.chain(spilled_iter);
 
         #[cfg(accept_invalid_shard_ids)]
-        // Invalid the negative ids if we accepted them
         let chained_iter = {
             let invalid_iter = self.invalid.iter().map(|(&id, val)| (id, val));
             invalid_iter.chain(chained_iter)
@@ -1229,9 +1245,7 @@ mod int32_hash_range {
 } // mod int32_hash_range
 
 mod searchable {
-    use crate::ShardId;
-
-    use super::{Client, Error, Result, ShardIdMap, ShardMapper, int32_hash_range};
+    use super::{Client, Error, Result, ShardId, ShardIdMap, ShardMapper, int32_hash_range};
 
     #[derive(Debug, Default)]
     pub(super) struct Shards {
@@ -1553,5 +1567,20 @@ mod tests {
         assert_eq!(*offsets.get(id_very_large).unwrap(), 42);
         offsets.remove(id_very_large);
         assert!(offsets.get(id_very_large).is_none());
+    }
+
+    #[test]
+    fn test_shard_id_map_order() {
+        let mut items = ShardIdMap::<i32>::default();
+        items.insert((-1000).into(), -1000);
+        items.insert((-100).into(), -100);
+        items.insert((-10).into(), -10);
+        items.insert((-1).into(), -1);
+        items.insert(0.into(), 0);
+        items.insert(1.into(), 1);
+        items.insert(10.into(), 10);
+        items.insert(100.into(), 100);
+        items.insert(1000.into(), 1000);
+        assert!(items.iter().is_sorted());
     }
 }
