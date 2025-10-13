@@ -39,6 +39,12 @@ itertools = "0.14.0"
 
 [lints]
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    "cfg(accept_invalid_shard_ids)",
+] }
+
+
 [package.metadata.cargo_check_external_types]
 allowed_external_types = [
     "bytes::bytes::Bytes",
