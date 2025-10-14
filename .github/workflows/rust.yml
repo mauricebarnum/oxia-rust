@@ -54,6 +54,9 @@ jobs:
       - name: checkout
         uses: actions/checkout@v4
 
+      - name: cargo-deny
+        run: cargo deny check
+
       - name: set-cargo-release-flag
         run: |
           if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
