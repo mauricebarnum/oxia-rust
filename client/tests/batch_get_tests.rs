@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![cfg(not(miri))]
+
 use futures::StreamExt;
 use mauricebarnum_oxia_client as client;
 use mauricebarnum_oxia_client::config;
@@ -26,9 +28,11 @@ use common::TestResultExt;
 use common::non_zero;
 use common::trace_err;
 
+const TEST_TIMEOUT_SECS: u64 = 5;
+
 #[test_log::test(tokio::test)]
 async fn test_batch_get_basic() -> anyhow::Result<()> {
-    timeout(Duration::from_secs(5), async {
+    timeout(Duration::from_secs(TEST_TIMEOUT_SECS), async {
         let server = trace_err!(common::TestServer::start_nshards(non_zero(3)))?;
         let builder = config::Builder::new().max_parallel_requests(5);
         let client = trace_err!(server.connect(Some(builder)).await)?;
@@ -71,7 +75,7 @@ async fn test_batch_get_basic() -> anyhow::Result<()> {
 
 #[test_log::test(tokio::test)]
 async fn test_batch_get_missing_keys() -> anyhow::Result<()> {
-    timeout(Duration::from_secs(5), async {
+    timeout(Duration::from_secs(TEST_TIMEOUT_SECS), async {
         let server = trace_err!(common::TestServer::start_nshards(non_zero(2)))?;
         let client = trace_err!(server.connect(None).await)?;
 
@@ -115,7 +119,7 @@ async fn test_batch_get_missing_keys() -> anyhow::Result<()> {
 
 #[test_log::test(tokio::test)]
 async fn test_batch_get_with_options() -> anyhow::Result<()> {
-    timeout(Duration::from_secs(5), async {
+    timeout(Duration::from_secs(TEST_TIMEOUT_SECS), async {
         let server = trace_err!(common::TestServer::start_nshards(non_zero(2)))?;
         let client = trace_err!(server.connect(None).await)?;
 
@@ -160,7 +164,7 @@ async fn test_batch_get_with_options() -> anyhow::Result<()> {
 
 #[test_log::test(tokio::test)]
 async fn test_batch_get_with_batch_options() -> anyhow::Result<()> {
-    timeout(Duration::from_secs(5), async {
+    timeout(Duration::from_secs(TEST_TIMEOUT_SECS), async {
         let server = trace_err!(common::TestServer::start_nshards(non_zero(2)))?;
         let client = trace_err!(server.connect(None).await)?;
 
@@ -207,7 +211,7 @@ async fn test_batch_get_with_batch_options() -> anyhow::Result<()> {
 }
 #[test_log::test(tokio::test)]
 async fn test_batch_get_across_shards() -> anyhow::Result<()> {
-    timeout(Duration::from_secs(5), async {
+    timeout(Duration::from_secs(TEST_TIMEOUT_SECS), async {
         let nshards = non_zero(4);
         let server = trace_err!(common::TestServer::start_nshards(nshards))?;
         let client = trace_err!(server.connect(None).await)?;
@@ -243,7 +247,7 @@ async fn test_batch_get_across_shards() -> anyhow::Result<()> {
 
 #[test_log::test(tokio::test)]
 async fn test_batch_get_empty_request() -> anyhow::Result<()> {
-    timeout(Duration::from_secs(5), async {
+    timeout(Duration::from_secs(TEST_TIMEOUT_SECS), async {
         let server = trace_err!(common::TestServer::start())?;
         let client = trace_err!(server.connect(None).await)?;
 
@@ -263,7 +267,7 @@ async fn test_batch_get_empty_request() -> anyhow::Result<()> {
 
 #[test_log::test(tokio::test)]
 async fn test_batch_get_with_partition_keys() -> anyhow::Result<()> {
-    timeout(Duration::from_secs(5), async {
+    timeout(Duration::from_secs(TEST_TIMEOUT_SECS), async {
         let server = trace_err!(common::TestServer::start_nshards(non_zero(3)))?;
         let client = trace_err!(server.connect(None).await)?;
 
@@ -314,11 +318,11 @@ async fn test_batch_get_with_partition_keys() -> anyhow::Result<()> {
 
 #[test_log::test(tokio::test)]
 async fn test_batch_get_large_batch() -> anyhow::Result<()> {
-    timeout(Duration::from_secs(5), async {
+    timeout(Duration::from_secs(TEST_TIMEOUT_SECS), async {
         let server = trace_err!(common::TestServer::start_nshards(non_zero(4)))?;
         let builder = config::Builder::new()
             .max_parallel_requests(10)
-            .request_timeout(Duration::from_secs(5));
+            .request_timeout(Duration::from_secs(TEST_TIMEOUT_SECS));
         let client = trace_err!(server.connect(Some(builder)).await)?;
 
         // Insert many keys
@@ -357,7 +361,7 @@ async fn test_batch_get_large_batch() -> anyhow::Result<()> {
 
 #[test_log::test(tokio::test)]
 async fn test_batch_get_duplicate_keys() -> anyhow::Result<()> {
-    timeout(Duration::from_secs(5), async {
+    timeout(Duration::from_secs(TEST_TIMEOUT_SECS), async {
         let server = trace_err!(common::TestServer::start())?;
         let client = trace_err!(server.connect(None).await)?;
 
@@ -393,7 +397,7 @@ async fn test_batch_get_duplicate_keys() -> anyhow::Result<()> {
 
 #[test_log::test(tokio::test)]
 async fn test_batch_get_mixed_success_failure() -> anyhow::Result<()> {
-    timeout(Duration::from_secs(5), async {
+    timeout(Duration::from_secs(TEST_TIMEOUT_SECS), async {
         let server = trace_err!(common::TestServer::start_nshards(non_zero(2)))?;
         let client = trace_err!(server.connect(None).await)?;
 
@@ -430,7 +434,7 @@ async fn test_batch_get_mixed_success_failure() -> anyhow::Result<()> {
 
 #[test_log::test(tokio::test)]
 async fn test_batch_get_version_tracking() -> anyhow::Result<()> {
-    timeout(Duration::from_secs(5), async {
+    timeout(Duration::from_secs(TEST_TIMEOUT_SECS), async {
         let server = trace_err!(common::TestServer::start())?;
         let client = trace_err!(server.connect(None).await)?;
 

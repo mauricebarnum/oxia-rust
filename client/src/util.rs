@@ -164,6 +164,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)]
     async fn test_with_timeout() -> Result<()> {
         let r = with_timeout(Some(Duration::from_millis(1)), async {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -178,6 +179,7 @@ mod tests {
     }
 
     #[test_log::test(tokio::test)]
+    #[cfg_attr(miri, ignore)]
     async fn test_with_retry() -> Result<()> {
         const RETRIES: usize = 3;
         const EXPECTED: usize = RETRIES + 2;
