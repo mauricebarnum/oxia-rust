@@ -72,9 +72,9 @@ RUN rustup toolchain install nightly-2025-08-06 --profile minimal && \
 
 # ===== Install sccache =====
 RUN case "${TARGETARCH}" in \
-        "amd64") SCCACHE_ARCH="x86_64-unknown-linux-musl" ;; \
-        "arm64") SCCACHE_ARCH="aarch64-unknown-linux-musl" ;; \
-        *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
+    "amd64") SCCACHE_ARCH="x86_64-unknown-linux-musl" ;; \
+    "arm64") SCCACHE_ARCH="aarch64-unknown-linux-musl" ;; \
+    *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
     esac && \
     curl -fsSL "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}.tar.gz" \
     | tar -xz -C /tmp && \
@@ -84,9 +84,9 @@ RUN case "${TARGETARCH}" in \
 # ===== Install cargo-nextest =====
 ARG NEXTEST_VERSION=0.9.84
 RUN case "${TARGETARCH}" in \
-        "amd64") NEXTEST_ARCH="x86_64-unknown-linux-gnu" ;; \
-        "arm64") NEXTEST_ARCH="aarch64-unknown-linux-gnu" ;; \
-        *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
+    "amd64") NEXTEST_ARCH="x86_64-unknown-linux-gnu" ;; \
+    "arm64") NEXTEST_ARCH="aarch64-unknown-linux-gnu" ;; \
+    *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
     esac && \
     curl -fsSL "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-${NEXTEST_VERSION}/cargo-nextest-${NEXTEST_VERSION}-${NEXTEST_ARCH}.tar.gz" \
     | tar -xz -C /tmp && \
@@ -106,6 +106,9 @@ RUN --mount=type=bind,dst=/src cargo fetch --locked --manifest-path=/src/Cargo.t
 # ====== Install oxia ======
 # if this breaks, take a look at oxia-bin-util/build.rs
 RUN --mount=type=bind,dst=/src GOPROXY=off GOCACHE=/tmp/gocache go -C /src/oxia-bin-util/go build -mod=vendor -o $HOME/go/bin/oxia ./vendor/github.com/oxia-db/oxia/cmd && rm -rf "$GOCACHE"
+
+# ===== Install cargo-deny =====
+RUN cargo install cargo-deny
 
 # ===== ================== =====
 # ===== Create final image =====
