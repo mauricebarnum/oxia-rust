@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![cfg(not(miri))]
+
 use chrono::Utc;
 use mauricebarnum_oxia_client as client;
 use mauricebarnum_oxia_client::config;
@@ -24,12 +26,18 @@ use common::TestResultExt;
 use common::non_zero;
 use common::trace_err;
 
+const SESSION_TIMEOUT_SECS: u64 = 2;
+const RETRY_TIMEOUT_MSECS: u64 = 23;
+
 #[test_log::test(tokio::test)]
 async fn test_basic() -> anyhow::Result<()> {
-    let session_timeout = Duration::from_secs(2);
+    let session_timeout = Duration::from_secs(SESSION_TIMEOUT_SECS);
     let server = trace_err!(common::TestServer::start_nshards(non_zero(4)))?;
     let builder = config::Builder::new()
-        .retry(config::RetryConfig::new(3, Duration::from_millis(23)))
+        .retry(config::RetryConfig::new(
+            3,
+            Duration::from_millis(RETRY_TIMEOUT_MSECS),
+        ))
         .max_parallel_requests(3)
         .session_timeout(session_timeout);
     let client = trace_err!(server.connect(Some(builder)).await)?;

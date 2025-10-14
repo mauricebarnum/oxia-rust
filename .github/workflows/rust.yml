@@ -98,5 +98,20 @@ jobs:
         timeout-minutes: 10
         run: cargo nextest run $RELEASE_FLAG --frozen --no-fail-fast --verbose
 
+      - name: miri-common
+        run: cargo +nightly miri test --package mauricebarnum-oxia-common --frozen
+        env:
+          MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-symbolic-alignment-check
+
+      - name: miri-client
+        run: cargo +nightly miri test --package mauricebarnum-oxia-client --frozen
+        env:
+          MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-disable-isolation
+
+      - name: miri-bin-util
+        run: cargo +nightly miri test --package oxia-bin-util --frozen
+        env:
+          MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-symbolic-alignment-check
+
       - name: show-sccache-stats
         run: sccache --show-stats || true

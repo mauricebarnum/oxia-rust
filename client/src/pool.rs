@@ -275,6 +275,7 @@ impl<F: ChannelFactory> ChannelPool<F> {
 }
 
 #[cfg(test)]
+#[cfg(not(miri))]
 mod tests {
     use super::*;
 
