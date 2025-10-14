@@ -65,6 +65,11 @@ ENV \
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain ${RUST_VERSION} -y
 
+# ===== Install Nightly and Miri =====
+RUN rustup toolchain install nightly-2025-08-06 --profile minimal && \
+    rustup toolchain install nightly && \
+    rustup +nightly component add miri
+
 # ===== Install sccache =====
 RUN case "${TARGETARCH}" in \
         "amd64") SCCACHE_ARCH="x86_64-unknown-linux-musl" ;; \
@@ -93,8 +98,7 @@ RUN curl -fsSL "https://go.dev/dl/${GO_VERSION}.linux-${GO_ARCH}.tar.gz" | tar -
 
 # ===== Install cargo-check-external-types which requires a specific nightly, see =====
 # https://github.com/awslabs/cargo-check-external-types?tab=readme-ov-file#how-to-use
-RUN rustup toolchain install nightly-2025-08-06 --profile minimal && \
-    cargo +nightly-2025-08-06 install cargo-check-external-types
+RUN cargo +nightly-2025-08-06 install cargo-check-external-types
 
 # ====== Fetch current dependencies =====
 RUN --mount=type=bind,dst=/src cargo fetch --locked --manifest-path=/src/Cargo.toml
