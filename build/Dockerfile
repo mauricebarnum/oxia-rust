@@ -93,6 +93,9 @@ RUN case "${TARGETARCH}" in \
     mv "/tmp/cargo-nextest" "${CARGO_HOME}/bin/cargo-nextest" && \
     rm -rf /tmp/cargo-nextest*
 
+# ===== Install cargo-deny =====
+RUN cargo install cargo-deny
+
 # ===== Install Go =====
 RUN curl -fsSL "https://go.dev/dl/${GO_VERSION}.linux-${GO_ARCH}.tar.gz" | tar -C ${HOME} -xzf -
 
@@ -106,9 +109,6 @@ RUN --mount=type=bind,dst=/src cargo fetch --locked --manifest-path=/src/Cargo.t
 # ====== Install oxia ======
 # if this breaks, take a look at oxia-bin-util/build.rs
 RUN --mount=type=bind,dst=/src GOPROXY=off GOCACHE=/tmp/gocache go -C /src/oxia-bin-util/go build -mod=vendor -o $HOME/go/bin/oxia ./vendor/github.com/oxia-db/oxia/cmd && rm -rf "$GOCACHE"
-
-# ===== Install cargo-deny =====
-RUN cargo install cargo-deny
 
 # ===== ================== =====
 # ===== Create final image =====
