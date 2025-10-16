@@ -6,11 +6,11 @@ license = "Apache-2.0"
 
 [dependencies]
 mauricebarnum-oxia-common = { path = "../common" }
-tokio = { version = "1.47.1", features = ["full"] }
+tokio = { version = "1.48.0", features = ["full"] }
 tokio-stream = "0.1.17"
 tonic = { version = "0.14.2", features = ["gzip", "channel", "zstd"] }
 prost = "0.14.1" # If using Protobuf
-thiserror = "2.0.16"
+thiserror = "2.0.17"
 bytes = "1.10.1"
 futures-util = "0.3.31"
 tracing = "0.1.41"
@@ -22,7 +22,7 @@ tracing-subscriber = { version = "0.3.20", features = [
 
 async-trait = "0.1.89"
 futures = "0.3.31"
-getrandom = "0.3.3"
+getrandom = "0.3.4"
 rand = "0.9.2"
 xxhash-rust = { version = "0.8.15", default-features = false, features = [
     "xxh3",
@@ -31,11 +31,11 @@ backon = "1.5.2"
 
 [dev-dependencies]
 chrono = "0.4.42"
-socket2 = "0.6.0"
+socket2 = "0.6.1"
 test-log = { version = "0.2.18", features = ["trace", "color"] }
 oxia-bin-util = { path = "../oxia-bin-util" }
-tempfile = "3.22.0"
-anyhow = "1.0.99"
+tempfile = "3.23.0"
+anyhow = "1.0.100"
 itertools = "0.14.0"
 
 [lints]
