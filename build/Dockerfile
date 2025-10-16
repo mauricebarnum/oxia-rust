@@ -18,9 +18,9 @@ ARG RUSTUP_HOME
 
 # Versions
 ARG RUST_VERSION=1.90
-ARG GO_VERSION=go1.25.1
-ARG SCCACHE_VERSION=v0.8.2
-ARG NEXTEST_VERSION=0.9.84
+ARG GO_VERSION=go1.25.2
+ARG SCCACHE_VERSION=v0.11.0
+ARG NEXTEST_VERSION=0.9.106
 
 ARG TARGETARCH
 ARG GO_ARCH=${TARGETARCH}
@@ -85,7 +85,6 @@ RUN case "${TARGETARCH}" in \
     rm -rf /tmp/sccache-*
 
 # ===== Install cargo-nextest =====
-ARG NEXTEST_VERSION=0.9.84
 RUN case "${TARGETARCH}" in \
     "amd64") NEXTEST_ARCH="x86_64-unknown-linux-gnu" ;; \
     "arm64") NEXTEST_ARCH="aarch64-unknown-linux-gnu" ;; \
