@@ -16,10 +16,9 @@ local_proto_dir="${src_dir}/proto"
 #
 tmp_dir="$(mktemp -d)"
 cleanup() {
-    rm -rf "${tmp_dir}"
+	rm -rf "${tmp_dir}"
 }
 trap cleanup EXIT
-
 
 echo "[update_proto] Cloning ${upstream_repo}..."
 git clone --depth=1 --filter=blob:none --sparse "${upstream_repo}" "${tmp_dir}/oxia"
@@ -32,7 +31,13 @@ cp -v "${tmp_dir}/oxia/${upstream_dir}/"*.proto "${local_proto_dir}/"
 
 echo "[update_proto] Saving upstream info..."
 rev=$(git -C "$tmp_dir/oxia" rev-parse HEAD)
-echo "${upstream_repo}/tree/${rev}" > "${local_proto_dir}/UPSTREAM"
+echo "${upstream_repo}/tree/${rev}" >"${local_proto_dir}/UPSTREAM"
+
+echo "[update_proto] Upddating oxia src..."
+(
+	cd ../oxia-bin-util
+	./update
+)
 
 echo "[update_proto] Building with new proto file..."
 cargo build --all-targets
@@ -40,4 +45,3 @@ cargo build --all-targets
 echo "[update_proto] Staging changes..."
 cd "${src_dir}"
 git add -A "${local_proto_dir}"
-

@@ -1,8 +1,8 @@
 module oxia-tools
 
-go 1.25.0
+go 1.25.2
 
-require github.com/oxia-db/oxia v0.14.4
+require github.com/oxia-db/oxia v0.14.5-0.20251016180633-0f79ed80dc15
 
 require (
 	github.com/DataDog/zstd v1.4.5 // indirect

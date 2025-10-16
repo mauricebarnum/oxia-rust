@@ -1,4 +1,4 @@
-// Copyright 2023 StreamNative, Inc.
+// Copyright 2023-2025 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -31,7 +31,11 @@ type Timer struct {
 }
 
 func (tm Timer) Done() {
-	tm.histo.histo.Record(context.Background(), float64(time.Since(tm.start).Microseconds())/1000.0, tm.histo.attrs)
+	tm.DoneCtx(context.Background())
+}
+
+func (tm Timer) DoneCtx(ctx context.Context) {
+	tm.histo.histo.Record(ctx, float64(time.Since(tm.start).Microseconds())/1000.0, tm.histo.attrs)
 }
 
 type LatencyHistogram interface {

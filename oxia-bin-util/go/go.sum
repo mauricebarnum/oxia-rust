@@ -131,8 +131,8 @@ github.com/onsi/ginkgo/v2 v2.21.0 h1:7rg/4f3rB88pb5obDgNZrNHrQ4e6WpjonchcpuBRnZM
 github.com/onsi/ginkgo/v2 v2.21.0/go.mod h1:7Du3c42kxCUegi0IImZ1wUQzMBVecgIHjR1C+NkhLQo=
 github.com/onsi/gomega v1.35.1 h1:Cwbd75ZBPxFSuZ6T+rN/WCb/gOc6YgFBXLlZLhC7Ds4=
 github.com/onsi/gomega v1.35.1/go.mod h1:PvZbdDc8J6XJEpDK4HCuRBm8a6Fzp9/DmhC9C7yFlog=
-github.com/oxia-db/oxia v0.14.4 h1:FSAd5vE1P4CrKwZuvwm3EffUq7txtwvylDQ+BbKUBjc=
-github.com/oxia-db/oxia v0.14.4/go.mod h1:aW56UOKJBOTPxkjoqIYU4cx8Vm+QoyriQNiiek+GEPY=
+github.com/oxia-db/oxia v0.14.5-0.20251016180633-0f79ed80dc15 h1:VaBvUcdC08X+1SbGrKbTq5o2Ys2gZOgTHm8HjPApqeU=
+github.com/oxia-db/oxia v0.14.5-0.20251016180633-0f79ed80dc15/go.mod h1:M9gmjS2JLk7S2vxPnaWwCuFmcFecZuXuiSagNG3euo0=
 github.com/pelletier/go-toml/v2 v2.2.4 h1:mye9XuhQ6gvn5h28+VilKrrPoQVanw5PMw/TB0t5Ec4=
 github.com/pelletier/go-toml/v2 v2.2.4/go.mod h1:2gIqNv+qfxSVS7cM2xJQKtLSTLUE9V8t9Stt+h56mCY=
 github.com/pingcap/errors v0.11.4 h1:lFuQV/oaUMGcD2tqt+01ROSmJs75VG1ToEOkZIZ4nE4=

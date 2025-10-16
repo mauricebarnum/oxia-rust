@@ -1,4 +1,4 @@
-// Copyright 2025 StreamNative, Inc.
+// Copyright 2023-2025 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -187,6 +187,8 @@ func printLatench(name string, datas []int64) {
 				p99 = *s.Value
 			case 999:
 				p999 = *s.Value
+			default:
+				panic("unknown summary quantile")
 			}
 		}
 	}

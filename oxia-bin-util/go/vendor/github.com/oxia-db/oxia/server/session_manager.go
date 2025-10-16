@@ -1,4 +1,4 @@
-// Copyright 2023 StreamNative, Inc.
+// Copyright 2023-2025 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -337,16 +337,16 @@ func (*sessionManagerUpdateOperationCallbackS) OnPutWithinSession(batch kv.Write
 }
 
 func (s *sessionManagerUpdateOperationCallbackS) OnPut(batch kv.WriteBatch, notification *kv.Notifications, request *proto.PutRequest, existingEntry *proto.StorageEntry) (proto.Status, error) {
-	switch {
-	// override by normal operation
-	case request.SessionId == nil:
-		if status, err := deleteShadow(batch, notification, request.Key, existingEntry); err != nil {
-			return status, err
-		}
+	if request.SessionId != nil {
 		// override by session operation
-	case request.SessionId != nil:
 		return s.OnPutWithinSession(batch, notification, request, existingEntry)
 	}
+
+	// override by normal operation
+	if status, err := deleteShadow(batch, notification, request.Key, existingEntry); err != nil {
+		return status, err
+	}
+
 	return proto.Status_OK, nil
 }
 

@@ -1,4 +1,4 @@
-// Copyright 2023 StreamNative, Inc.
+// Copyright 2023-2025 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -305,6 +305,8 @@ func selectResponse(kc proto.KeyComparisonType, selected *proto.GetResponse, res
 			if selected == keyNotFound || compareGetResponse(selected, response) > 0 {
 				selected = response
 			}
+		default:
+			panic(fmt.Sprintf("unknown comparison type: %v", kc))
 		}
 	}
 	return selected

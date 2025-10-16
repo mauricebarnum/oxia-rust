@@ -1,4 +1,4 @@
-// Copyright 2023 StreamNative, Inc.
+// Copyright 2023-2025 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -113,7 +113,8 @@ func newDefaultGrpcProvider(name, bindAddress string, registerFunc func(grpc.Ser
 	registerFunc(c.server)
 	grpcprometheus.Register(c.server)
 
-	listener, err := net.Listen("tcp", bindAddress)
+	lc := net.ListenConfig{}
+	listener, err := lc.Listen(context.Background(), "tcp", bindAddress)
 	if err != nil {
 		return nil, err
 	}

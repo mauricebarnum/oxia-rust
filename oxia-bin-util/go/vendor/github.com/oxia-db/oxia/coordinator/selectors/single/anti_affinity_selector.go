@@ -1,4 +1,4 @@
-// Copyright 2025 StreamNative, Inc.
+// Copyright 2023-2025 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -58,8 +58,7 @@ func (*serverAntiAffinitiesSelector) Select(ssContext *Context) (string, error) 
 				switch affinity.Mode {
 				case p.Strict:
 					return "", selectors.ErrUnsatisfiedAntiAffinity
-				case p.Relaxed:
-					fallthrough
+				// case p.Relaxed:
 				default:
 					return "", selectors.ErrUnsupportedAntiAffinityMode
 				}
