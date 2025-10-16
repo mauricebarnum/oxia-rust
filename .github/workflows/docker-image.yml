@@ -14,7 +14,7 @@ on:
       - "oxia-bin-util/go"
   workflow_dispatch:
   schedule:
-    - cron: "0 2 * * 1" # weekly
+    - cron: "13 3 6 * *" # monthly
 
 env:
   REGISTRY: ghcr.io
@@ -62,3 +62,4 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=registry,ref=ghcr.io/${{ github.repository }}/rust-build:cache
           cache-to: type=registry,ref=ghcr.io/${{ github.repository }}/rust-build:cache,mode=max
+          no-cache: ${{ github.event_name == 'schedule' }}
