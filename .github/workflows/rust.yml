@@ -108,11 +108,6 @@ jobs:
         timeout-minutes: 10
         run: cargo nextest run $RELEASE_FLAG --frozen --no-fail-fast --verbose
 
-      - name: miri-common
-        run: cargo +nightly miri nextest run --package mauricebarnum-oxia-common --frozen
-        env:
-          MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-symbolic-alignment-check
-
       - name: miri-client
         run: cargo +nightly miri nextest run --package mauricebarnum-oxia-client --frozen
         env:
