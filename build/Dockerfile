@@ -63,12 +63,15 @@ ENV \
     RUSTUP_HOME=${RUSTUP_HOME} \
     PATH=${CARGO_HOME}/bin:${RUSTUP_HOME}/bin:$PATH
 
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain ${RUST_VERSION} -y
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain ${RUST_VERSION} --profile minimal --component clippy -y
 
-# ===== Install Nightly and Miri =====
+# ===== Install miri =====
+RUN rustup toolchain install --profile minimal --allow-downgrade nightly --component miri
+
+# ===== Install cargo-check-external-types which requires a specific nightly, see =====
+# https://github.com/awslabs/cargo-check-external-types?tab=readme-ov-file#how-to-use
 RUN rustup toolchain install nightly-2025-08-06 --profile minimal && \
-    rustup toolchain install nightly && \
-    rustup +nightly component add miri
+    cargo +nightly-2025-08-06 install cargo-check-external-types
 
 # ===== Install sccache =====
 RUN case "${TARGETARCH}" in \
