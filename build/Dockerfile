@@ -102,12 +102,19 @@ RUN cargo install cargo-deny
 # ===== Install Go =====
 RUN curl -fsSL "https://go.dev/dl/${GO_VERSION}.linux-${GO_ARCH}.tar.gz" | tar -C ${HOME} -xzf -
 
-# ===== Install cargo-check-external-types which requires a specific nightly, see =====
-# https://github.com/awslabs/cargo-check-external-types?tab=readme-ov-file#how-to-use
-RUN cargo +nightly-2025-08-06 install cargo-check-external-types
-
 # ====== Fetch current dependencies =====
 RUN --mount=type=bind,dst=/src cargo fetch --locked --manifest-path=/src/Cargo.toml
+
+# ====== Prepopulate dependency caches =====
+# Fetch downloads .crate files to $CARGO_HOME/registry/cache
+# The build step extracts them to $CARGO_HOME/registry/src and clones git deps to $CARGO_HOME/git
+# We use || true because the build will fail without all project files, but caches are populated
+# Prepopulate both dev and release profiles since CI uses both
+RUN --mount=type=bind,dst=/src \
+    cd /src && \
+    cargo fetch --locked && \
+    (cargo check --frozen --all-targets 2>/dev/null || true) && \
+    (cargo check --frozen --release --all-targets 2>/dev/null || true)
 
 # ====== Install oxia ======
 # if this breaks, take a look at oxia-bin-util/build.rs
