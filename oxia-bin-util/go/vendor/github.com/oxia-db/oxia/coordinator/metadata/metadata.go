@@ -1,4 +1,4 @@
-// Copyright 2023 StreamNative, Inc.
+// Copyright 2023-2025 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -43,4 +43,6 @@ type Provider interface {
 	Get() (cs *model.ClusterStatus, version Version, err error)
 
 	Store(cs *model.ClusterStatus, expectedVersion Version) (newVersion Version, err error)
+
+	WaitToBecomeLeader() error
 }

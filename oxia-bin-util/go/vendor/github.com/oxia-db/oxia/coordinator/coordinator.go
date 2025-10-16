@@ -1,4 +1,4 @@
-// Copyright 2023 StreamNative, Inc.
+// Copyright 2023-2025 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pkg/errors"
 	"go.uber.org/multierr"
 	pb "google.golang.org/protobuf/proto"
 
@@ -316,6 +317,8 @@ func (c *coordinator) startBackgroundActionWorker() {
 				c.handleActionSwap(ac)
 			case actions.Election:
 				c.handleActionElection(ac)
+			default:
+				panic("unknown action type")
 			}
 
 		case <-c.ctx.Done():
@@ -423,6 +426,13 @@ func NewCoordinator(meta metadata.Provider,
 		statusResource:        resources.NewStatusResource(meta),
 	}
 
+	// Ensure we are to become the leader coordinator
+	c.Info("Waiting to become leader")
+	if err := meta.WaitToBecomeLeader(); err != nil {
+		return nil, errors.Wrap(err, "failed to wait in becoming leader")
+	}
+	c.Info("This coordinator is now leader")
+
 	c.ctx, c.cancel = context.WithCancel(context.Background())
 	c.configResource = resources.NewClusterConfigResource(c.ctx, clusterConfigProvider, clusterConfigNotificationsCh, c)
 	c.assignmentsChanged = concurrent.NewConditionContext(c)
@@ -490,5 +500,6 @@ func NewCoordinator(meta metadata.Provider,
 		"component": "coordinator-action-worker",
 	}, c.startBackgroundActionWorker)
 
+	c.loadBalancer.Start()
 	return c, nil
 }

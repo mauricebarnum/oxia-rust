@@ -13,6 +13,6 @@
 // limitations under the License.
 
 pub mod proto {
-    tonic::include_proto!("io.streamnative.oxia.proto");
+    tonic::include_proto!("io.oxia.proto.v1");
     pub use oxia_client_client::OxiaClientClient;
 }

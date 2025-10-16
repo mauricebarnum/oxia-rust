@@ -1,4 +1,4 @@
-// Copyright 2023 StreamNative, Inc.
+// Copyright 2023-2025 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 
@@ -142,8 +143,8 @@ func (s *Standalone) initializeShards(numShards uint32) error {
 	return nil
 }
 
-func (s *Standalone) RpcPort() int {
-	return s.rpc.Port()
+func (s *Standalone) ServiceAddr() string {
+	return fmt.Sprintf("localhost:%d", s.rpc.Port())
 }
 
 func (s *Standalone) Close() error {

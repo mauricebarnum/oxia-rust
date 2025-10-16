@@ -1,4 +1,4 @@
-// Copyright 2023 StreamNative, Inc.
+// Copyright 2023-2025 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -225,7 +225,7 @@ func newKVPebble(factory *PebbleFactory, namespace string, shardId int64) (KV, e
 			),
 		},
 
-		FormatMajorVersion: pebble.FormatNewest,
+		FormatMajorVersion: pebble.FormatVirtualSSTables,
 	}
 
 	if factory.options.InMemory {
@@ -472,6 +472,8 @@ func (p *Pebble) Get(key string, comparisonType ComparisonType) (returnedKey str
 		returnedKey, value, closer, err = p.getLower(key)
 	case ComparisonHigher:
 		returnedKey, value, closer, err = p.getHigher(key)
+	default:
+		panic(fmt.Sprintf("Unknown comparison type: %v", comparisonType))
 	}
 
 	if errors.Is(err, pebble.ErrNotFound) {

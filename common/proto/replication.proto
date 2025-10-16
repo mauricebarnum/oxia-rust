@@ -1,4 +1,4 @@
-// Copyright 2023 StreamNative, Inc.
+// Copyright 2023-2025 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,7 +22,7 @@ option go_package = "github.com/oxia-db/oxia/proto";
 
 // coordinator -> node
 service OxiaCoordination {
-  rpc PushShardAssignments(stream io.streamnative.oxia.proto.ShardAssignments)
+  rpc PushShardAssignments(stream io.oxia.proto.v1.ShardAssignments)
       returns (CoordinationShardAssignmentsResponse);
 
   rpc NewTerm(NewTermRequest) returns (NewTermResponse);
