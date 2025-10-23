@@ -28,7 +28,7 @@ use crate::Result;
 use crate::config;
 use crate::config::Config;
 
-type CompletionResult = std::result::Result<Channel, Arc<Error>>;
+type CompletionResult = crate::Result<Channel>;
 
 mod inner {
     use super::{Arc, Channel, CompletionResult, HashMap, RwLock, broadcast, config};
@@ -106,10 +106,7 @@ impl<F: ChannelFactory> ChannelPool<F> {
         match rv {
             Ok(Ok(r)) => Ok(r),
             Ok(Err(e)) => Err(e),
-            Err(e) => {
-                let boxed: Box<dyn std::error::Error + Send + Sync> = Box::new(e);
-                Err(Arc::new(Error::from(boxed)))
-            }
+            Err(e) => Err(Error::other(e)),
         }
     }
 
@@ -191,7 +188,7 @@ impl<F: ChannelFactory> ChannelPool<F> {
                                 }
                                 Err(e) => {
                                     o.remove();
-                                    Err(Arc::new(e))
+                                    Err(e)
                                 }
                             };
 

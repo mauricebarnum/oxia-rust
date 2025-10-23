@@ -30,7 +30,7 @@ where
     match timeout {
         Some(t) if t > Duration::ZERO => tokio::time::timeout(t, fut)
             .await
-            .map_err(Error::from_tokio_elapsed)?,
+            .map_err(|_| Error::RequestTimeout)?,
         _ => fut.await,
     }
 }
@@ -160,6 +160,7 @@ mod tests {
     use crate::config::RetryConfig;
     use itertools::Itertools;
     use std::cmp::Ordering;
+    use std::io;
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
 
@@ -188,12 +189,12 @@ mod tests {
         let count = Arc::new(AtomicUsize::new(0));
 
         let funcs = [
-            || -> Result<()> { Err(Error::Io(std::io::ErrorKind::ConnectionReset.into())) },
             || -> Result<()> {
-                Err(Error::RequestTimeout {
-                    source: "timed out".into(),
-                })
+                Err(Error::Io(
+                    io::Error::new(io::ErrorKind::ConnectionReset, "").into(),
+                ))
             },
+            || -> Result<()> { Err(Error::RequestTimeout) },
         ];
         for f in funcs {
             let r = with_retry(retry, {
