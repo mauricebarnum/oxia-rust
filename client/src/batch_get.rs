@@ -177,9 +177,8 @@ pub(super) async fn prepare_requests(
                 batch_get_futures.push(async move { shard.batch_get(req).await.boxed() });
             }
             Err(err) => {
-                let shared_err = Arc::new(err);
                 for item in req.items.into_iter() {
-                    failures.push(ResponseItem::failed(item.key, shared_err.clone().into()));
+                    failures.push(ResponseItem::failed(item.key, err.clone()));
                 }
             }
         }

@@ -35,14 +35,15 @@ use client::PutOptions;
 use client::RangeScanOptions;
 use client::Result;
 use client::SecondaryIndex;
+use mauricebarnum_oxia_client as client;
 use mauricebarnum_oxia_client::NotificationType;
-use mauricebarnum_oxia_client::{self as client, config};
+use mauricebarnum_oxia_client::OxiaError;
+use mauricebarnum_oxia_client::config;
 
 mod common;
 use common::TestResultExt;
 use common::non_zero;
 use common::trace_err;
-use mauricebarnum_oxia_client::OxiaError::KeyNotFound;
 use tokio::time::timeout;
 
 /// Helper function to create a test client
@@ -652,7 +653,7 @@ async fn test_error_conditions() -> Result<()> {
 
     // Test delete non-existent key (should succeed silently in Oxia)
     let result = client.delete(&key).await;
-    assert!(matches!(result, Err(Error::OxiaError(KeyNotFound))));
+    assert!(matches!(result, Err(Error::Oxia(OxiaError::KeyNotFound))));
 
     // Test put with wrong expected version
     client.put(&key, "value").await?;
@@ -668,7 +669,7 @@ async fn test_error_conditions() -> Result<()> {
         .await;
 
     // Should get an error for unexpected version
-    assert!(matches!(result, Err(Error::OxiaError(_))));
+    assert!(matches!(result, Err(Error::Oxia(_))));
 
     Ok(())
 }

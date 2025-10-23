@@ -21,8 +21,8 @@ use thiserror::Error as ThisError;
 use crate::KeyComparisonType;
 use crate::ShardId;
 
-/// Errors that map directly from the Oxia gRPC service responses (excluding success/OK)
-#[derive(ThisError, Debug, PartialEq, Eq)]
+/// Errors that map directly from the Oxia gRPC service responses
+#[derive(ThisError, Debug, Clone, PartialEq, Eq)]
 pub enum OxiaError {
     #[error("Key not found")]
     KeyNotFound,
@@ -48,8 +48,8 @@ impl From<i32> for OxiaError {
     }
 }
 
-/// Client-side logic or state errors, not originating from the server
-#[derive(Debug, ThisError)]
+/// Client-side logic or state errors
+#[derive(Debug, Clone, ThisError)]
 pub enum ClientError {
     #[error("Inconsistent shard assignment: expected {expected}, got {actual}")]
     InconsistentAssignment { expected: String, actual: String },
@@ -64,30 +64,27 @@ pub enum ClientError {
     UnsupportedKeyComparator(KeyComparisonType),
 }
 
-#[derive(Debug)]
-pub struct OverlappingRangesData {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlappingRanges {
     pub range1_min: u32,
     pub range1_max: u32,
     pub range2_min: u32,
     pub range2_max: u32,
 }
 
-impl Display for OverlappingRangesData {
+impl Display for OverlappingRanges {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Overlapping shard ranges: [{range1_min}-{range1_max}] overlaps with [{range2_min}-{range2_max}]",
-            range1_min = self.range1_min,
-            range1_max = self.range1_max,
-            range2_min = self.range2_min,
-            range2_max = self.range2_max,
+            "[{}-{}] overlaps with [{}-{}]",
+            self.range1_min, self.range1_max, self.range2_min, self.range2_max
         )
     }
 }
 
 /// Unexpected server responses
-#[derive(Debug, ThisError)]
-pub enum UnexpectedServerResponse {
+#[derive(Debug, Clone, ThisError)]
+pub enum ServerError {
     #[error("Partial response from multiple-shard request")]
     PartialResponse,
 
@@ -109,167 +106,199 @@ pub enum UnexpectedServerResponse {
     DuplicateShardId(ShardId),
 
     #[error("Overlapping shard ranges: {0}")]
-    OverlappingRanges(Box<OverlappingRangesData>),
+    OverlappingRanges(OverlappingRanges),
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug, Clone)]
+#[error("Shard {shard} error: {err}")]
 pub struct ShardError {
     pub shard: ShardId,
-    pub err: Error,
+    #[source]
+    pub err: Arc<Error>,
 }
 
-#[derive(Debug, ThisError)]
+/// Error error type returned in the public API
+///
+/// Arc-wrapping strategy:
+/// 1. Non-Clone types (tonic::Status, io::Error) → always Arc-wrapped
+/// 2. Large or nested types (ClientError, ServerError, Vec<ShardError>) → Arc-wrapped
+///    to avoid expensive copies across async boundaries and through error propagation
+/// 3. Small Copy types (ShardId, i32) → stored inline
+/// 4. Strings → stored inline (already heap-allocated, 24 bytes is reasonable to copy)
+#[derive(Debug, Clone, ThisError)]
 #[non_exhaustive]
 pub enum Error {
+    /// Arc-wrapped: tonic::Status is not Clone and is large
     #[error("gRPC error: {0}")]
-    TonicStatus(#[source] Box<tonic::Status>),
+    Grpc(#[source] Arc<tonic::Status>),
 
+    /// Arc-wrapped: tonic::transport::Error is not Clone
     #[error("gRPC transport error: {0}")]
-    TonicTransport(#[from] tonic::transport::Error),
+    Transport(Arc<tonic::transport::Error>),
 
+    /// Arc-wrapped: io::Error is not Clone
     #[error("I/O error: {0}")]
-    Io(#[source] io::Error),
+    Io(#[source] Arc<io::Error>),
 
-    #[error("Oxia protocol error: {0}")]
-    OxiaError(#[from] OxiaError),
+    #[error(transparent)]
+    Oxia(#[from] OxiaError),
 
-    #[error("Client error: {0}")]
-    Client(#[from] ClientError),
+    /// Arc-wrapped: contains Strings and can be large
+    #[error(transparent)]
+    Client(#[from] Arc<ClientError>),
 
-    #[error("No service addresses")]
+    /// Arc-wrapped: contains nested data structures
+    #[error(transparent)]
+    Server(Arc<ServerError>),
+
+    #[error("No service addresses configured")]
     NoServiceAddress,
 
-    #[error("Unexpected server response: {0}")]
-    UnexpectedServerResponse(#[from] UnexpectedServerResponse),
-
-    #[error("No shard mapping for {0}")]
+    #[error("No shard mapping for shard {0}")]
     NoShardMapping(ShardId),
 
-    #[error("Custom error: {0}")]
-    Custom(String),
-
-    #[error("Unknown boxed error: {0}")]
-    Boxed(#[from] Box<dyn std::error::Error + Send + Sync>),
-
-    #[error("Multiple shard errors")]
-    MultipleShardError(Vec<ShardError>),
-
-    #[error("Shard error")]
-    ShardError(Box<ShardError>),
-
-    #[error("Request time out")]
-    RequestTimeout {
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
-
-    #[error("Shared error: {0}")]
-    Shared(#[source] Arc<Error>),
-
-    #[error("Cancelled")]
-    Cancelled,
-
-    #[error("Invalid KeyComparisonType value {0}")]
-    InvalidKeyComparisonTypeValue(i32),
-
-    #[error("No shard mapping for key {0}")]
+    #[error("No shard mapping for key '{0}'")]
     NoShardMappingForKey(String),
 
     #[error("No response from server for {0}")]
     NoResponseFromServer(String),
+
+    /// Arc-wrapped: Vec of errors can be arbitrarily large
+    #[error("Multiple shard errors: {}", format_shard_errors(.0))]
+    MultipleShardError(Arc<[ShardError]>),
+
+    #[error("Shard error: {0}")]
+    ShardError(#[from] ShardError),
+
+    #[error("Request timed out")]
+    RequestTimeout,
+
+    #[error("Operation cancelled")]
+    Cancelled,
+
+    #[error("Invalid KeyComparisonType value {0}")]
+    InvalidKeyComparisonType(i32),
+
+    #[error("{0}")]
+    Custom(String),
+
+    /// Arc-wrapped: for arbitrary external errors
+    #[error("Other error: {0}")]
+    Other(Arc<dyn std::error::Error + Send + Sync>),
+}
+
+fn format_shard_errors(errors: &[ShardError]) -> String {
+    if errors.is_empty() {
+        return "no errors".to_string();
+    }
+    if errors.len() == 1 {
+        return format!("shard {}: {}", errors[0].shard, errors[0].err);
+    }
+    format!("{} errors", errors.len())
 }
 
 impl Error {
     /// Whether the error is likely transient and worth retrying
     pub fn is_retryable(&self) -> bool {
-        if let Error::TonicStatus(e) = self
-            && matches!(
-                e.code(),
+        match self {
+            Error::Grpc(status) => matches!(
+                status.code(),
                 tonic::Code::Unavailable | tonic::Code::Unknown | tonic::Code::Internal
-            )
-        {
-            return true;
+            ),
+            Error::Io(err) => matches!(
+                err.kind(),
+                io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::BrokenPipe
+                    | io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::NotConnected
+                    | io::ErrorKind::WouldBlock
+            ),
+            Error::MultipleShardError(errs) => errs.iter().any(|e| e.err.is_retryable()),
+            Error::ShardError(e) => e.err.is_retryable(),
+            Error::RequestTimeout => false,
+            _ => false,
         }
-
-        if let Error::RequestTimeout { .. } = self {
-            return false;
-        }
-
-        if let Some(e) = self.as_io_error() {
-            use io::ErrorKind;
-            return matches!(
-                e.kind(),
-                ErrorKind::ConnectionReset
-                    | ErrorKind::BrokenPipe
-                    | ErrorKind::ConnectionAborted
-                    | ErrorKind::NotConnected
-                    | ErrorKind::WouldBlock
-            );
-        }
-
-        false
     }
 
-    fn as_io_error(&self) -> Option<&io::Error> {
-        if let Error::MultipleShardError(errs) = self {
-            return errs
-                .iter()
-                .find_map(|boxed_error| boxed_error.err.as_io_error());
-        }
-
-        let mut source = Some(self as &dyn std::error::Error);
-        while let Some(err) = source {
-            if let Some(io_err) = err.downcast_ref::<io::Error>() {
-                return Some(io_err);
-            }
-            source = err.source();
-        }
-        None
+    pub fn custom(msg: impl Into<String>) -> Self {
+        Error::Custom(msg.into())
     }
 
-    pub(crate) fn from_tokio_elapsed(e: tokio::time::error::Elapsed) -> Self {
-        Error::RequestTimeout {
-            source: Box::new(e),
-        }
+    pub fn shard_error(shard: ShardId, err: Error) -> Self {
+        Error::ShardError(ShardError {
+            shard,
+            err: err.into(),
+        })
+    }
+
+    pub fn multiple_shard_errors(errors: Vec<ShardError>) -> Self {
+        Error::MultipleShardError(errors.into())
+    }
+
+    pub fn other(err: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Error::Other(Arc::new(err))
     }
 }
 
 impl From<tonic::Status> for Error {
-    fn from(value: tonic::Status) -> Self {
-        let as_timeout = match value.code() {
-            tonic::Code::DeadlineExceeded => true,
-            tonic::Code::Cancelled => value.message() == "Timeout expired",
-            _ => false,
-        };
-        let boxed = Box::new(value);
-        if as_timeout {
-            Error::RequestTimeout { source: boxed }
+    fn from(status: tonic::Status) -> Self {
+        let code = status.code();
+        let is_timeout = code == tonic::Code::DeadlineExceeded
+            || (code == tonic::Code::Cancelled && status.message() == "Timeout expired");
+
+        if is_timeout {
+            Error::RequestTimeout
+        } else if code == tonic::Code::Cancelled {
+            Error::Cancelled
         } else {
-            Error::TonicStatus(boxed)
+            Error::Grpc(Arc::new(status))
         }
     }
 }
 
-// impl From<tokio::time::error::Elapsed> for Error {
-//     fn from(value: tokio::time::error::Elapsed) -> Self {
+impl From<tonic::transport::Error> for Error {
+    fn from(err: tonic::transport::Error) -> Self {
+        Error::Transport(Arc::new(err))
+    }
+}
+
+impl From<io::Error> for Error {
+    fn from(err: io::Error) -> Self {
+        if err.kind() == io::ErrorKind::TimedOut {
+            Error::RequestTimeout
+        } else {
+            Error::Io(Arc::new(err))
+        }
+    }
+}
+
+// impl From<OxiaError> for Error {
+//     fn from(err: OxiaError) -> Self {
+//         Error::Oxia(Arc::new(err))
 //     }
 // }
 
-impl From<io::Error> for Error {
-    fn from(value: io::Error) -> Self {
-        if value.kind() == io::ErrorKind::TimedOut {
-            Error::RequestTimeout {
-                source: Box::new(value),
-            }
-        } else {
-            Error::Io(value)
-        }
+impl From<ClientError> for Error {
+    fn from(err: ClientError) -> Self {
+        Error::Client(Arc::new(err))
     }
 }
 
-impl From<Arc<Error>> for Error {
-    fn from(value: Arc<Error>) -> Self {
-        Error::Shared(value)
+impl From<ServerError> for Error {
+    fn from(err: ServerError) -> Self {
+        Error::Server(Arc::new(err))
+    }
+}
+
+impl From<String> for Error {
+    fn from(s: String) -> Self {
+        Error::Custom(s)
+    }
+}
+
+impl From<&str> for Error {
+    fn from(s: &str) -> Self {
+        Error::Custom(s.to_string())
     }
 }
 
@@ -281,14 +310,14 @@ mod tests {
     #[test_log::test]
     fn test_error_is_retryable_true() {
         let errs = [
-            Error::TonicStatus(tonic::Status::new(tonic::Code::Internal, "").into()),
-            Error::TonicStatus(tonic::Status::new(tonic::Code::Unavailable, "").into()),
-            Error::TonicStatus(tonic::Status::new(tonic::Code::Unknown, "").into()),
-            Error::Io(io::ErrorKind::BrokenPipe.into()),
-            Error::Io(io::ErrorKind::ConnectionAborted.into()),
-            Error::Io(io::ErrorKind::ConnectionReset.into()),
-            Error::Io(io::ErrorKind::NotConnected.into()),
-            Error::Io(io::ErrorKind::WouldBlock.into()),
+            Error::from(tonic::Status::new(tonic::Code::Internal, "")),
+            Error::from(tonic::Status::new(tonic::Code::Unavailable, "")),
+            Error::from(tonic::Status::new(tonic::Code::Unknown, "")),
+            Error::from(io::Error::from(io::ErrorKind::BrokenPipe)),
+            Error::from(io::Error::from(io::ErrorKind::ConnectionAborted)),
+            Error::from(io::Error::from(io::ErrorKind::ConnectionReset)),
+            Error::from(io::Error::from(io::ErrorKind::NotConnected)),
+            Error::from(io::Error::from(io::ErrorKind::WouldBlock)),
         ];
         for e in &errs {
             info!(?e);
@@ -299,18 +328,73 @@ mod tests {
     #[test_log::test]
     fn test_error_is_retryable_false() {
         let errs = [
-            Error::Custom("not retriable".into()),
+            Error::custom("not retriable"),
             Error::NoShardMapping(ShardId::INVALID),
             Error::NoServiceAddress,
-            Error::Client(ClientError::Internal("client error".into())),
-            Error::MultipleShardError(vec![]),
-            Error::RequestTimeout {
-                source: Box::new(io::Error::new(io::ErrorKind::TimedOut, "")),
-            },
+            Error::from(ClientError::Internal("client error".into())),
+            Error::multiple_shard_errors(vec![]),
+            Error::RequestTimeout,
         ];
         for e in &errs {
             info!(?e);
             assert!(!e.is_retryable());
+        }
+    }
+
+    #[test_log::test]
+    fn test_error_cloneable() {
+        // Clone without heap allocation (inline variants)
+        let err1 = Error::custom("test");
+        let cloned1 = err1.clone();
+        assert!(matches!(cloned1, Error::Custom(_)));
+
+        let err2 = Error::NoServiceAddress;
+        let _cloned2 = err2.clone();
+
+        let io_err = Error::from(io::Error::from(io::ErrorKind::NotFound));
+        let cloned_io = io_err.clone();
+        if let (Error::Io(arc1), Error::Io(arc2)) = (&io_err, &cloned_io) {
+            assert!(Arc::ptr_eq(arc1, arc2));
+        }
+
+        // Nested errors are cheap to clone
+        let nested = Error::shard_error(ShardId::new(1), Error::custom("nested"));
+        let cloned_nested = nested.clone();
+        if let (
+            Error::ShardError(ShardError { err: s1, .. }),
+            Error::ShardError(ShardError { err: s2, .. }),
+        ) = (&nested, &cloned_nested)
+        {
+            assert!(Arc::ptr_eq(s1, s2));
+        }
+    }
+
+    #[test_log::test]
+    fn test_error_conversions() {
+        let _: Error = "string slice".into();
+        let _: Error = String::from("owned string").into();
+        let _: Error = io::Error::from(io::ErrorKind::Other).into();
+        let _: Error = OxiaError::KeyNotFound.into();
+        let _: Error = ClientError::Internal("test".into()).into();
+    }
+
+    #[test_log::test]
+    fn test_shard_error_helper() {
+        let inner = Error::custom("inner error");
+        let shard_err = Error::shard_error(ShardId::new(42), inner);
+        assert!(matches!(shard_err, Error::ShardError { .. }));
+    }
+
+    #[test_log::test]
+    fn test_other_error() {
+        let io_err = io::Error::from(io::ErrorKind::Other);
+        let err = Error::other(io_err);
+        assert!(matches!(err, Error::Other(_)));
+
+        // Verify cloning works and shares Arc
+        let cloned = err.clone();
+        if let (Error::Other(arc1), Error::Other(arc2)) = (&err, &cloned) {
+            assert!(Arc::ptr_eq(arc1, arc2));
         }
     }
 }

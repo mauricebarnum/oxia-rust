@@ -1023,14 +1023,14 @@ impl Client {
         let mut errs = Vec::new();
         while let Some(shard_result) = result_stream.next().await {
             match shard_result {
-                Err(Error::ShardError(e)) => errs.push(*e),
+                Err(Error::ShardError(e)) => errs.push(e),
                 Err(_) => return shard_result,
                 Ok(()) => (),
             }
         }
 
         if !errs.is_empty() {
-            return Err(Error::MultipleShardError(errs));
+            return Err(Error::MultipleShardError(errs.into()));
         }
 
         Ok(())

@@ -718,7 +718,7 @@ impl Client {
             },
             Failing {
                 keys_iter: std::vec::IntoIter<Arc<str>>,
-                err: Arc<Error>,
+                err: Error,
             },
         }
 
@@ -732,7 +732,7 @@ impl Client {
                 },
                 Some(Err(status)) => State::Failing {
                     keys_iter,
-                    err: Arc::<Error>::new(status.into()),
+                    err: status.into(),
                 },
                 None => State::Failing {
                     keys_iter,
@@ -758,8 +758,7 @@ impl Client {
                                 return None;
                             }
                             // gets exhausted early; fail remaining keys
-                            let err: Arc<Error> =
-                                no_response_error(&context.leader, context.shard_id).into();
+                            let err = no_response_error(&context.leader, context.shard_id);
                             state = State::Failing { keys_iter, err };
                             continue;
                         };
@@ -785,7 +784,7 @@ impl Client {
                     }
                     State::Failing { mut keys_iter, err } => {
                         let key = keys_iter.next()?;
-                        let failed = batch_get::ResponseItem::failed(key, err.clone().into());
+                        let failed = batch_get::ResponseItem::failed(key, err.clone());
                         return Some((failed, State::Failing { keys_iter, err }));
                     }
                 };
@@ -1014,8 +1013,7 @@ trait ShardMapperBuilder {
 }
 
 mod int32_hash_range {
-    use crate::ShardId;
-    use crate::UnexpectedServerResponse;
+    use crate::{OverlappingRanges, ServerError, ShardId};
 
     use super::{Result, ShardMapper, ShardMapperBuilder};
     use mauricebarnum_oxia_common::proto as oxia_proto;
@@ -1046,10 +1044,10 @@ mod int32_hash_range {
 
         fn new_builder(n: &oxia_proto::NamespaceShardsAssignment) -> Result<Self::Builder> {
             let r = oxia_proto::ShardKeyRouter::try_from(n.shard_key_router)
-                .map_err(|e| UnexpectedServerResponse::BadShardKeyRouter(e.to_string()))?;
+                .map_err(|e| ServerError::BadShardKeyRouter(e.to_string()))?;
 
             if r != oxia_proto::ShardKeyRouter::Xxhash3 {
-                return Err(UnexpectedServerResponse::BadShardKeyRouter(format!(
+                return Err(ServerError::BadShardKeyRouter(format!(
                     "unsupported shard_key_router {r:?}"
                 ))
                 .into());
@@ -1086,7 +1084,7 @@ mod int32_hash_range {
             let b = a
                 .shard_boundaries
                 .as_ref()
-                .ok_or(UnexpectedServerResponse::NoShardBoundaries)?;
+                .ok_or(ServerError::NoShardBoundaries)?;
 
             match b {
                 Int32HashRange(r) => Ok(r),
@@ -1105,20 +1103,18 @@ mod int32_hash_range {
 
             for r in &self.ranges[1..] {
                 if r.min <= p.max {
-                    return Err(UnexpectedServerResponse::OverlappingRanges(Box::new(
-                        crate::OverlappingRangesData {
-                            range1_min: p.min,
-                            range1_max: p.max,
-                            range2_min: r.min,
-                            range2_max: r.max,
-                        },
-                    ))
-                    .into());
+                    let overlap = OverlappingRanges {
+                        range1_min: p.min,
+                        range1_max: p.max,
+                        range2_min: r.min,
+                        range2_max: r.max,
+                    };
+                    return Err(ServerError::OverlappingRanges(overlap).into());
                 }
                 p = r;
 
                 if !seen.insert(r.id) {
-                    return Err(UnexpectedServerResponse::DuplicateShardId(r.id).into());
+                    return Err(ServerError::DuplicateShardId(r.id).into());
                 }
             }
 
@@ -1322,7 +1318,7 @@ struct ShardAssignmentTask {
     config: Arc<config::Config>,
     channel_pool: ChannelPool,
     shards: Arc<Mutex<searchable::Shards>>,
-    changed: watch::Sender<std::result::Result<(), Arc<Error>>>,
+    changed: watch::Sender<std::result::Result<(), Error>>,
 }
 
 impl ShardAssignmentTask {
@@ -1330,7 +1326,7 @@ impl ShardAssignmentTask {
         config: Arc<config::Config>,
         channel_pool: ChannelPool,
         shards: Arc<Mutex<searchable::Shards>>,
-        changed: watch::Sender<std::result::Result<(), Arc<Error>>>,
+        changed: watch::Sender<std::result::Result<(), Error>>,
     ) -> Self {
         Self {
             config,
@@ -1379,11 +1375,11 @@ impl ShardAssignmentTask {
                         // than clone it
                         let a = std::mem::take(a);
                         let pr = self.process_assignments(a).await;
-                        let _ = self.changed.send(pr.map_err(Arc::new));
+                        let _ = self.changed.send(pr);
                     }
                 }
                 Err(e) => {
-                    let _ = self.changed.send(Err(Arc::new(e.into())));
+                    let _ = self.changed.send(Err(e.into()));
                 }
             }
         }
@@ -1419,7 +1415,7 @@ pub(crate) struct Manager {
     shards: Arc<Mutex<searchable::Shards>>,
     shutdown_requested: Arc<AtomicBool>,
     task_handle: JoinHandle<()>,
-    changed: watch::Receiver<std::result::Result<(), Arc<Error>>>,
+    changed: watch::Receiver<std::result::Result<(), Error>>,
 }
 
 impl Manager {
@@ -1476,7 +1472,7 @@ impl Manager {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn recv_changed(&self) -> watch::Receiver<std::result::Result<(), Arc<Error>>> {
+    pub(crate) fn recv_changed(&self) -> watch::Receiver<std::result::Result<(), Error>> {
         self.changed.clone()
     }
 
@@ -1487,7 +1483,7 @@ impl Manager {
         shutdown_requested: &Arc<AtomicBool>,
     ) -> Result<(
         JoinHandle<()>,
-        watch::Receiver<std::result::Result<(), Arc<Error>>>,
+        watch::Receiver<std::result::Result<(), Error>>,
     )> {
         let (tx, mut rx) = watch::channel(Ok(()));
         // Consume the initial value
@@ -1502,10 +1498,10 @@ impl Manager {
         });
 
         // Wait for the notification that the task has started up
-        rx.changed().await.map_err(|e| Error::Boxed(Box::new(e)))?;
-        rx.borrow_and_update()
-            .as_ref()
-            .map_err(|e| Error::Shared(e.clone()))?;
+        rx.changed().await.map_err(Error::other)?;
+        if let Err(e) = rx.borrow_and_update().as_ref() {
+            return Err(e.to_owned());
+        }
         Ok((handle, rx))
     }
 }
