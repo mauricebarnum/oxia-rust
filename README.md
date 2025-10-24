@@ -4,9 +4,11 @@ This contains an incomplete implementation of an [Oxia](https://github.com/oxia-
 
 Grpc support is based upon [tonic](https://github.com/hyperium/tonic).
 
-Support for all of the Oxia service is incomplete,
+Support for all of the Oxia service is incomplete.
 
-# Layout
+# Implementation notes
+
+## Layout
 
 * oxia-bin-util - testing support
   * internal crate
@@ -27,6 +29,35 @@ Support for all of the Oxia service is incomplete,
   * implemented commands: get, put, delete,
 list (keys), range scan, range delete, notifications
   * not yet: batch write, write secondary index
+ 
+## Trait object versus concrete interface
+
+`Client` is a concrete type, not a trait object, so API calls are direct.  They are also generic:
+
+```rust
+    pub async fn put(
+        &self,
+        key: impl Into<String>,
+        value: impl Into<Bytes>,
+    ) -> Result<PutResponse> {
+        self.put_with_options(key, value, PutOptions::default())
+            .await
+    }
+```
+
+This allows the caller more flexibility on the types used for "string" and "bytes" paramters, and permits the implementation freedom with resource management.  In the example above, both the `key` and `value` content will need to be owned so it can be moved into a GRPC request.
+
+Direct calls are more efficient, but given that the client is primarily a GRPC façade, the overhead is minor.
+
+The `x / x_with_options` API pattern is (or can be) zero cost abstractions as direct calls where using a trait object would add one, maybe two, extra function calls.
+
+Downsides:
+   * No ABI:  any changes to `Client` will require recompiling callers.  In the Rust ecosystem with poor support for ABI contracts, this doesn't seem to be a major concern outside of compile time.
+   * "Plugin" model is the user's problem:  in the case where an application would like to switch implementations, such as a mock client or one with custom instrumentation, the burden is on the caller to implement the necessary wrappers.
+
+Switching to a trait interface should be doable with minimal changes to both the implementation and the callers.  In the "this is an experiment" nature of the current code base, it made more sense to explore the generic decision space ("impl Into<T>"? "impl AsRef<T>"? concrete param? etc).  I'm considering putting in a test that will validate at compile time that the `Client` interface remains close to object safe.  I haven't done it yet because I didn't want to deal with the maintenance overhead of the test, but the API is stable enough now that it shouldn't be a problem going forward.  Maybe an LLM can generate it for me without making too much of a mess.
+
+
   
 # TODO
 
@@ -39,6 +70,7 @@ list (keys), range scan, range delete, notifications
         1. `shell`: add tab completion
         1. create, stop, list
         1. `put`: support secondary index
+1. Notifications: implement optional reconnect to shards when streams close
 1. instrument client library
 1. collect metrics
 1. add more tracing
