@@ -272,12 +272,6 @@ impl From<io::Error> for Error {
     }
 }
 
-// impl From<OxiaError> for Error {
-//     fn from(err: OxiaError) -> Self {
-//         Error::Oxia(Arc::new(err))
-//     }
-// }
-
 impl From<ClientError> for Error {
     fn from(err: ClientError) -> Self {
         Error::Client(Arc::new(err))
@@ -287,18 +281,6 @@ impl From<ClientError> for Error {
 impl From<ServerError> for Error {
     fn from(err: ServerError) -> Self {
         Error::Server(Arc::new(err))
-    }
-}
-
-impl From<String> for Error {
-    fn from(s: String) -> Self {
-        Error::Custom(s)
-    }
-}
-
-impl From<&str> for Error {
-    fn from(s: &str) -> Self {
-        Error::Custom(s.to_string())
     }
 }
 
@@ -371,8 +353,6 @@ mod tests {
 
     #[test_log::test]
     fn test_error_conversions() {
-        let _: Error = "string slice".into();
-        let _: Error = String::from("owned string").into();
         let _: Error = io::Error::from(io::ErrorKind::Other).into();
         let _: Error = OxiaError::KeyNotFound.into();
         let _: Error = ClientError::Internal("test".into()).into();
