@@ -174,7 +174,7 @@ mod tests {
         .await;
 
         match r {
-            Err(Error::RequestTimeout { .. }) => Ok(()),
+            Err(Error::RequestTimeout) => Ok(()),
             _ => Err(Error::Custom(format!("unexpected result {r:?}"))),
         }
     }
