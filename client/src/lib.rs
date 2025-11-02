@@ -731,7 +731,7 @@ where
     }
 
     // Or... our time budget was consumed, and we're done
-    if matches!(&result, Err(Error::RequestTimeout { .. })) {
+    if matches!(&result, Err(Error::RequestTimeout)) {
         return result;
     }
 

@@ -736,13 +736,10 @@ impl Client {
                 },
                 None => State::Failing {
                     keys_iter,
-                    err: no_response_error(&context.leader, context.shard_id).into(),
+                    err: no_response_error(&context.leader, context.shard_id),
                 },
             },
-            Err(err) => State::Failing {
-                keys_iter,
-                err: err.into(),
-            },
+            Err(err) => State::Failing { keys_iter, err },
         };
 
         futures::stream::unfold(state, move |mut state| async move {

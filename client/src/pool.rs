@@ -202,7 +202,7 @@ impl<F: ChannelFactory> ChannelPool<F> {
                             }
 
                             // Now map the notification back to a cloneable Result
-                            notification.map_err(Error::from)
+                            notification
                         } else {
                             // Our operation was cancelled, so don't notify and return an error.
                             // Waiting for the new operation is likely useless: we got caoncelled for a
@@ -222,7 +222,7 @@ impl<F: ChannelFactory> ChannelPool<F> {
 
         // Already there, we're done and don't need the write lock
         if let Some(item) = self.try_get(target).await {
-            return item.map_err(Error::from);
+            return item;
         }
 
         let state = &self.inner.state;
@@ -235,7 +235,7 @@ impl<F: ChannelFactory> ChannelPool<F> {
                 Item::Pending(tx) => {
                     let rx = tx.subscribe();
                     drop(guard); // allow pending operation to complete
-                    Self::await_pending_op(rx).await.map_err(Error::from)
+                    Self::await_pending_op(rx).await
                 }
             };
         }
