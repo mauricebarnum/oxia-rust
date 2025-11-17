@@ -11,7 +11,7 @@ tokio-stream = "0.1.17"
 tonic = { version = "0.14.2", features = ["gzip", "channel", "zstd"] }
 prost = "0.14.1" # If using Protobuf
 thiserror = "2.0.17"
-bytes = "1.10.1"
+bytes = "1.11.0"
 futures-util = "0.3.31"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = [
