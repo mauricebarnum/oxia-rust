@@ -527,7 +527,7 @@ impl Client {
                     .sequence_key_deltas
                     .as_ref()
                     .map_or_else(Vec::new, |x| (*x).to_vec()),
-                secondary_indexes: SecondaryIndex::into_proto_vec(opts.secondary_indexes.clone()),
+                secondary_indexes: SecondaryIndex::to_proto(opts.secondary_indexes.clone()),
             }],
             deletes: vec![],
             delete_ranges: vec![],

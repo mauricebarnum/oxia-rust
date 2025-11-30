@@ -79,7 +79,7 @@ impl SecondaryIndex {
         self.0.clone()
     }
 
-    pub(crate) fn into_proto_vec(
+    pub(crate) fn to_proto(
         mut si: Option<Arc<[SecondaryIndex]>>,
     ) -> Vec<oxia_proto::SecondaryIndex> {
         match &mut si {
