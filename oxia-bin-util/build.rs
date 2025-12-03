@@ -48,8 +48,7 @@ fn get_oxia_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
 }
 
 fn build_oxia_cli() -> io::Result<OsString> {
-    const OXIA_MOD: &str = "github.com/oxia-db/oxia";
-    let tools_src_dir = Path::new("go");
+    let tools_src_dir = Path::new("../ext/oxia/cmd");
     let vendor_root = tools_src_dir.join("vendor");
 
     let oxia_dir = get_oxia_dir().unwrap();
@@ -97,7 +96,6 @@ fn build_oxia_cli() -> io::Result<OsString> {
             .arg("-mod=vendor")
             .arg("-o")
             .arg(&oxia_path_str)
-            .arg(format!("./vendor/{OXIA_MOD}/cmd"))
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .status()
