@@ -580,6 +580,7 @@ impl Client {
             start_inclusive: start_inclusive.to_string(),
             end_exclusive: end_exclusive.to_string(),
             secondary_index_name: opts.secondary_index_name.clone(),
+            include_internal_keys: true,
         }
     }
 
@@ -606,6 +607,7 @@ impl Client {
             start_inclusive: start_inclusive.to_string(),
             end_exclusive: effective_end,
             secondary_index_name: opts.secondary_index_name.clone(),
+            include_internal_keys: true,
         }
     }
 

@@ -13,12 +13,8 @@
 // limitations under the License.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    const PROTO_DIR: &str = "proto";
-    const PROTO_FILES: &[&str] = &[
-        "proto/client.proto",
-        // "proto/replication.proto",
-        // "proto/storage.proto",
-    ];
+    const PROTO_DIR: &str = "../ext/oxia/common/proto";
+    const PROTO_FILES: &[&str] = &["client.proto"];
 
     // Configure tonic to use Bytes for all protobuf bytes fields
     tonic_prost_build::configure()
