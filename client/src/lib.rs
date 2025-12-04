@@ -385,6 +385,7 @@ pub struct ListOptions {
     sort: bool,
     partial_ok: bool,
     partition_key: Option<String>,
+    include_internal_keys: bool,
 }
 
 impl ListOptions {
@@ -421,6 +422,11 @@ impl ListOptions {
         self.partition_key = Some(value.into());
         self
     }
+
+    pub fn include_internal_keys(&mut self, value: bool) -> &mut Self {
+        self.include_internal_keys = value;
+        self
+    }
 }
 
 impl Default for ListOptions {
@@ -431,6 +437,7 @@ impl Default for ListOptions {
             sort: true,
             partial_ok: true,
             partition_key: None,
+            include_internal_keys: false,
         }
     }
 }
@@ -483,6 +490,7 @@ pub struct RangeScanOptions {
     sort: bool,
     partial_ok: bool,
     partition_key: Option<String>,
+    include_internal_keys: bool,
 }
 
 impl RangeScanOptions {
@@ -519,6 +527,11 @@ impl RangeScanOptions {
         self.partition_key = Some(value.into());
         self
     }
+
+    pub fn include_internal_keys(&mut self, value: bool) -> &mut Self {
+        self.include_internal_keys = value;
+        self
+    }
 }
 
 impl Default for RangeScanOptions {
@@ -529,6 +542,7 @@ impl Default for RangeScanOptions {
             sort: true,
             partial_ok: false,
             partition_key: None,
+            include_internal_keys: false,
         }
     }
 }

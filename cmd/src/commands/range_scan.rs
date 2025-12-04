@@ -36,6 +36,10 @@ pub struct RangeScanCommand {
     /// Secondary index key
     #[arg(short, long)]
     index: Option<String>,
+
+    /// Include internal keys
+    #[arg(short('k'), long)]
+    include_internal_keys: bool,
 }
 
 #[async_trait::async_trait]
@@ -50,6 +54,8 @@ impl CommandRunnable for RangeScanCommand {
             if let Some(ik) = self.index {
                 opts.secondary_index_name(ik);
             }
+
+            opts.include_internal_keys(self.include_internal_keys);
         });
         let key_min = self.key_min;
         let key_max = self.key_max;
