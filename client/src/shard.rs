@@ -377,7 +377,7 @@ fn no_response_error(server: &str, shard_id: ShardId) -> Error {
     Error::NoResponseFromServer(msg)
 }
 
-const INTERNAL_KEY_PREFIX: &str = "__oxia/";
+// const INTERNAL_KEY_PREFIX: &str = "__oxia/";
 
 /// Helper method to create a fully-formed tonic request with metadata
 impl Client {
@@ -580,7 +580,7 @@ impl Client {
             start_inclusive: start_inclusive.to_string(),
             end_exclusive: end_exclusive.to_string(),
             secondary_index_name: opts.secondary_index_name.clone(),
-            include_internal_keys: true,
+            include_internal_keys: opts.include_internal_keys,
         }
     }
 
@@ -593,21 +593,12 @@ impl Client {
     ) -> oxia_proto::RangeScanRequest {
         let data = &self.data;
 
-        // If end key is empty, use the internal key prefix to scan all keys
-        let effective_end = {
-            if end_exclusive.is_empty() {
-                INTERNAL_KEY_PREFIX.to_string()
-            } else {
-                end_exclusive.to_string()
-            }
-        };
-
         oxia_proto::RangeScanRequest {
             shard: Some(data.shard_id.0),
             start_inclusive: start_inclusive.to_string(),
-            end_exclusive: effective_end,
+            end_exclusive: end_exclusive.to_string(),
             secondary_index_name: opts.secondary_index_name.clone(),
-            include_internal_keys: true,
+            include_internal_keys: opts.include_internal_keys,
         }
     }
 
