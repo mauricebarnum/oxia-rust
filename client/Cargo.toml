@@ -13,8 +13,8 @@ prost = "0.14.1" # If using Protobuf
 thiserror = "2.0.17"
 bytes = "1.11.0"
 futures-util = "0.3.31"
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.20", features = [
+tracing = "0.1.43"
+tracing-subscriber = { version = "0.3.22", features = [
     "env-filter",
     "fmt",
     "registry",
@@ -32,7 +32,7 @@ backon = "1.6.0"
 [dev-dependencies]
 chrono = "0.4.42"
 socket2 = "0.6.1"
-test-log = { version = "0.2.18", features = ["trace", "color"] }
+test-log = { version = "0.2.19", features = ["trace", "color"] }
 oxia-bin-util = { path = "../oxia-bin-util" }
 tempfile = "3.23.0"
 anyhow = "1.0.100"
