@@ -1,0 +1,60 @@
+#!/bin/bash
+
+set -euo pipefail
+set -x
+
+DEFAULT_VERSION=v0.15.1
+VERSION="${1-${DEFAULT_VERSION}}"
+
+OXIA_DIR="oxia"
+OXIA_SUBDIRS="cmd common oxia oxiad"
+
+# Temporary location
+# ------------------
+#
+tmp_dir="$(mktemp -d)"
+cleanup() {
+	rm -rf "${tmp_dir}"
+}
+trap cleanup EXIT
+
+OXIA_TMP="${tmp_dir}/oxia"
+
+git clone --filter=blob:none -n https://github.com/oxia-db/oxia "${OXIA_TMP}"
+git -C "${OXIA_TMP}" config core.sparseCheckout true
+git -C "${OXIA_TMP}" sparse-checkout set ${OXIA_SUBDIRS}
+git -C "${OXIA_TMP}" checkout -q "${VERSION}"
+(
+	cd "${OXIA_TMP}/cmd"
+	go mod vendor -v
+	GOPROXY=off go test -mod=vendor -v
+	go clean
+)
+
+if [ -d "${OXIA_DIR}" ]; then
+	if ! git diff --quiet HEAD -- "${OXIA_DIR}" || ! git diff --cached --quiet -- "${OXIA_DIR}"; then
+		echo "Error: ${OXIA_DIR} has uncommitted changes. Commit or stash them first."
+		exit 1
+	fi
+fi
+
+rm -rf "${OXIA_DIR}"
+mkdir -p "${OXIA_DIR}"
+
+for subdir in ${OXIA_SUBDIRS}; do
+	cp -r "${OXIA_TMP}/${subdir}" "${OXIA_DIR}/"
+done
+
+cat >"${OXIA_DIR}/.gitignore" <<'EOF'
+cmd/*/oxia
+cmd/*/*/oxia
+*.exe
+*.test
+EOF
+
+git -C "${OXIA_TMP}" rev-parse HEAD >oxia.version
+git add oxia.version "${OXIA_DIR}/"
+
+echo "Successfully updated ${OXIA_DIR} to ${VERSION}"
+echo "Review changes with: git status"
+echo "Commit with: git commit -m 'Update oxia to ${VERSION}'"

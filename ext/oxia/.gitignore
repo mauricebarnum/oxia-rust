@@ -1,4 +1,3 @@
-# Build artifacts
 cmd/*/oxia
 cmd/*/*/oxia
 *.exe
