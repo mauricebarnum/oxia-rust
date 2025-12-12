@@ -70,8 +70,8 @@ RUN rustup toolchain install --profile minimal --allow-downgrade nightly --compo
 
 # ===== Install cargo-check-external-types which requires a specific nightly, see =====
 # https://github.com/awslabs/cargo-check-external-types?tab=readme-ov-file#how-to-use
-RUN rustup toolchain install nightly-2025-08-06 --profile minimal && \
-    cargo +nightly-2025-08-06 install cargo-check-external-types
+RUN rustup toolchain install nightly-2025-10-18 --profile minimal && \
+    cargo +nightly-2025-10-18 install cargo-check-external-types
 
 # ===== Install sccache =====
 RUN case "${TARGETARCH}" in \
