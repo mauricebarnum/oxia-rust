@@ -20,7 +20,7 @@ use std::process::Stdio;
 #[test]
 fn test_allowed_symbols() {
     let cmd = "cargo";
-    let args = ["+nightly-2025-08-06", "check-external-types"];
+    let args = ["+nightly-2025-10-18", "check-external-types"];
     let status = Command::new(cmd)
         .args(args)
         .stdout(Stdio::inherit())
