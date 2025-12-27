@@ -26,7 +26,6 @@ use tracing::info;
 mod common;
 use common::TestResultExt;
 use common::non_zero;
-use common::trace_err;
 
 const TEST_TIMEOUT_SECS: u64 = 5;
 

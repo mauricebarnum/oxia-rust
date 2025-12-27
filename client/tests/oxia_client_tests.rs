@@ -43,7 +43,6 @@ use mauricebarnum_oxia_client::config;
 mod common;
 use common::TestResultExt;
 use common::non_zero;
-use common::trace_err;
 use tokio::time::timeout;
 
 /// Helper function to create a test client
