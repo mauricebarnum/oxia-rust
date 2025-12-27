@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// tests/common/mod.rs
-
 use mauricebarnum_oxia_client::errors::Error as ClientError;
 use mauricebarnum_oxia_client::{Client, config};
 use std::net::TcpStream;
@@ -53,11 +51,10 @@ impl<T, E: std::fmt::Debug> TestResultExt<T> for Result<T, E> {
     }
 }
 
+#[macro_export]
 macro_rules! trace_err {
     ($expr:expr) => {{ $expr.trace_err_at(module_path!(), file!(), line!()) }};
 }
-
-pub(crate) use trace_err; // Make it available to other modules in the crate
 
 pub fn oxia_cli_path() -> &'static Path {
     let p = oxia_bin_util::path();

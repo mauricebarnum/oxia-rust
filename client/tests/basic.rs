@@ -24,7 +24,6 @@ use tracing::info;
 mod common;
 use common::TestResultExt;
 use common::non_zero;
-use common::trace_err;
 
 const SESSION_TIMEOUT_SECS: u64 = 2;
 const RETRY_TIMEOUT_MSECS: u64 = 23;
