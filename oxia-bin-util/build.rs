@@ -1,4 +1,4 @@
-// Copyright 2025 Maurice S. Barnum
+// Copyright 2025-2026 Maurice S. Barnum
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -62,7 +62,6 @@ fn build_oxia_cli() -> io::Result<OsString> {
     println!("cargo:rerun-if-changed={}", vendor_root.display());
     println!("cargo:rerun-if-changed={go_mod}");
     println!("cargo:rerun-if-changed={go_sum}");
-    println!("cargo:rerun-if-changed={oxia_path_str}");
 
     // Compute a stable content hash of all relevant Go sources + go.mod/go.sum
     let mut hasher = Sha256::new();
@@ -116,25 +115,33 @@ fn find_oxia_in_path() -> Option<PathBuf> {
 }
 
 fn main() -> process::ExitCode {
-    let oxia_bin = env::var_os("OXIA_BIN")
-        .or_else(|| {
-            if env::var_os("OXIA_BIN_IGNORE_PATH").is_some() {
-                None
-            } else {
-                find_oxia_in_path().map(PathBuf::into)
-            }
-        })
-        .or_else(|| Some(build_oxia_cli().unwrap()));
+    println!("cargo:rerun-if-env-changed=OXIA_BIN");
+    println!("cargo:rerun-if-env-changed=OXIA_BIN_IGNORE_PATH");
 
-    let Some(oxia_bin) = oxia_bin else {
-        return ExitCode::FAILURE;
+    let oxia_bin = if let Some(path) = env::var_os("OXIA_BIN") {
+        if !PathBuf::from(&path).is_executable() {
+            eprintln!(
+                "Error: OXIA_BIN={} is not an executable file",
+                path.display()
+            );
+            return ExitCode::FAILURE;
+        }
+        path
+    } else {
+        let do_search = env::var("OXIA_BIN_IGNORE_PATH")
+            .map(|v| v.trim().to_ascii_lowercase())
+            .map(|v| matches!(v.as_str(), "" | "0" | "false" | "no" | "off"))
+            .unwrap_or(true);
+
+        if do_search && let Some(path) = find_oxia_in_path() {
+            path.into()
+        } else {
+            build_oxia_cli().unwrap()
+        }
     };
 
-    println!("cargo:rerun-if-env-changed=OXIA_BIN_PATH");
-    println!("cargo:rerun-if-env-changed=OXIA_BIN_IGNORE_PATH");
-    println!("cargo:rerun-if-env-changed=PATH");
     println!("cargo:rustc-env=OXIA_BIN_PATH={}", oxia_bin.display());
-    println!("cargo:warning=OXIA_BIN_PATH={}", oxia_bin.display());
+    eprintln!("OXIA_BIN_PATH={}", oxia_bin.display());
 
     ExitCode::SUCCESS
 }
