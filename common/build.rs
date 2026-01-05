@@ -1,4 +1,4 @@
-// Copyright 2025 Maurice S. Barnum
+// Copyright 2025-2026 Maurice S. Barnum
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -11,6 +11,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     const PROTO_DIR: &str = "../ext/oxia/common/proto";
@@ -27,8 +29,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .compile_protos(PROTO_FILES, &[PROTO_DIR])?;
 
     // Recompile if proto files change
+    let proto_dir = Path::new(PROTO_DIR);
     for file in PROTO_FILES {
-        println!("cargo:rerun-if-changed={file}");
+        let p = Path::join(proto_dir, file);
+        println!("cargo:rerun-if-changed={}", p.display());
     }
 
     println!("cargo:rerun-if-changed={PROTO_DIR}");
