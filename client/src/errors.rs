@@ -1,4 +1,4 @@
-// Copyright 2025 Maurice S. Barnum
+// Copyright 2025-2026 Maurice S. Barnum
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -201,6 +201,9 @@ impl Error {
     /// Whether the error is likely transient and worth retrying
     pub fn is_retryable(&self) -> bool {
         match self {
+            // Transport errors (connection refused, DNS failures, etc.) are retryable
+            // as the server may come back online
+            Error::Transport(_) => true,
             Error::Grpc(status) => matches!(
                 status.code(),
                 tonic::Code::Unavailable | tonic::Code::Unknown | tonic::Code::Internal
@@ -216,6 +219,25 @@ impl Error {
             Error::MultipleShardError(errs) => errs.iter().any(|e| e.err.is_retryable()),
             Error::ShardError(e) => e.err.is_retryable(),
             Error::RequestTimeout => false,
+            _ => false,
+        }
+    }
+
+    /// Whether the error indicates a connection failure that should invalidate cached channels.
+    /// This is used to trigger channel reconnection on the next request.
+    pub fn is_connection_error(&self) -> bool {
+        match self {
+            Error::Transport(_) => true,
+            Error::Grpc(status) => status.code() == tonic::Code::Unavailable,
+            Error::Io(err) => matches!(
+                err.kind(),
+                io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::BrokenPipe
+                    | io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::NotConnected
+            ),
+            Error::MultipleShardError(errs) => errs.iter().any(|e| e.err.is_connection_error()),
+            Error::ShardError(e) => e.err.is_connection_error(),
             _ => false,
         }
     }

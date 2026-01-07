@@ -1,4 +1,4 @@
-// Copyright 2025 Maurice S. Barnum
+// Copyright 2025-2026 Maurice S. Barnum
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -128,7 +128,7 @@ impl TestServerArgs {
             .arg(self.nshards.get().to_string())
             .stdin(Stdio::null());
         let child = trace_err!(cmd.spawn())?;
-        trace_err!(wait_for_ready(&self.service_addr, 30_000))?;
+        trace_err!(wait_for_ready(&self.service_addr, 30))?;
         Ok(child)
     }
 }
