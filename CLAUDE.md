@@ -89,3 +89,9 @@ Clippy is strict: all + pedantic lints are denied with exceptions for:
 ## New Files
 
 Add Apache 2.0 license headers to new `.rs` files. Pre-commit hook handles this automatically using `.license-header.txt`.
+
+## Github integration
+
+- Always use the prefix `claude-` when creating a branch
+- Use `--force-with-lease --force-if-includes` if a force push is required. Otherwise, fail and require a developer to do the push.
+- Run clippy and tests before pushing
