@@ -1,4 +1,4 @@
-// Copyright 2025 Maurice S. Barnum
+// Copyright 2025-2026 Maurice S. Barnum
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -269,27 +269,29 @@ impl Drop for Session {
 #[derive(Debug)]
 struct ClientData {
     config: Arc<config::Config>,
-    grpc: GrpcClient,
+    channel_pool: ChannelPool,
     shard_id: ShardId,
-    #[allow(dead_code)] // this is actually used
     leader: String,
     meta: tonic::metadata::MetadataMap,
+    /// Cached gRPC client. Set to None when invalidated, lazily populated on first use.
+    grpc: tokio::sync::RwLock<Option<GrpcClient>>,
 }
 
 impl ClientData {
-    pub fn new(
+    fn new(
         config: Arc<config::Config>,
-        grpc: GrpcClient,
+        channel_pool: ChannelPool,
         shard_id: ShardId,
         leader: impl Into<String>,
         meta: tonic::metadata::MetadataMap,
     ) -> Self {
         Self {
             config,
-            grpc,
+            channel_pool,
             shard_id,
             leader: leader.into(),
             meta,
+            grpc: tokio::sync::RwLock::new(None),
         }
     }
 }
@@ -298,6 +300,60 @@ impl ClientData {
 pub struct Client {
     data: Arc<ClientData>,
     session: Arc<OnceCell<Option<Session>>>,
+}
+
+impl Client {
+    /// Get the cached gRPC client, or create one from the pool if not cached.
+    async fn get_grpc_client(&self) -> crate::Result<GrpcClient> {
+        // Fast path: check if we have a cached client
+        {
+            let guard = self.data.grpc.read().await;
+            if let Some(ref client) = *guard {
+                return Ok(client.clone());
+            }
+        }
+
+        // Slow path: need to create a new client
+        let mut guard = self.data.grpc.write().await;
+        // Double-check after acquiring write lock
+        if let Some(ref client) = *guard {
+            return Ok(client.clone());
+        }
+
+        // Create new client from pool
+        let url = format!("http://{}", self.data.leader);
+        let channel = self.data.channel_pool.get(&url).await?;
+        let client = GrpcClient::new(channel);
+        *guard = Some(client.clone());
+        Ok(client)
+    }
+
+    /// Invalidate the cached gRPC client for this shard's leader.
+    async fn invalidate_channel(&self) {
+        {
+            let mut guard = self.data.grpc.write().await;
+            *guard = None;
+        }
+        let url = format!("http://{}", self.data.leader);
+        self.data.channel_pool.remove(&url).await;
+    }
+
+    /// Execute an RPC with automatic channel invalidation on connection errors.
+    async fn rpc<T, F, Fut>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(GrpcClient) -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<T, tonic::Status>>,
+    {
+        let client = self.get_grpc_client().await?;
+        let result: Result<T> = f(client).await.map_err(Into::into);
+        if let Err(ref e) = result
+            && e.is_connection_error()
+        {
+            debug!(leader = %self.data.leader, "connection error, invalidating channel");
+            self.invalidate_channel().await;
+        }
+        result
+    }
 }
 
 /// Enum to indicate the expected type of write response
@@ -379,7 +435,6 @@ fn no_response_error(server: &str, shard_id: ShardId) -> Error {
 
 // const INTERNAL_KEY_PREFIX: &str = "__oxia/";
 
-/// Helper method to create a fully-formed tonic request with metadata
 impl Client {
     fn start_heartbeat(&self, session_id: i64) -> JoinHandle<()> {
         let session_timeout_ms = self.data.config.session_timeout().as_millis();
@@ -390,16 +445,14 @@ impl Client {
             u32::MAX
         );
 
-        let meta = self.data.meta.clone();
-        let shard = self.data.shard_id;
-        let mut grpc = self.data.grpc.clone();
+        let client = self.clone();
 
         let mut seed = [0u8; 32];
         getrandom::fill(&mut seed).unwrap();
         let mut rng = StdRng::from_seed(seed);
 
         tokio::spawn(async move {
-            // We'll seen heartbeats a random time +/- X% of one quarter of session timeout.
+            // We'll send heartbeats a random time +/- X% of one quarter of session timeout.
             // This will allow us miss a few heartbeats without losing the session
             let distr = {
                 const JITTER: f64 = 0.03;
@@ -411,16 +464,18 @@ impl Client {
                 Uniform::new_inclusive(min_ms, max_ms).unwrap()
             };
             loop {
-                let req = tonic::Request::from_parts(
-                    meta.clone(),
-                    tonic::Extensions::default(),
-                    oxia_proto::SessionHeartbeat {
-                        session_id,
-                        shard: shard.into(),
-                    },
-                );
-                let rsp = grpc.keep_alive(req).await;
-                debug!(?rsp, "grpc.keep_alive");
+                let req = client.create_request(oxia_proto::SessionHeartbeat {
+                    session_id,
+                    shard: client.data.shard_id.into(),
+                });
+                let result = client
+                    .rpc(|mut grpc| async move { grpc.keep_alive(req).await })
+                    .await;
+                debug!(?result, "grpc.keep_alive");
+
+                if let Err(ref e) = result {
+                    warn!(?e, "heartbeat failed");
+                }
 
                 let sleep_ms = distr.sample(&mut rng);
                 let timeout = Duration::from_millis(sleep_ms.into());
@@ -432,7 +487,7 @@ impl Client {
 
     /// Creates a new Client instance for a specific shard
     pub(crate) fn new(
-        grpc: GrpcClient,
+        channel_pool: ChannelPool,
         config: Arc<config::Config>,
         shard_id: ShardId,
         dest: impl Into<String>,
@@ -447,7 +502,7 @@ impl Client {
         );
 
         Ok(Client {
-            data: Arc::new(ClientData::new(config, grpc, shard_id, dest, meta)),
+            data: Arc::new(ClientData::new(config, channel_pool, shard_id, dest, meta)),
             session: Arc::new(OnceCell::new()),
         })
     }
@@ -457,16 +512,14 @@ impl Client {
     }
 
     async fn create_session(&self) -> Result<Session> {
-        let data = &self.data;
-        let config = &data.config;
-        let mut grpc = data.grpc.clone();
-        // Call create_session
-        let rsp = grpc
-            .create_session(self.create_request(oxia_proto::CreateSessionRequest {
-                session_timeout_ms: config.session_timeout().as_millis() as u32,
-                client_identity: config.identity().into(),
-                shard: data.shard_id.0,
-            }))
+        let config = &self.data.config;
+        let req = self.create_request(oxia_proto::CreateSessionRequest {
+            session_timeout_ms: config.session_timeout().as_millis() as u32,
+            client_identity: config.identity().into(),
+            shard: self.data.shard_id.0,
+        });
+        let rsp = self
+            .rpc(|mut grpc| async move { grpc.create_session(req).await })
             .await?
             .into_inner();
         Ok(Session {
@@ -641,7 +694,10 @@ impl Client {
         let req = self.create_request(write_stream);
 
         // Get response stream with better error handling
-        let mut resp_stream = data.grpc.clone().write_stream(req).await?.into_inner();
+        let mut resp_stream = self
+            .rpc(|mut grpc| async move { grpc.write_stream(req).await })
+            .await?
+            .into_inner();
 
         // Get first response
         let write_response = match resp_stream.next().await {
@@ -670,7 +726,10 @@ impl Client {
     /// Retrieves a key with the given options
     pub(crate) async fn get(&self, k: &str, opts: &GetOptions) -> Result<Option<GetResponse>> {
         let req = self.create_request(self.make_get_req(opts, k));
-        let mut rsp_stream = self.data.grpc.clone().read(req).await?.into_inner();
+        let mut rsp_stream = self
+            .rpc(|mut grpc| async move { grpc.read(req).await })
+            .await?
+            .into_inner();
 
         let rsp = match rsp_stream.next().await {
             Some(Ok(response)) => response,
@@ -811,17 +870,11 @@ impl Client {
             gets,
         };
 
-        Self::demux_stream(
-            self.data.clone(),
-            keys,
-            self.data
-                .grpc
-                .clone()
-                .read(read_req)
-                .await
-                .map_err(|s| s.into()),
-        )
-        .await
+        let read_result = self
+            .rpc(|mut grpc| async move { grpc.read(read_req).await })
+            .await;
+
+        Self::demux_stream(self.data.clone(), keys, read_result).await
     }
 
     /// Puts a value with the given options
@@ -881,13 +934,13 @@ impl Client {
         opts: &ListOptions,
     ) -> Result<ListResponse> {
         let partial_ok = opts.partial_ok;
-
-        let data = &self.data;
-
         let req = self.create_request(self.make_list_req(opts, start_inclusive, end_exclusive));
 
         let mut rsp = ListResponse::default();
-        let mut rsp_stream = data.grpc.clone().list(req).await?.into_inner();
+        let mut rsp_stream = self
+            .rpc(|mut grpc| async move { grpc.list(req).await })
+            .await?
+            .into_inner();
 
         while let Some(r) = rsp_stream.next().await {
             match r {
@@ -931,13 +984,14 @@ impl Client {
         opts: &RangeScanOptions,
     ) -> Result<RangeScanResponse> {
         let partial_ok = opts.partial_ok;
-
-        let data = &self.data;
         let req =
             self.create_request(self.make_range_scan_req(opts, start_inclusive, end_exclusive));
 
         let mut rsp = RangeScanResponse::default();
-        let mut rsp_stream = data.grpc.clone().range_scan(req).await?.into_inner();
+        let mut rsp_stream = self
+            .rpc(|mut grpc| async move { grpc.range_scan(req).await })
+            .await?
+            .into_inner();
 
         while let Some(r) = rsp_stream.next().await {
             match r {
@@ -964,13 +1018,10 @@ impl Client {
             start_offset_exclusive,
         };
 
-        self.data
-            .grpc
-            .clone()
-            .get_notifications(req)
-            .await
-            .map(|r| NotificationsStream::from_proto(r.into_inner()))
-            .map_err(std::convert::Into::into)
+        let rsp = self
+            .rpc(|mut grpc| async move { grpc.get_notifications(req).await })
+            .await?;
+        Ok(NotificationsStream::from_proto(rsp.into_inner()))
     }
 }
 
@@ -1338,13 +1389,17 @@ impl ShardAssignmentTask {
         // Create shard mappings and bail out if we find anything silly.
         let mapper = Self::make_mapper(&ns)?;
 
-        // Now potentially make network calls to connect clients.
-        // let mut shards = Vec::with_capacity(ns.assignments.len());
+        // Now build the shard clients. Each Client holds a reference to the channel pool
+        // and will fetch channels on demand, allowing for reconnection on errors.
         let mut shards = ShardIdMap::<Client>::default();
         for a in &ns.assignments {
             info!(?a, "processing assignments");
-            let grpc = create_grpc_client(&a.leader, &self.channel_pool).await?;
-            let client = Client::new(grpc, self.config.clone(), a.shard.into(), &a.leader)?;
+            let client = Client::new(
+                self.channel_pool.clone(),
+                self.config.clone(),
+                a.shard.into(),
+                &a.leader,
+            )?;
             shards.insert(a.shard.into(), client);
         }
 
@@ -1401,7 +1456,6 @@ impl ShardAssignmentTask {
 
 #[derive(Debug)]
 pub(crate) struct Manager {
-    // channel_pool: ChannelPool,
     shards: Arc<Mutex<searchable::Shards>>,
     shutdown_requested: Arc<AtomicBool>,
     task_handle: JoinHandle<()>,
@@ -1418,7 +1472,6 @@ impl Manager {
             Self::start_shard_assignment_task(config, &channel_pool, &shards, &shutdown_requested)
                 .await?;
         Ok(Manager {
-            // channel_pool,
             shards,
             shutdown_requested,
             task_handle,
@@ -1568,5 +1621,116 @@ mod tests {
         items.insert(100.into(), 100);
         items.insert(1000.into(), 1000);
         assert!(items.iter().is_sorted());
+    }
+
+    mod client_tests {
+        use super::*;
+        use crate::pool::ChannelPool;
+
+        fn make_test_config() -> Arc<config::Config> {
+            config::Builder::new()
+                .service_addr("localhost:1234")
+                .build()
+                .unwrap()
+        }
+
+        fn make_test_client(config: &Arc<config::Config>) -> Client {
+            let pool = ChannelPool::new(config);
+            Client::new(pool, config.clone(), ShardId::new(1), "localhost:1234").unwrap()
+        }
+
+        #[test_log::test(tokio::test)]
+        async fn test_client_initial_state() {
+            let config = make_test_config();
+            let client = make_test_client(&config);
+
+            // Initially, no gRPC client should be cached
+            let guard = client.data.grpc.read().await;
+            assert!(guard.is_none());
+        }
+
+        #[cfg(not(miri))] // Miri doesn't support network operations (getaddrinfo)
+        #[test_log::test(tokio::test)]
+        async fn test_client_get_grpc_client_fails_on_unreachable() {
+            let config = make_test_config();
+            let client = make_test_client(&config);
+
+            // get_grpc_client should fail when server is unreachable
+            let result = client.get_grpc_client().await;
+            assert!(result.is_err());
+
+            // Cache should still be empty since connection failed
+            let guard = client.data.grpc.read().await;
+            assert!(guard.is_none());
+        }
+
+        #[test_log::test(tokio::test)]
+        async fn test_client_invalidate_on_empty_cache() {
+            let config = make_test_config();
+            let client = make_test_client(&config);
+
+            // invalidate_channel on empty cache should not panic
+            client.invalidate_channel().await;
+
+            // Cache should still be None
+            let guard = client.data.grpc.read().await;
+            assert!(guard.is_none());
+        }
+
+        #[cfg(not(miri))] // Miri doesn't support network operations (getaddrinfo)
+        #[test_log::test(tokio::test)]
+        async fn test_rpc_invalidates_on_connection_error() {
+            let config = make_test_config();
+            let client = make_test_client(&config);
+
+            // rpc() should fail when server is unreachable
+            let result: crate::Result<()> = client
+                .rpc(|mut grpc| async move {
+                    grpc.keep_alive(oxia_proto::SessionHeartbeat {
+                        session_id: 0,
+                        shard: 0,
+                    })
+                    .await
+                    .map(|_| ())
+                })
+                .await;
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn test_is_connection_error_classification() {
+            use std::io;
+
+            // Test various IO errors that should trigger invalidation
+            let io_conn_errors = [
+                io::ErrorKind::ConnectionReset,
+                io::ErrorKind::BrokenPipe,
+                io::ErrorKind::ConnectionAborted,
+                io::ErrorKind::NotConnected,
+            ];
+
+            for kind in io_conn_errors {
+                let err = crate::Error::from(io::Error::from(kind));
+                assert!(
+                    err.is_connection_error(),
+                    "{kind:?} should be a connection error"
+                );
+            }
+
+            // Test IO errors that should NOT trigger invalidation
+            let io_non_conn_errors = [
+                io::ErrorKind::NotFound,
+                io::ErrorKind::PermissionDenied,
+                io::ErrorKind::WouldBlock,
+            ];
+
+            for kind in io_non_conn_errors {
+                let err = crate::Error::from(io::Error::from(kind));
+                assert!(
+                    !err.is_connection_error(),
+                    "{kind:?} should NOT be a connection error"
+                );
+            }
+        }
     }
 }
