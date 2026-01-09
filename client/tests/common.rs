@@ -1,4 +1,4 @@
-// Copyright 2025 Maurice S. Barnum
+// Copyright 2025-2026 Maurice S. Barnum
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -90,10 +90,15 @@ pub fn find_free_ports(n: usize) -> io::Result<Vec<u16>> {
     Ok(ports)
 }
 
+/// Wait for the server to be ready by checking TCP connectivity, then adding
+/// a short delay for gRPC initialization.
 pub fn wait_for_ready(addr: &str, timeout_secs: u64) -> io::Result<()> {
     let start = Instant::now();
     while start.elapsed().as_secs() < timeout_secs {
         if TcpStream::connect(addr).is_ok() {
+            // TCP is up, but gRPC/shard leaders may not be ready yet.
+            // Add a short delay to allow for gRPC initialization.
+            sleep(Duration::from_millis(200));
             return Ok(());
         }
         sleep(Duration::from_millis(100));
@@ -128,7 +133,7 @@ impl TestServerArgs {
             .arg(self.nshards.get().to_string())
             .stdin(Stdio::null());
         let child = trace_err!(cmd.spawn())?;
-        trace_err!(wait_for_ready(&self.service_addr, 30_000))?;
+        trace_err!(wait_for_ready(&self.service_addr, 30))?;
         Ok(child)
     }
 }
