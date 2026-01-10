@@ -2,7 +2,6 @@ name: Rust
 
 on:
   push:
-    branches: ["main"]
     paths-ignore:
       - "build/Dockerfile"
       - ".github/workflows/docker-image.yml"
@@ -13,6 +12,15 @@ on:
       - ".github/workflows/docker-image.yml"
   workflow_dispatch:
     inputs:
+      build_mode:
+        description: "Build mode (auto = release for branches, debug for PRs)"
+        required: false
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - release
+          - debug
       extra_env:
         description: "Extra environment variables (e.g., FOO=bar BAZ=qux)"
         required: false
@@ -59,11 +67,19 @@ jobs:
 
       - name: set-cargo-release-flag
         run: |
-          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+          BUILD_MODE="${{ github.event.inputs.build_mode || 'auto' }}"
+          if [ "$BUILD_MODE" = "release" ]; then
             echo "RELEASE_FLAG=--release" >> $GITHUB_ENV
-          else
+          elif [ "$BUILD_MODE" = "debug" ]; then
             echo "RELEASE_FLAG=" >> $GITHUB_ENV
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            # Auto mode: debug for PRs
+            echo "RELEASE_FLAG=" >> $GITHUB_ENV
+          else
+            # Auto mode: release for branch pushes (main or any other branch)
+            echo "RELEASE_FLAG=--release" >> $GITHUB_ENV
           fi
+          echo "Build mode: $BUILD_MODE, Event: ${{ github.event_name }}, Release flag: $RELEASE_FLAG"
 
       # TODO: move this to the build image
       - name: Compute rustc hash
