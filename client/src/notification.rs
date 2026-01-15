@@ -13,11 +13,13 @@
 // limitations under the License.
 
 use std::cmp::Ordering;
+use std::collections::VecDeque;
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
+use std::time::Duration;
 
 use futures::FutureExt;
 use futures::Stream;
@@ -81,12 +83,28 @@ impl Default for StreamingState {
     }
 }
 
+struct WaitingReadyState {
+    /// Streams still waiting for first batch
+    waiting: ShardStreamMap,
+    /// Streams that have received their first batch
+    ready: ShardStreamMap,
+    /// Cursor offsets
+    offsets: ShardOffsetMap,
+    /// Reconnect state (carried through)
+    pending_reconnects: Option<Box<FuturesUnordered<ReconnectFuture>>>,
+    /// Buffered non-empty first batches (max N shards)
+    buffered: VecDeque<crate::NotificationBatch>,
+}
+
 // State is rarely copied, so the smaller enum size from boxing StreamingState
 // is not a good tradeoff for the extra heap allocation and indirection on access.
+// WaitingReadyState, on the other hand, is optionally used and only during initialization
+// of the stream, so we'll keep that on the heap so it's size is not important.
 #[allow(clippy::large_enum_variant)]
 enum State {
     Streaming(StreamingState),
     Configuring(BoxFuture<'static, State>),
+    WaitingReady(Box<WaitingReadyState>),
 }
 
 impl fmt::Debug for State {
@@ -94,6 +112,7 @@ impl fmt::Debug for State {
         match self {
             Self::Streaming(_) => f.debug_tuple("Streaming").finish(),
             Self::Configuring(_) => f.debug_tuple("Configuring").finish(),
+            Self::WaitingReady(_) => f.debug_tuple("WaitingReady").finish(),
         }
     }
 }
@@ -321,6 +340,92 @@ impl NotificationsStream {
             .get_or_insert_with(|| Box::new(FuturesUnordered::new()))
             .push(future);
     }
+
+    /// Wait until all shard notification cursors are established.
+    ///
+    /// On initial connection, the Oxia server positions the notification cursor at
+    /// the current commit offset. Operations performed **after** the cursor is
+    /// established will generate notifications; operations performed before may not.
+    ///
+    /// Call this method after creating the stream and before performing operations
+    /// whose notifications you need to capture.
+    ///
+    /// # Implementation
+    ///
+    /// Each shard is polled exactly once to receive its first batch (which establishes
+    /// the cursor). If a first batch is unexpectedly non-empty, it is buffered and
+    /// will be returned by subsequent `poll_next` calls. Buffering is bounded to at
+    /// most N batches (one per shard).
+    ///
+    /// # Errors
+    ///
+    /// - `Error::RequestTimeout` if the timeout expires before all shards are ready
+    /// - Any error from the underlying notification streams
+    pub async fn wait_ready(&mut self, timeout: Duration) -> crate::Result<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        // Drive Configuring to completion if needed
+        while matches!(self.state, State::Configuring(_)) {
+            let poll_result = tokio::time::timeout_at(deadline, self.next()).await;
+
+            // State might have transitioned during the poll - check before handling result
+            if !matches!(self.state, State::Configuring(_)) {
+                break;
+            }
+
+            match poll_result {
+                Err(_) => return Err(crate::Error::RequestTimeout),
+                Ok(Some(Err(e))) => return Err(e),
+                Ok(_) => continue,
+            }
+        }
+
+        // Transition Streaming → WaitingReady
+        if let State::Streaming(s) = &mut self.state {
+            // Separate streams into waiting (no offset yet) and ready (offset already set)
+            let mut waiting = ShardStreamMap::new();
+            let mut ready = ShardStreamMap::new();
+            let shard_ids: Vec<_> = s.streams.keys().copied().collect();
+            for id in shard_ids {
+                if let Some(stream) = s.streams.remove(&id) {
+                    if s.offsets.get(id).is_some() {
+                        ready.insert(id, stream);
+                    } else {
+                        waiting.insert(id, stream);
+                    }
+                }
+            }
+
+            // If all streams are already ready, put them back and return
+            if waiting.is_empty() {
+                s.streams = ready;
+                return Ok(());
+            }
+
+            self.state = State::WaitingReady(Box::new(WaitingReadyState {
+                waiting,
+                ready,
+                offsets: std::mem::take(&mut s.offsets),
+                pending_reconnects: s.pending_reconnects.take(),
+                buffered: VecDeque::new(),
+            }));
+        }
+
+        // Poll until back in Streaming state (all shards ready, buffer drained)
+        loop {
+            match &self.state {
+                State::Streaming(_) => return Ok(()),
+                _ => {
+                    let poll_result = tokio::time::timeout_at(deadline, self.next()).await;
+                    match poll_result {
+                        Err(_) => return Err(crate::Error::RequestTimeout),
+                        Ok(Some(Err(e))) => return Err(e),
+                        Ok(_) => continue,
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Stream for NotificationsStream {
@@ -429,6 +534,62 @@ impl Stream for NotificationsStream {
                         return Poll::Pending;
                     }
                 },
+
+                State::WaitingReady(w) => {
+                    // Phase 1: Poll waiting shards until all are ready
+                    if !w.waiting.is_empty() {
+                        match w.waiting.poll_next_unpin(cx) {
+                            Poll::Ready(Some((id, batch_opt))) => {
+                                // Move stream from waiting to ready
+                                if let Some(stream) = w.waiting.remove(&id) {
+                                    w.ready.insert(id, stream);
+                                }
+
+                                match batch_opt {
+                                    None => {
+                                        // Stream closed (StreamNotifyClose signal)
+                                        continue;
+                                    }
+                                    Some(Err(e)) => {
+                                        return Poll::Ready(Some(Err(e)));
+                                    }
+                                    Some(Ok(batch)) => {
+                                        // Cursor established
+                                        w.offsets.insert(id, batch.offset);
+                                        // Buffer if non-empty (unexpected but possible)
+                                        if !batch.notifications.is_empty() {
+                                            warn!(
+                                                ?id,
+                                                "first batch unexpectedly non-empty, buffering"
+                                            );
+                                            w.buffered.push_back(batch);
+                                        }
+                                        continue;
+                                    }
+                                }
+                            }
+                            Poll::Ready(None) => {
+                                // All waiting streams exhausted - fall through to drain
+                            }
+                            Poll::Pending => {
+                                return Poll::Pending;
+                            }
+                        }
+                    }
+
+                    // Phase 2: All shards ready - drain buffered batches
+                    if let Some(batch) = w.buffered.pop_front() {
+                        return Poll::Ready(Some(Ok(batch)));
+                    }
+
+                    // Phase 3: Buffer empty - transition to Streaming
+                    this.state = State::Streaming(StreamingState {
+                        streams: std::mem::take(&mut w.ready),
+                        offsets: std::mem::take(&mut w.offsets),
+                        pending_reconnects: w.pending_reconnects.take(),
+                    });
+                    continue;
+                }
             }
         }
     }
