@@ -30,6 +30,7 @@ use tokio_stream::StreamMap;
 use tokio_stream::StreamNotifyClose;
 use tracing::debug;
 use tracing::info;
+use tracing::warn;
 
 use crate::NotificationBatch;
 use crate::NotificationsOptions;
@@ -172,9 +173,9 @@ impl NotificationsStream {
     ) -> State {
         let max_parallel_requests = config.max_parallel_requests();
         let fut = async move {
-            let (mut streams, offsets) = match current {
-                Some(c) => (c.streams, c.offsets),
-                None => (ShardStreamMap::new(), ShardOffsetMap::new()),
+            let (mut streams, offsets, pending_reconnects) = match current {
+                Some(c) => (c.streams, c.offsets, c.pending_reconnects),
+                None => (ShardStreamMap::new(), ShardOffsetMap::new(), None),
             };
 
             // Clients are sorted by shard id, let's sort the active ids so we can easily
@@ -211,40 +212,33 @@ impl NotificationsStream {
                     let config = config.clone();
                     let offset = offsets.get(id);
                     async move {
-                        (
-                            id,
-                            crate::execute_with_retry(&config, move || {
-                                let client = client.clone();
-                                async move { client.get_notifications(offset).await }
-                            })
-                            .await,
-                        )
+                        let r = crate::execute_with_retry(&config, move || {
+                            let client = client.clone();
+                            async move { client.get_notifications(offset).await }
+                        })
+                        .await;
+                        let s = StreamNotifyClose::new(match r {
+                            Ok(s) => s.boxed(),
+                            Err(e) => futures::stream::once(async { Err(e) }).boxed(),
+                        });
+                        (id, s)
                     }
                 });
             }
 
-            // Execute the requests to create notification streams and collect them
-            // to update the stream map
-            futures::stream::iter(futs.into_iter())
+            let results: Vec<_> = futures::stream::iter(futs.into_iter())
                 .buffer_unordered(max_parallel_requests)
-                .then(|(id, r)| async move {
-                    let s = StreamNotifyClose::new(match r {
-                        Ok(s) => s.boxed(),
-                        Err(e) => futures::stream::once(async move { Err(e) }).boxed(),
-                    });
-                    (id, s)
-                })
-                .collect::<Vec<(ShardId, ShardStream)>>()
-                .await
-                .into_iter()
-                .for_each(|(id, s)| {
-                    streams.insert(id, s);
-                });
+                .collect()
+                .await;
+
+            for (id, s) in results {
+                streams.insert(id, s);
+            }
 
             State::Streaming(StreamingState {
                 streams,
                 offsets,
-                pending_reconnects: None,
+                pending_reconnects,
             })
         }
         .boxed();
@@ -388,7 +382,18 @@ impl Stream for NotificationsStream {
                                 continue;
                             }
                             if let Some(Ok(b)) = &r {
+                                let first_batch = s.offsets.get(id).is_none();
                                 s.offsets.insert(id, b.offset);
+                                // Server sends empty batch on first connection to establish cursor
+                                // position (../../ext/oxia/oxiad/dataserver/controller/lead/leader_controller.go:882-898).
+                                // Go client discards first batch similarly (../../ext/oxia/oxia/notifications.go:175-186).
+                                if first_batch && b.notifications.is_empty() {
+                                    debug!(?id, offset = b.offset, "discarding empty first batch");
+                                    continue;
+                                }
+                                if first_batch {
+                                    warn!(?id, "first batch unexpectedly non-empty, delivering");
+                                }
                             } else if let Some(Err(e)) = &r
                                 && this.options.reconnect_on_error
                                 && !e.is_shard_unavailable()

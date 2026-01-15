@@ -46,6 +46,24 @@ use common::TestResultExt;
 use common::non_zero;
 use tokio::time::timeout;
 
+/// Drive a notifications stream until it's waiting for notifications.
+/// This ensures the stream is connected and ready to receive notifications.
+async fn drive_notifications_stream(notifications: &mut (impl futures::Stream + Unpin)) {
+    use futures::future::poll_fn;
+    use std::pin::Pin;
+    use std::task::Poll;
+
+    poll_fn(|cx| {
+        loop {
+            match Pin::new(&mut *notifications).poll_next(cx) {
+                Poll::Pending => return Poll::Ready(()),
+                Poll::Ready(_) => continue,
+            }
+        }
+    })
+    .await;
+}
+
 /// Helper function to create a test client
 async fn create_test_client_nshards(nshards: u32) -> Result<(common::TestServer, Client)> {
     let session_timeout = Duration::from_secs(2);
@@ -567,12 +585,51 @@ async fn test_get_without_value() -> Result<()> {
     Ok(())
 }
 
+/// Test that the empty first batch from server is discarded.
+/// Server sends an empty batch on connection to establish cursor position.
+/// This test verifies the client discards it by checking the first notification
+/// received is for our put, not an empty batch.
+#[test_log::test(tokio::test)]
+async fn test_notifications_first_batch_discarded() -> anyhow::Result<()> {
+    let (_server, client) = create_test_client().await?;
+
+    let mut notifications = client.create_notifications_stream()?;
+
+    // Drive stream until ready - this processes and filters empty first batches
+    drive_notifications_stream(&mut notifications).await;
+
+    let key = test_key("first_batch");
+
+    // Put a record
+    let put_result = client.put(&key, &b"value"[..]).await?;
+
+    // First notification after the put should be non-empty and for our key
+    let batch = timeout(Duration::from_secs(5), notifications.next())
+        .await?
+        .expect("should receive notification")?;
+
+    assert!(
+        !batch.notifications.is_empty(),
+        "batch should not be empty (empty server handshake batch should have been discarded)"
+    );
+
+    let notification = batch
+        .notifications
+        .get(&key)
+        .expect("batch should contain notification for our key");
+    assert_eq!(notification.type_, NotificationType::KeyCreated);
+    assert_eq!(notification.version_id, Some(put_result.version.version_id));
+
+    Ok(())
+}
+
 #[test_log::test(tokio::test)]
 async fn test_notifications() -> anyhow::Result<()> {
     let (_server, client) = create_test_client().await?;
 
     // Create notifications stream
     let mut notifications = client.create_notifications_stream()?;
+    drive_notifications_stream(&mut notifications).await;
 
     let key = test_key("notifications");
 
@@ -797,6 +854,7 @@ async fn test_notifications_with_options() -> anyhow::Result<()> {
     // Create notifications stream with default options (same as create_notifications_stream)
     let opts = NotificationsOptions::default();
     let mut notifications = client.create_notifications_stream_with_options(opts)?;
+    drive_notifications_stream(&mut notifications).await;
 
     let key = test_key("notifications_opts");
 
@@ -828,6 +886,7 @@ async fn test_notifications_reconnect_on_close() -> anyhow::Result<()> {
         o.reconnect_on_close();
     });
     let mut notifications = client.create_notifications_stream_with_options(opts)?;
+    drive_notifications_stream(&mut notifications).await;
 
     let key = test_key("reconnect_close");
 
@@ -891,6 +950,7 @@ async fn test_notifications_no_reconnect_default() -> anyhow::Result<()> {
 
     // Create stream with default options (no reconnect)
     let mut notifications = client.create_notifications_stream()?;
+    drive_notifications_stream(&mut notifications).await;
 
     let key = test_key("no_reconnect");
 
