@@ -1,4 +1,4 @@
-// Copyright 2025 Maurice S. Barnum
+// Copyright 2025-2026 Maurice S. Barnum
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,7 +14,6 @@
 
 use std::cmp::Ordering;
 use std::fmt;
-use std::num::NonZeroU64;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Context;
@@ -38,7 +37,7 @@ use crate::config::Config;
 use crate::shard;
 
 #[derive(Default)]
-struct ShardOffsetMap(shard::ShardIdMap<NonZeroU64>);
+struct ShardOffsetMap(shard::ShardIdMap<i64>);
 
 impl ShardOffsetMap {
     fn new() -> Self {
@@ -46,16 +45,11 @@ impl ShardOffsetMap {
     }
 
     fn insert(&mut self, id: ShardId, offset: i64) {
-        // Silently discard negative offsets
-        if offset < 0 {
-            return;
-        }
-        let v = NonZeroU64::new((offset as u64) + 1).unwrap();
-        self.0.insert(id, v);
+        self.0.insert(id, offset);
     }
 
     fn get(&self, id: ShardId) -> Option<i64> {
-        self.0.get(id).map(|v| (v.get() as i64) - 1)
+        self.0.get(id).copied()
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -73,6 +67,9 @@ struct StreamingState {
     offsets: ShardOffsetMap,
 }
 
+// State is rarely copied, so the smaller enum size from boxing StreamingState
+// is not a good tradeoff for the extra heap allocation and indirection on access.
+#[allow(clippy::large_enum_variant)]
 enum State {
     Streaming(StreamingState),
     Configuring(BoxFuture<'static, State>),
@@ -314,6 +311,18 @@ mod tests {
         assert!(offsets.get(id_zero).is_none());
         offsets.insert(id_zero, 42);
         assert_eq!(offsets.get(id_zero).unwrap(), 42);
+        offsets.remove(id_zero);
+        assert!(offsets.get(id_zero).is_none());
+
+        // Test offset -1 (start of log, no commits yet)
+        offsets.insert(id_zero, -1);
+        assert_eq!(offsets.get(id_zero).unwrap(), -1);
+        offsets.remove(id_zero);
+        assert!(offsets.get(id_zero).is_none());
+
+        // Test offset 0 (first commit)
+        offsets.insert(id_zero, 0);
+        assert_eq!(offsets.get(id_zero).unwrap(), 0);
         offsets.remove(id_zero);
         assert!(offsets.get(id_zero).is_none());
 
