@@ -62,13 +62,11 @@ impl CommandRunnable for NotificationsCommand {
             }
         });
 
-        let result = ctx
+        let mut notifications_stream = ctx
             .client()
             .await?
-            .create_notifications_stream_with_options(opts);
-        trace!(?result, "result");
-
-        let mut notifications_stream = result?;
+            .create_notifications_stream_with_options(opts)?;
+        trace!("notifications stream created");
         while let Some(item) = notifications_stream.next().await {
             println!("{item:?}");
             if let Ok(NotificationBatch { notifications, .. }) = item {

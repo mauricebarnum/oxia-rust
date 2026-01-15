@@ -1240,10 +1240,12 @@ impl Client {
             .await
     }
 
+    /// Create a notifications stream with default options.
     pub fn create_notifications_stream(&self) -> Result<notification::NotificationsStream> {
         self.create_notifications_stream_with_options(NotificationsOptions::default())
     }
 
+    /// Create a notifications stream with custom options.
     pub fn create_notifications_stream_with_options(
         &self,
         options: NotificationsOptions,
