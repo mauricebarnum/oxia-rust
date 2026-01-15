@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is an experimental, incomplete Rust implementation of an [Oxia](https://github.com/oxia-db/oxia) client. Oxia is a scalable metadata store. The crates use "private" names (mauricebarnum-\*) and are unpublished.
+This is an experimental, incomplete Rust implementation of an [Oxia](https://github.com/oxia-db/oxia) client.
 
 ## Build Commands
 
@@ -79,19 +79,17 @@ The `common/build.rs` compiles protos from `ext/oxia/common/proto/`. Don't manua
 
 Tests in `client/tests/` require the Oxia server binary, built automatically by `oxia-bin-util/build.rs` from vendored Go sources. The test harness (`client/tests/common.rs`) spawns servers and manages ports.
 
-## Linting Configuration
+## Coding style
 
-Clippy is strict: all + pedantic lints are denied with exceptions for:
-
-- `cast_possible_truncation`, `cast_precision_loss`
-- `must_use_candidate`, `missing_errors_doc`
-
-## New Files
-
-Add Apache 2.0 license headers to new `.rs` files. Pre-commit hook handles this automatically using `.license-header.txt`.
+- Clippy uses all + pedantic lints with a few exceptions in workspace Cargo.toml
+- Document rationale when disabling a warning
+- Consider Rust API [guidelines](https://rust-lang.github.io/api-guidelines/)
+- Prefer terse comments that do not restate code in prose
 
 ## Github integration
 
 - Always use the prefix `claude-` when creating a branch
-- Use `--force-with-lease --force-if-includes` if a force push is required. Otherwise, fail and require a developer to do the push.
+- For a force push, always use `--force-with-lease --force-if-includes` and suggest alternative only upon failure
 - Run clippy and tests before pushing
+- Create PRs as drafts unless instructed otherwise
+- Ignore the local `main` branch. Use `origin/main` as the upstream main branch
