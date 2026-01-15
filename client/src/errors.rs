@@ -260,6 +260,28 @@ impl Error {
     pub fn other(err: impl std::error::Error + Send + Sync + 'static) -> Self {
         Error::Other(Arc::new(err))
     }
+
+    /// Whether the error indicates a shard is no longer available or has been reassigned.
+    ///
+    /// These errors should NOT trigger automatic reconnection attempts because the shard
+    /// assignment has changed and the client should reconfigure.
+    pub fn is_shard_unavailable(&self) -> bool {
+        match self {
+            // Shard mapping errors indicate the shard is no longer valid
+            Error::NoShardMapping(_) | Error::NoShardMappingForKey(_) => true,
+            // gRPC NotFound typically indicates the shard/resource doesn't exist
+            Error::Grpc(status) => status.code() == tonic::Code::NotFound,
+            // Server configuration errors
+            Error::Server(err) => matches!(
+                err.as_ref(),
+                ServerError::NoShardsConfigured | ServerError::DuplicateShardId(_)
+            ),
+            // Check nested errors
+            Error::ShardError(e) => e.err.is_shard_unavailable(),
+            Error::MultipleShardError(errs) => errs.iter().all(|e| e.err.is_shard_unavailable()),
+            _ => false,
+        }
+    }
 }
 
 impl From<tonic::Status> for Error {

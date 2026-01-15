@@ -1,4 +1,4 @@
-// Copyright 2025 Maurice S. Barnum
+// Copyright 2025-2026 Maurice S. Barnum
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -616,6 +616,53 @@ impl DeleteRangeOptions {
     }
 }
 
+/// Options for creating a notifications stream.
+///
+/// By default, the stream will not automatically reconnect when a shard stream
+/// closes or encounters an error. Use the reconnect options to enable automatic
+/// reconnection behavior.
+#[derive(Clone, Debug, Default)]
+pub struct NotificationsOptions {
+    /// Reconnect to a shard when its stream closes normally
+    pub(crate) reconnect_on_close: bool,
+    /// Reconnect to a shard when its stream encounters an error
+    pub(crate) reconnect_on_error: bool,
+}
+
+impl NotificationsOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with(mut self, f: impl FnOnce(&mut Self)) -> Self {
+        f(&mut self);
+        self
+    }
+
+    /// Enable automatic reconnection when a shard stream closes normally.
+    ///
+    /// When enabled, the notifications stream will automatically attempt to
+    /// reconnect to a shard when its stream ends without an error, resuming
+    /// from the last received offset.
+    pub fn reconnect_on_close(&mut self) -> &mut Self {
+        self.reconnect_on_close = true;
+        self
+    }
+
+    /// Enable automatic reconnection when a shard stream encounters an error.
+    ///
+    /// When enabled, the notifications stream will automatically attempt to
+    /// reconnect to a shard when an error occurs, resuming from the last
+    /// received offset.
+    ///
+    /// Note: Errors indicating the shard is no longer available (e.g., shard
+    /// reassignment) will not trigger a reconnection attempt.
+    pub fn reconnect_on_error(&mut self) -> &mut Self {
+        self.reconnect_on_error = true;
+        self
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(i32)]
 pub enum NotificationType {
@@ -1194,10 +1241,18 @@ impl Client {
     }
 
     pub fn create_notifications_stream(&self) -> Result<notification::NotificationsStream> {
+        self.create_notifications_stream_with_options(NotificationsOptions::default())
+    }
+
+    pub fn create_notifications_stream_with_options(
+        &self,
+        options: NotificationsOptions,
+    ) -> Result<notification::NotificationsStream> {
         let shard_manager = self.get_shard_manager()?;
         Ok(NotificationsStream::new(
             self.config.clone(),
             shard_manager.clone(),
+            options,
         ))
     }
 }

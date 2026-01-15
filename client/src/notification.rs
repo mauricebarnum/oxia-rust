@@ -24,6 +24,7 @@ use futures::Stream;
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
+use futures::stream::FuturesUnordered;
 use tokio::sync::mpsc;
 use tokio_stream::StreamMap;
 use tokio_stream::StreamNotifyClose;
@@ -31,6 +32,7 @@ use tracing::debug;
 use tracing::info;
 
 use crate::NotificationBatch;
+use crate::NotificationsOptions;
 use crate::Result;
 use crate::ShardId;
 use crate::config::Config;
@@ -60,11 +62,22 @@ impl ShardOffsetMap {
 
 type ShardStream = StreamNotifyClose<BoxStream<'static, Result<NotificationBatch>>>;
 type ShardStreamMap = StreamMap<ShardId, ShardStream>;
+type ReconnectFuture = BoxFuture<'static, (ShardId, crate::Result<ShardStream>)>;
 
-#[derive(Default)]
 struct StreamingState {
     streams: ShardStreamMap,
     offsets: ShardOffsetMap,
+    pending_reconnects: Option<Box<FuturesUnordered<ReconnectFuture>>>,
+}
+
+impl Default for StreamingState {
+    fn default() -> Self {
+        Self {
+            streams: ShardStreamMap::new(),
+            offsets: ShardOffsetMap::new(),
+            pending_reconnects: None,
+        }
+    }
 }
 
 // State is rarely copied, so the smaller enum size from boxing StreamingState
@@ -111,6 +124,7 @@ enum Cmd {
 pub struct NotificationsStream {
     config: Arc<Config>,
     shard_manager: Arc<shard::Manager>,
+    options: NotificationsOptions,
     state: State,
     config_rx: mpsc::Receiver<Cmd>,
     epoch: ConfigEpoch,
@@ -118,7 +132,11 @@ pub struct NotificationsStream {
 }
 
 impl NotificationsStream {
-    pub(crate) fn new(config: Arc<Config>, shard_manager: Arc<shard::Manager>) -> Self {
+    pub(crate) fn new(
+        config: Arc<Config>,
+        shard_manager: Arc<shard::Manager>,
+        options: NotificationsOptions,
+    ) -> Self {
         let (config_tx, config_rx) = mpsc::channel::<Cmd>(1);
         let watcher_handle = tokio::spawn({
             let mut watcher = shard_manager.recv_changed().clone();
@@ -140,6 +158,7 @@ impl NotificationsStream {
             state: Self::configure(config.clone(), shard_manager.clone(), None),
             config,
             shard_manager,
+            options,
             config_rx,
             epoch: ConfigEpoch::new(),
             _watcher_handle: watcher_handle,
@@ -222,10 +241,91 @@ impl NotificationsStream {
                     streams.insert(id, s);
                 });
 
-            State::Streaming(StreamingState { streams, offsets })
+            State::Streaming(StreamingState {
+                streams,
+                offsets,
+                pending_reconnects: None,
+            })
         }
         .boxed();
         State::Configuring(fut)
+    }
+
+    /// Poll pending reconnects. Returns an error to propagate if a close-triggered
+    /// reconnect fails and reconnect_on_error is not enabled.
+    fn poll_reconnects(
+        s: &mut StreamingState,
+        cx: &mut Context<'_>,
+        config: &Arc<Config>,
+        shard_manager: &Arc<shard::Manager>,
+        reconnect_on_error: bool,
+    ) -> Option<crate::Error> {
+        let Some(reconnects) = &mut s.pending_reconnects else {
+            return None;
+        };
+
+        // Collect retries to schedule after releasing the borrow on pending_reconnects
+        let mut retries: Vec<(ShardId, Option<i64>)> = Vec::new();
+
+        while let Poll::Ready(Some((id, result))) = reconnects.poll_next_unpin(cx) {
+            match result {
+                Ok(stream) => {
+                    debug!(?id, "reconnected shard stream");
+                    s.streams.insert(id, stream);
+                }
+                Err(e) if e.is_shard_unavailable() => {
+                    debug!(?id, ?e, "shard no longer available, discarding reconnect");
+                }
+                Err(e) if reconnect_on_error => {
+                    debug!(?id, ?e, "reconnect failed, scheduling retry");
+                    retries.push((id, s.offsets.get(id)));
+                }
+                Err(e) => {
+                    debug!(?id, ?e, "reconnect failed, propagating error");
+                    return Some(e);
+                }
+            }
+        }
+
+        for (id, offset) in retries {
+            Self::schedule_reconnect(s, config, shard_manager, id, offset);
+        }
+
+        None
+    }
+
+    /// Schedule a reconnect future (lazily allocates the collection).
+    fn schedule_reconnect(
+        s: &mut StreamingState,
+        config: &Arc<Config>,
+        shard_manager: &Arc<shard::Manager>,
+        id: ShardId,
+        offset: Option<i64>,
+    ) {
+        let config = config.clone();
+        let shard_manager = shard_manager.clone();
+        let future = async move {
+            let client = match shard_manager.get_client_by_shard_id(id).await {
+                Ok(c) => c,
+                Err(e) => return (id, Err(e)),
+            };
+
+            let result = crate::execute_with_retry(&config, move || {
+                let client = client.clone();
+                async move { client.get_notifications(offset).await }
+            })
+            .await;
+
+            match result {
+                Ok(s) => (id, Ok(StreamNotifyClose::new(s.boxed()))),
+                Err(e) => (id, Err(e)),
+            }
+        }
+        .boxed();
+
+        s.pending_reconnects
+            .get_or_insert_with(|| Box::new(FuturesUnordered::new()))
+            .push(future);
     }
 }
 
@@ -237,6 +337,16 @@ impl Stream for NotificationsStream {
         loop {
             match &mut this.state {
                 State::Streaming(s) => {
+                    if let Some(e) = Self::poll_reconnects(
+                        s,
+                        cx,
+                        &this.config,
+                        &this.shard_manager,
+                        this.options.reconnect_on_error,
+                    ) {
+                        return Poll::Ready(Some(Err(e)));
+                    }
+
                     if let Poll::Ready(Some(cmd)) = this.config_rx.poll_recv(cx) {
                         match cmd {
                             Cmd::Configure => {
@@ -262,16 +372,36 @@ impl Stream for NotificationsStream {
                     match s.streams.poll_next_unpin(cx) {
                         Poll::Ready(Some((id, r))) => {
                             if r.is_none() {
-                                // This shard stream has closed.  If we're configured to
-                                // reconnect on close,this is the place.  It's also where
-                                // we can let caller see the clsoure directly by yielding
-                                // a specific error, although the client has already likely
-                                // already seen a tonic error
+                                // Stream closed normally
                                 debug!(?id, "shard stream terminated");
+                                if this.options.reconnect_on_close {
+                                    debug!(?id, "scheduling reconnect on close");
+                                    let offset = s.offsets.get(id);
+                                    Self::schedule_reconnect(
+                                        s,
+                                        &this.config,
+                                        &this.shard_manager,
+                                        id,
+                                        offset,
+                                    );
+                                }
                                 continue;
                             }
                             if let Some(Ok(b)) = &r {
                                 s.offsets.insert(id, b.offset);
+                            } else if let Some(Err(e)) = &r
+                                && this.options.reconnect_on_error
+                                && !e.is_shard_unavailable()
+                            {
+                                debug!(?id, ?e, "scheduling reconnect on error");
+                                let offset = s.offsets.get(id);
+                                Self::schedule_reconnect(
+                                    s,
+                                    &this.config,
+                                    &this.shard_manager,
+                                    id,
+                                    offset,
+                                );
                             }
                             return Poll::Ready(r);
                         }
@@ -332,5 +462,40 @@ mod tests {
         assert_eq!(offsets.get(id_very_large).unwrap(), 42);
         offsets.remove(id_very_large);
         assert!(offsets.get(id_very_large).is_none());
+    }
+
+    #[test]
+    fn test_notifications_options_default() {
+        let opts = NotificationsOptions::default();
+        assert!(!opts.reconnect_on_close);
+        assert!(!opts.reconnect_on_error);
+    }
+
+    #[test]
+    fn test_notifications_options_reconnect_on_close() {
+        let opts = NotificationsOptions::new().with(|o| {
+            o.reconnect_on_close();
+        });
+        assert!(opts.reconnect_on_close);
+        assert!(!opts.reconnect_on_error);
+    }
+
+    #[test]
+    fn test_notifications_options_reconnect_on_error() {
+        let opts = NotificationsOptions::new().with(|o| {
+            o.reconnect_on_error();
+        });
+        assert!(!opts.reconnect_on_close);
+        assert!(opts.reconnect_on_error);
+    }
+
+    #[test]
+    fn test_notifications_options_both() {
+        let opts = NotificationsOptions::new().with(|o| {
+            o.reconnect_on_close();
+            o.reconnect_on_error();
+        });
+        assert!(opts.reconnect_on_close);
+        assert!(opts.reconnect_on_error);
     }
 }
