@@ -1,4 +1,4 @@
-// Copyright 2025 Maurice S. Barnum
+// Copyright 2025-2026 Maurice S. Barnum
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -70,8 +70,7 @@ pub struct DefaultChannelFactory;
 
 impl ChannelFactory for DefaultChannelFactory {
     async fn create(&self, _: &Arc<Config>, target: &str) -> Result<Channel> {
-        let target = target.as_bytes().to_vec();
-        let endpoint = Endpoint::from_shared(target)?;
+        let endpoint: Endpoint = target.parse()?;
         endpoint.connect().await.map_err(Error::from)
     }
 }
