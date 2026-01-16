@@ -79,6 +79,36 @@ The `common/build.rs` compiles protos from `ext/oxia/common/proto/`. Don't manua
 
 Tests in `client/tests/` require the Oxia server binary, built automatically by `oxia-bin-util/build.rs` from vendored Go sources. The test harness (`client/tests/common.rs`) spawns servers and manages ports.
 
+## Concurrency Architecture
+
+### Synchronization Patterns
+
+The client uses async-first synchronization from `tokio::sync` and `arc_swap`:
+
+| Component | Primitive | Purpose | Access Pattern |
+|-----------|-----------|---------|----------------|
+| `Manager.shards` | `ArcSwap<Shards>` | Shard routing table | Read-heavy, rare writes |
+| `ClientData.grpc` | `ArcSwapOption<GrpcClient>` | Per-shard gRPC client cache | Read-heavy, rare writes |
+| `ChannelPool.state` | `RwLock<State>` | Connection pool | Read-heavy, rare writes |
+| Session init | `OnceCell` | One-time session setup | Write-once |
+| Shard changes | `watch::channel` | Config change broadcast | Multi-reader |
+| Pending connections | `broadcast::channel` | Coordinate waiters | Multi-reader |
+
+### Hot Path Design
+
+The request hot path prioritizes lock-free reads:
+
+1. **Shard lookup**: `ArcSwap::load()` - lock-free atomic load
+2. **gRPC client**: `ArcSwapOption::load()` - lock-free cache access
+3. **Channel pool**: `RwLock::read()` - only if cache miss in step 2
+
+### Guidelines
+
+- Prefer `arc_swap` for read-heavy shared state over `Mutex`/`RwLock`
+- Use `tokio::sync` types (not `std::sync`) in async code
+- Release locks before `.await` points to prevent holding across yields
+- Use channels (`watch`, `mpsc`, `broadcast`) for signaling over shared state
+
 ## Coding style
 
 - Clippy uses all + pedantic lints with a few exceptions in workspace Cargo.toml
