@@ -21,6 +21,7 @@ use std::sync::atomic::Ordering;
 use std::task::Poll;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use bytes::Bytes;
 use futures::stream::Stream;
 use futures::stream::StreamExt;
@@ -28,8 +29,8 @@ use rand::SeedableRng;
 use rand::distr::Distribution;
 use rand::distr::Uniform;
 use rand::rngs::StdRng;
-use tokio::sync::Mutex;
 use tokio::sync::OnceCell;
+use tokio::sync::RwLock;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
@@ -274,7 +275,7 @@ struct ClientData {
     leader: String,
     meta: tonic::metadata::MetadataMap,
     /// Cached gRPC client. Set to None when invalidated, lazily populated on first use.
-    grpc: tokio::sync::RwLock<Option<GrpcClient>>,
+    grpc: RwLock<Option<GrpcClient>>,
 }
 
 impl ClientData {
@@ -291,7 +292,7 @@ impl ClientData {
             shard_id,
             leader: leader.into(),
             meta,
-            grpc: tokio::sync::RwLock::new(None),
+            grpc: RwLock::new(None),
         }
     }
 }
@@ -1358,7 +1359,7 @@ impl Stream for NotificationsStream {
 struct ShardAssignmentTask {
     config: Arc<config::Config>,
     channel_pool: ChannelPool,
-    shards: Arc<Mutex<searchable::Shards>>,
+    shards: Arc<ArcSwap<searchable::Shards>>,
     changed: watch::Sender<std::result::Result<(), Error>>,
 }
 
@@ -1366,7 +1367,7 @@ impl ShardAssignmentTask {
     fn new(
         config: Arc<config::Config>,
         channel_pool: ChannelPool,
-        shards: Arc<Mutex<searchable::Shards>>,
+        shards: Arc<ArcSwap<searchable::Shards>>,
         changed: watch::Sender<std::result::Result<(), Error>>,
     ) -> Self {
         Self {
@@ -1403,8 +1404,8 @@ impl ShardAssignmentTask {
             shards.insert(a.shard.into(), client);
         }
 
-        let mut guard = self.shards.lock().await;
-        *guard = searchable::Shards::new(shards, mapper);
+        self.shards
+            .store(Arc::new(searchable::Shards::new(shards, mapper)));
 
         Ok(())
     }
@@ -1456,7 +1457,7 @@ impl ShardAssignmentTask {
 
 #[derive(Debug)]
 pub(crate) struct Manager {
-    shards: Arc<Mutex<searchable::Shards>>,
+    shards: Arc<ArcSwap<searchable::Shards>>,
     shutdown_requested: Arc<AtomicBool>,
     task_handle: JoinHandle<()>,
     changed: watch::Receiver<std::result::Result<(), Error>>,
@@ -1466,7 +1467,7 @@ impl Manager {
     /// Creates a new shard manager
     pub(crate) async fn new(config: &Arc<config::Config>) -> Result<Self> {
         let channel_pool = ChannelPool::new(config);
-        let shards = Arc::new(Mutex::new(searchable::Shards::default()));
+        let shards = Arc::new(ArcSwap::from_pointee(searchable::Shards::default()));
         let shutdown_requested = Arc::new(AtomicBool::new(false));
         let (task_handle, changed) =
             Self::start_shard_assignment_task(config, &channel_pool, &shards, &shutdown_requested)
@@ -1481,37 +1482,34 @@ impl Manager {
 
     /// Maps a key to a shard id.  This is a volatile mapping, callers must be prepared for the
     /// mapping to be invalid by the time it is used.
-    pub(crate) async fn get_shard_id(&self, key: &str) -> Option<ShardId> {
-        self.shards.lock().await.get_shard_id(key)
+    pub(crate) fn get_shard_id(&self, key: &str) -> Option<ShardId> {
+        self.shards.load().get_shard_id(key)
     }
 
     /// Gets a client by shard id
-    pub(crate) async fn get_client_by_shard_id(&self, id: ShardId) -> Result<Client> {
-        self.shards.lock().await.find_by_id(id)
+    pub(crate) fn get_client_by_shard_id(&self, id: ShardId) -> Result<Client> {
+        self.shards.load().find_by_id(id)
     }
 
     /// Gets a client for the shard that handles the given key
-    pub(crate) async fn get_client(&self, key: &str) -> Result<Client> {
-        self.shards.lock().await.find_by_key(key)
+    pub(crate) fn get_client(&self, key: &str) -> Result<Client> {
+        self.shards.load().find_by_key(key)
     }
 
     /// Returns the current clients sorted by shard id.  The shard mapping is volatile, so callers
     /// must be prepared.
-    pub(crate) async fn get_shard_clients(&self) -> Vec<Client> {
-        let clients: Vec<Client> = {
-            let lock = self.shards.lock().await;
-            let mut clients = Vec::with_capacity(lock.len());
-            clients.extend(lock.iter().map(|(_, c)| c.clone()));
-            clients
-        };
+    pub(crate) fn get_shard_clients(&self) -> Vec<Client> {
+        let shards = self.shards.load();
+        let mut clients = Vec::with_capacity(shards.len());
+        clients.extend(shards.iter().map(|(_, c)| c.clone()));
         clients
     }
 
     /// Returns the number of shards at the moment
     /// This is mostly usable as hint, as the number of shards may change over time
     #[allow(dead_code)]
-    pub(crate) async fn num_shards(&self) -> usize {
-        self.shards.lock().await.len()
+    pub(crate) fn num_shards(&self) -> usize {
+        self.shards.load().len()
     }
 
     #[allow(dead_code)]
@@ -1522,7 +1520,7 @@ impl Manager {
     async fn start_shard_assignment_task(
         config: &Arc<config::Config>,
         channel_pool: &ChannelPool,
-        shards: &Arc<Mutex<searchable::Shards>>,
+        shards: &Arc<ArcSwap<searchable::Shards>>,
         shutdown_requested: &Arc<AtomicBool>,
     ) -> Result<(
         JoinHandle<()>,

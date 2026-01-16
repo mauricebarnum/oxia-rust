@@ -20,6 +20,7 @@ xxhash-rust = { version = "0.8.15", default-features = false, features = [
     "xxh3",
 ] }
 backon = "1.6.0"
+arc-swap = "1.7"
 
 [dev-dependencies]
 tokio = { version = "1.49.0", features = ["rt-multi-thread", "macros"] }
@@ -31,6 +32,10 @@ oxia-bin-util = { path = "../oxia-bin-util" }
 tempfile = "3.24.0"
 anyhow = "1.0.100"
 itertools = "0.14.0"
+
+[[bench]]
+name = "shard_lookup"
+harness = false
 
 [lints]
 

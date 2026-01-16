@@ -206,7 +206,7 @@ impl NotificationsStream {
             };
             let mut active_iter = active_shard_ids.iter().peekable();
 
-            let clients = shard_manager.get_shard_clients().await;
+            let clients = shard_manager.get_shard_clients();
             let mut futs = Vec::new();
 
             'next_client: for client in clients {
@@ -318,7 +318,7 @@ impl NotificationsStream {
         let config = config.clone();
         let shard_manager = shard_manager.clone();
         let future = async move {
-            let client = match shard_manager.get_client_by_shard_id(id).await {
+            let client = match shard_manager.get_client_by_shard_id(id) {
                 Ok(c) => c,
                 Err(e) => return (id, Err(e)),
             };
