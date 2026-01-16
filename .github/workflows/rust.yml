@@ -2,11 +2,11 @@ name: Rust
 
 on:
   push:
+    branches: ["main"]
     paths-ignore:
       - "build/Dockerfile"
       - ".github/workflows/docker-image.yml"
   pull_request:
-    branches: ["main"]
     paths-ignore:
       - "build/Dockerfile"
       - ".github/workflows/docker-image.yml"
