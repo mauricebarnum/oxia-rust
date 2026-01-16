@@ -22,6 +22,7 @@ use std::task::Poll;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
+use arc_swap::ArcSwapOption;
 use bytes::Bytes;
 use futures::stream::Stream;
 use futures::stream::StreamExt;
@@ -29,8 +30,8 @@ use rand::SeedableRng;
 use rand::distr::Distribution;
 use rand::distr::Uniform;
 use rand::rngs::StdRng;
+use tokio::sync::Mutex;
 use tokio::sync::OnceCell;
-use tokio::sync::RwLock;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
@@ -275,7 +276,10 @@ struct ClientData {
     leader: String,
     meta: tonic::metadata::MetadataMap,
     /// Cached gRPC client. Set to None when invalidated, lazily populated on first use.
-    grpc: RwLock<Option<GrpcClient>>,
+    /// Using ArcSwapOption for lock-free reads on the hot path.
+    grpc: ArcSwapOption<GrpcClient>,
+    /// Mutex to serialize initialization attempts (prevents thundering herd on cache miss).
+    grpc_init: Mutex<()>,
 }
 
 impl ClientData {
@@ -292,7 +296,8 @@ impl ClientData {
             shard_id,
             leader: leader.into(),
             meta,
-            grpc: RwLock::new(None),
+            grpc: ArcSwapOption::empty(),
+            grpc_init: Mutex::new(()),
         }
     }
 }
@@ -306,35 +311,30 @@ pub struct Client {
 impl Client {
     /// Get the cached gRPC client, or create one from the pool if not cached.
     async fn get_grpc_client(&self) -> crate::Result<GrpcClient> {
-        // Fast path: check if we have a cached client
-        {
-            let guard = self.data.grpc.read().await;
-            if let Some(ref client) = *guard {
-                return Ok(client.clone());
-            }
+        // Fast path: lock-free check if we have a cached client
+        if let Some(client) = self.data.grpc.load_full() {
+            return Ok((*client).clone());
         }
 
-        // Slow path: need to create a new client
-        let mut guard = self.data.grpc.write().await;
-        // Double-check after acquiring write lock
-        if let Some(ref client) = *guard {
-            return Ok(client.clone());
+        // Slow path: acquire init lock to prevent thundering herd
+        let _guard = self.data.grpc_init.lock().await;
+
+        // Double-check after acquiring lock (another task may have initialized)
+        if let Some(client) = self.data.grpc.load_full() {
+            return Ok((*client).clone());
         }
 
         // Create new client from pool
         let url = format!("http://{}", self.data.leader);
         let channel = self.data.channel_pool.get(&url).await?;
         let client = GrpcClient::new(channel);
-        *guard = Some(client.clone());
+        self.data.grpc.store(Some(Arc::new(client.clone())));
         Ok(client)
     }
 
     /// Invalidate the cached gRPC client for this shard's leader.
     async fn invalidate_channel(&self) {
-        {
-            let mut guard = self.data.grpc.write().await;
-            *guard = None;
-        }
+        self.data.grpc.store(None);
         let url = format!("http://{}", self.data.leader);
         self.data.channel_pool.remove(&url).await;
     }
@@ -1643,8 +1643,7 @@ mod tests {
             let client = make_test_client(&config);
 
             // Initially, no gRPC client should be cached
-            let guard = client.data.grpc.read().await;
-            assert!(guard.is_none());
+            assert!(client.data.grpc.load().is_none());
         }
 
         #[cfg(not(miri))] // Miri doesn't support network operations (getaddrinfo)
@@ -1658,8 +1657,7 @@ mod tests {
             assert!(result.is_err());
 
             // Cache should still be empty since connection failed
-            let guard = client.data.grpc.read().await;
-            assert!(guard.is_none());
+            assert!(client.data.grpc.load().is_none());
         }
 
         #[test_log::test(tokio::test)]
@@ -1671,8 +1669,7 @@ mod tests {
             client.invalidate_channel().await;
 
             // Cache should still be None
-            let guard = client.data.grpc.read().await;
-            assert!(guard.is_none());
+            assert!(client.data.grpc.load().is_none());
         }
 
         #[cfg(not(miri))] // Miri doesn't support network operations (getaddrinfo)
