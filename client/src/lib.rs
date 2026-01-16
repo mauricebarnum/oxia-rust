@@ -853,14 +853,12 @@ impl Client {
             .ok_or_else(|| crate::Error::Custom("Shard manager not initialized".to_string()))
     }
 
-    async fn get_shard(&self, k: &str) -> Result<shard::Client> {
-        let shard = self.get_shard_manager()?.get_client(k).await?;
-        Ok(shard)
+    fn get_shard(&self, k: &str) -> Result<shard::Client> {
+        self.get_shard_manager()?.get_client(k)
     }
 
-    async fn get_shard_by_id(&self, id: ShardId) -> Result<shard::Client> {
-        let shard = self.get_shard_manager()?.get_client_by_shard_id(id).await?;
-        Ok(shard)
+    fn get_shard_by_id(&self, id: ShardId) -> Result<shard::Client> {
+        self.get_shard_manager()?.get_client_by_shard_id(id)
     }
 
     pub async fn get_with_options(
@@ -888,7 +886,7 @@ impl Client {
 
         if use_single_shard {
             let selector = options.partition_key.as_deref().unwrap_or(&key);
-            let shard = self.get_shard(selector).await?;
+            let shard = self.get_shard(selector)?;
             return execute_get(shard, key, options).await;
         }
 
@@ -898,24 +896,21 @@ impl Client {
             n => n,
         };
 
-        let best_response =
-            futures::stream::iter(self.get_shard_manager()?.get_shard_clients().await)
-                .map(|shard| execute_get(shard, key.clone(), options.clone()))
-                .buffer_unordered(max_parallel)
-                .try_fold(None, |best, response| async {
-                    Ok(match response {
-                        Some(candidate) => Some(match best {
-                            None => candidate,
-                            Some(prev) => util::select_response(
-                                Some(prev),
-                                candidate,
-                                options.comparison_type,
-                            ),
-                        }),
-                        None => best,
-                    })
+        let best_response = futures::stream::iter(self.get_shard_manager()?.get_shard_clients())
+            .map(|shard| execute_get(shard, key.clone(), options.clone()))
+            .buffer_unordered(max_parallel)
+            .try_fold(None, |best, response| async {
+                Ok(match response {
+                    Some(candidate) => Some(match best {
+                        None => candidate,
+                        Some(prev) => {
+                            util::select_response(Some(prev), candidate, options.comparison_type)
+                        }
+                    }),
+                    None => best,
                 })
-                .await?;
+            })
+            .await?;
 
         Ok(best_response)
     }
@@ -994,7 +989,7 @@ impl Client {
         let key = Arc::from(key.into());
         let value = value.into();
         let selector = options.partition_key.as_deref().unwrap_or(&key);
-        let shard = self.get_shard(selector).await?;
+        let shard = self.get_shard(selector)?;
         execute_with_retry(&self.config, move || {
             let shard = shard.clone();
             let key = key.clone();
@@ -1021,7 +1016,7 @@ impl Client {
     ) -> Result<()> {
         let key = Arc::from(key.into());
         let selector = options.partition_key.as_deref().unwrap_or(&key);
-        let shard = self.get_shard(selector).await?;
+        let shard = self.get_shard(selector)?;
         execute_with_retry(&self.config, move || {
             let shard = shard.clone();
             let key = key.clone();
@@ -1061,9 +1056,9 @@ impl Client {
 
         if let Some(shard) = {
             if let Some(pk) = options.partition_key.as_deref() {
-                Some(self.get_shard(pk).await?)
+                Some(self.get_shard(pk)?)
             } else if let Some(id) = options.shard {
-                Some(self.get_shard_by_id(id.into()).await?)
+                Some(self.get_shard_by_id(id.into())?)
             } else {
                 None
             }
@@ -1077,7 +1072,7 @@ impl Client {
         };
 
         let mut result_stream =
-            futures::stream::iter(self.get_shard_manager()?.get_shard_clients().await)
+            futures::stream::iter(self.get_shard_manager()?.get_shard_clients())
                 .map(|shard| do_delete_range(shard, start.clone(), end.clone(), options.clone()))
                 .buffer_unordered(n);
 
@@ -1134,7 +1129,7 @@ impl Client {
         let end = Arc::from(end_exclusive.into());
 
         if let Some(pk) = options.partition_key.as_deref() {
-            let shard = self.get_shard(pk).await?;
+            let shard = self.get_shard(pk)?;
             return do_list(shard, start, end, options).await;
         }
 
@@ -1144,7 +1139,7 @@ impl Client {
         };
 
         let mut result_stream =
-            futures::stream::iter(self.get_shard_manager()?.get_shard_clients().await)
+            futures::stream::iter(self.get_shard_manager()?.get_shard_clients())
                 .map(|shard| do_list(shard, start.clone(), end.clone(), options.clone()))
                 .buffer_unordered(n);
 
@@ -1199,7 +1194,7 @@ impl Client {
         let end = Arc::from(end_exclusive.into());
 
         if let Some(pk) = options.partition_key.as_deref() {
-            let shard = self.get_shard(pk).await?;
+            let shard = self.get_shard(pk)?;
             return do_range_scan(shard, start, end, options).await;
         }
 
@@ -1209,7 +1204,7 @@ impl Client {
         };
 
         let mut result_stream =
-            futures::stream::iter(self.get_shard_manager()?.get_shard_clients().await)
+            futures::stream::iter(self.get_shard_manager()?.get_shard_clients())
                 .map(|shard| do_range_scan(shard, start.clone(), end.clone(), options.clone()))
                 .buffer_unordered(n);
 

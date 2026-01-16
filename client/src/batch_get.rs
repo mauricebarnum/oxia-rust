@@ -1,4 +1,4 @@
-// Copyright 2025 Maurice S. Barnum
+// Copyright 2025-2026 Maurice S. Barnum
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -154,7 +154,7 @@ pub(super) async fn prepare_requests(
             .and_then(|o| o.partition_key.as_deref())
             .unwrap_or(&item.key);
 
-        match shard_manager.get_shard_id(selector).await {
+        match shard_manager.get_shard_id(selector) {
             Some(shard_id) => {
                 let request_ref = reqs.entry(shard_id).or_insert_with(|| Request {
                     items: Vec::new(),
@@ -172,7 +172,7 @@ pub(super) async fn prepare_requests(
     let mut batch_get_futures = Vec::with_capacity(reqs.len());
 
     for (shard_id, req) in reqs {
-        match shard_manager.get_client_by_shard_id(shard_id).await {
+        match shard_manager.get_client_by_shard_id(shard_id) {
             Ok(shard) => {
                 batch_get_futures.push(async move { shard.batch_get(req).await.boxed() });
             }
