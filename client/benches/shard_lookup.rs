@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Benchmark comparing Mutex vs ArcSwap for shard lookup hot path
+// Benchmark comparing sync primitives for hot paths
 //
 // Run with: cargo bench --package mauricebarnum-oxia-client --bench shard_lookup
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use arc_swap::ArcSwap;
-use tokio::sync::Mutex;
+use arc_swap::{ArcSwap, ArcSwapOption};
+use tokio::sync::{Mutex, RwLock};
 
 // Simulate the searchable::Shards structure
 #[derive(Clone, Default)]
@@ -228,5 +228,177 @@ async fn main() {
     println!(
         "  Speedup: {:.2}x",
         mutex_time.as_nanos() as f64 / arcswap_time.as_nanos() as f64
+    );
+
+    println!();
+    println!();
+    bench_grpc_client_cache().await;
+}
+
+// =============================================================================
+// Benchmark 2: gRPC Client Cache (RwLock vs ArcSwapOption)
+// =============================================================================
+
+// Simulates a cached gRPC client (like tonic Channel)
+#[derive(Clone)]
+struct MockGrpcClient {
+    #[allow(dead_code)]
+    id: u64,
+}
+
+// Current implementation: RwLock with double-checked locking
+struct RwLockCache {
+    client: RwLock<Option<MockGrpcClient>>,
+}
+
+impl RwLockCache {
+    fn new() -> Self {
+        Self {
+            client: RwLock::new(Some(MockGrpcClient { id: 1 })),
+        }
+    }
+
+    async fn get_client(&self) -> MockGrpcClient {
+        // Fast path: read lock
+        {
+            let guard = self.client.read().await;
+            if let Some(ref client) = *guard {
+                return client.clone();
+            }
+        }
+        // Slow path would acquire write lock - but for cache hit benchmark we skip this
+        unreachable!("cache should be populated")
+    }
+}
+
+// Proposed implementation: ArcSwapOption
+struct ArcSwapCache {
+    client: ArcSwapOption<MockGrpcClient>,
+}
+
+impl ArcSwapCache {
+    fn new() -> Self {
+        Self {
+            client: ArcSwapOption::new(Some(Arc::new(MockGrpcClient { id: 1 }))),
+        }
+    }
+
+    fn get_client(&self) -> MockGrpcClient {
+        // Lock-free load
+        self.client
+            .load()
+            .as_ref()
+            .map(|arc| (**arc).clone())
+            .unwrap()
+    }
+}
+
+async fn bench_grpc_client_cache() {
+    println!("gRPC Client Cache Benchmark: RwLock vs ArcSwapOption");
+    println!("=====================================================");
+    println!("Iterations: {} (cache hit path only)", ITERATIONS);
+    println!();
+
+    // Single-threaded benchmark
+    println!("Single-threaded (no contention):");
+    println!("---------------------------------");
+
+    let rwlock_cache = RwLockCache::new();
+    let arcswap_cache = ArcSwapCache::new();
+
+    // Warmup
+    for _ in 0..1000 {
+        std::hint::black_box(rwlock_cache.get_client().await);
+        std::hint::black_box(arcswap_cache.get_client());
+    }
+
+    // RwLock benchmark
+    let start = Instant::now();
+    for _ in 0..ITERATIONS {
+        std::hint::black_box(rwlock_cache.get_client().await);
+    }
+    let rwlock_time = start.elapsed();
+
+    // ArcSwapOption benchmark
+    let start = Instant::now();
+    for _ in 0..ITERATIONS {
+        std::hint::black_box(arcswap_cache.get_client());
+    }
+    let arcswap_time = start.elapsed();
+
+    println!(
+        "  RwLock:       {} (total: {:?})",
+        format_duration(rwlock_time, ITERATIONS),
+        rwlock_time
+    );
+    println!(
+        "  ArcSwapOption: {} (total: {:?})",
+        format_duration(arcswap_time, ITERATIONS),
+        arcswap_time
+    );
+    println!(
+        "  Speedup: {:.2}x",
+        rwlock_time.as_nanos() as f64 / arcswap_time.as_nanos() as f64
+    );
+    println!();
+
+    // Concurrent benchmark
+    println!(
+        "Concurrent ({} tasks, {} total ops):",
+        CONCURRENT_TASKS, ITERATIONS
+    );
+    println!("----------------------------------------------");
+
+    let rwlock_cache = Arc::new(RwLockCache::new());
+    let arcswap_cache = Arc::new(ArcSwapCache::new());
+
+    // RwLock concurrent
+    let per_task = ITERATIONS / CONCURRENT_TASKS as u64;
+    let start = Instant::now();
+    let handles: Vec<_> = (0..CONCURRENT_TASKS)
+        .map(|_| {
+            let cache = rwlock_cache.clone();
+            tokio::spawn(async move {
+                for _ in 0..per_task {
+                    std::hint::black_box(cache.get_client().await);
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.await.unwrap();
+    }
+    let rwlock_time = start.elapsed();
+
+    // ArcSwapOption concurrent
+    let start = Instant::now();
+    let handles: Vec<_> = (0..CONCURRENT_TASKS)
+        .map(|_| {
+            let cache = arcswap_cache.clone();
+            tokio::spawn(async move {
+                for _ in 0..per_task {
+                    std::hint::black_box(cache.get_client());
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.await.unwrap();
+    }
+    let arcswap_time = start.elapsed();
+
+    println!(
+        "  RwLock:       {} (total: {:?})",
+        format_duration(rwlock_time, ITERATIONS),
+        rwlock_time
+    );
+    println!(
+        "  ArcSwapOption: {} (total: {:?})",
+        format_duration(arcswap_time, ITERATIONS),
+        arcswap_time
+    );
+    println!(
+        "  Speedup: {:.2}x",
+        rwlock_time.as_nanos() as f64 / arcswap_time.as_nanos() as f64
     );
 }
