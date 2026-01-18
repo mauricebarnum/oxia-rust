@@ -21,6 +21,7 @@ xxhash-rust = { version = "0.8.15", default-features = false, features = [
 ] }
 backon = "1.6.0"
 arc-swap = "1.7"
+tokio-util = "0.7.18"
 
 [dev-dependencies]
 tokio = { version = "1.49.0", features = ["rt-multi-thread", "macros"] }
