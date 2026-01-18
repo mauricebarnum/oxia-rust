@@ -16,8 +16,6 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -35,6 +33,7 @@ use tokio::sync::OnceCell;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
 use tonic::Streaming;
 use tonic::metadata::MetadataValue;
 use tracing::debug;
@@ -275,6 +274,7 @@ struct ClientData {
     shard_id: ShardId,
     leader: String,
     meta: tonic::metadata::MetadataMap,
+    cancel_token: CancellationToken,
     /// Cached gRPC client. Set to None when invalidated, lazily populated on first use.
     /// Using ArcSwapOption for lock-free reads on the hot path.
     grpc: ArcSwapOption<GrpcClient>,
@@ -289,6 +289,7 @@ impl ClientData {
         shard_id: ShardId,
         leader: impl Into<String>,
         meta: tonic::metadata::MetadataMap,
+        cancel_token: CancellationToken,
     ) -> Self {
         Self {
             config,
@@ -296,6 +297,7 @@ impl ClientData {
             shard_id,
             leader: leader.into(),
             meta,
+            cancel_token,
             grpc: ArcSwapOption::empty(),
             grpc_init: Mutex::new(()),
         }
@@ -465,23 +467,28 @@ impl Client {
                 Uniform::new_inclusive(min_ms, max_ms).unwrap()
             };
             loop {
-                let req = client.create_request(oxia_proto::SessionHeartbeat {
-                    session_id,
-                    shard: client.data.shard_id.into(),
-                });
-                let result = client
-                    .rpc(|mut grpc| async move { grpc.keep_alive(req).await })
-                    .await;
-                debug!(?result, "grpc.keep_alive");
+                tokio::select! {
+                    _ = client.data.cancel_token.cancelled() => break,
+                    _ = async {
+                        let req = client.create_request(oxia_proto::SessionHeartbeat {
+                            session_id,
+                            shard: client.data.shard_id.into(),
+                        });
+                        let result = client
+                            .rpc(|mut grpc| async move { grpc.keep_alive(req).await })
+                        .await;
+                        debug!(?result, "grpc.keep_alive");
 
-                if let Err(ref e) = result {
-                    warn!(?e, "heartbeat failed");
+                        if let Err(ref e) = result {
+                            warn!(?e, "heartbeat failed");
+                        }
+
+                        let sleep_ms = distr.sample(&mut rng);
+                        let timeout = Duration::from_millis(sleep_ms.into());
+                        trace!("sleeping for {} ms", sleep_ms);
+                        sleep(timeout).await;
+                    } => {}
                 }
-
-                let sleep_ms = distr.sample(&mut rng);
-                let timeout = Duration::from_millis(sleep_ms.into());
-                trace!("sleeping for {} ms", sleep_ms);
-                sleep(timeout).await;
             }
         })
     }
@@ -490,6 +497,7 @@ impl Client {
     pub(crate) fn new(
         channel_pool: ChannelPool,
         config: Arc<config::Config>,
+        cancel_token: CancellationToken,
         shard_id: ShardId,
         dest: impl Into<String>,
     ) -> Result<Self> {
@@ -503,7 +511,14 @@ impl Client {
         );
 
         Ok(Client {
-            data: Arc::new(ClientData::new(config, channel_pool, shard_id, dest, meta)),
+            data: Arc::new(ClientData::new(
+                config,
+                channel_pool,
+                shard_id,
+                dest,
+                meta,
+                cancel_token,
+            )),
             session: Arc::new(OnceCell::new()),
         })
     }
@@ -1360,6 +1375,7 @@ struct ShardAssignmentTask {
     config: Arc<config::Config>,
     channel_pool: ChannelPool,
     shards: Arc<ArcSwap<searchable::Shards>>,
+    token: CancellationToken,
     changed: watch::Sender<std::result::Result<(), Error>>,
 }
 
@@ -1368,12 +1384,14 @@ impl ShardAssignmentTask {
         config: Arc<config::Config>,
         channel_pool: ChannelPool,
         shards: Arc<ArcSwap<searchable::Shards>>,
+        token: CancellationToken,
         changed: watch::Sender<std::result::Result<(), Error>>,
     ) -> Self {
         Self {
             config,
             channel_pool,
             shards,
+            token,
             changed,
         }
     }
@@ -1398,6 +1416,7 @@ impl ShardAssignmentTask {
             let client = Client::new(
                 self.channel_pool.clone(),
                 self.config.clone(),
+                self.token.clone(),
                 a.shard.into(),
                 &a.leader,
             )?;
@@ -1431,34 +1450,40 @@ impl ShardAssignmentTask {
         }
     }
 
-    async fn run(&mut self, mut cluster: GrpcClient, shutdown_requested: Arc<AtomicBool>) {
-        let sleep_time = Duration::from_millis(600);
-        loop {
-            if shutdown_requested.load(Ordering::Relaxed) {
-                info!("ShardAssignmentTask exiting");
-                return;
-            }
+    async fn run(&mut self, mut cluster: GrpcClient) {
+        #[derive(Debug)]
+        enum ExitReason {
+            Cancelled,
+        }
 
-            let req = oxia_proto::ShardAssignmentsRequest {
-                namespace: self.config.namespace().into(),
-            };
-            match cluster.get_shard_assignments(req).await {
-                Ok(rsp) => self.process_assignments_stream(rsp.into_inner()).await,
-                Err(err) => {
-                    warn!(?err, "get_shard_assignments");
+        let mut interval = tokio::time::interval(Duration::from_millis(600));
+        let reason = loop {
+            tokio::select! {
+                _ = self.token.cancelled() => {
+                    break ExitReason::Cancelled;
+                }
+                _ = interval.tick() => {
+                    let req = oxia_proto::ShardAssignmentsRequest {
+                        namespace: self.config.namespace().into(),
+                    };
+                    match cluster.get_shard_assignments(req).await {
+                        Ok(rsp) => self.process_assignments_stream(rsp.into_inner()).await,
+                        Err(err) => {
+                            warn!(?err, "get_shard_assignments");
+                        }
+                    }
+                    trace!(?self.shards);
                 }
             }
-            debug!(?self.shards);
-            trace!(?sleep_time, "sleeping in retrieve_shards");
-            tokio::time::sleep(sleep_time).await;
-        }
+        };
+        info!(?reason, "ShardAssignmentTask exiting");
     }
 }
 
 #[derive(Debug)]
 pub(crate) struct Manager {
     shards: Arc<ArcSwap<searchable::Shards>>,
-    shutdown_requested: Arc<AtomicBool>,
+    cancel_token: CancellationToken,
     task_handle: JoinHandle<()>,
     changed: watch::Receiver<std::result::Result<(), Error>>,
 }
@@ -1468,13 +1493,13 @@ impl Manager {
     pub(crate) async fn new(config: &Arc<config::Config>) -> Result<Self> {
         let channel_pool = ChannelPool::new(config);
         let shards = Arc::new(ArcSwap::from_pointee(searchable::Shards::default()));
-        let shutdown_requested = Arc::new(AtomicBool::new(false));
+        let cancel_token = CancellationToken::new();
         let (task_handle, changed) =
-            Self::start_shard_assignment_task(config, &channel_pool, &shards, &shutdown_requested)
+            Self::start_shard_assignment_task(config, &channel_pool, &cancel_token, &shards)
                 .await?;
         Ok(Manager {
             shards,
-            shutdown_requested,
+            cancel_token,
             task_handle,
             changed,
         })
@@ -1520,8 +1545,8 @@ impl Manager {
     async fn start_shard_assignment_task(
         config: &Arc<config::Config>,
         channel_pool: &ChannelPool,
+        token: &CancellationToken,
         shards: &Arc<ArcSwap<searchable::Shards>>,
-        shutdown_requested: &Arc<AtomicBool>,
     ) -> Result<(
         JoinHandle<()>,
         watch::Receiver<std::result::Result<(), Error>>,
@@ -1531,11 +1556,15 @@ impl Manager {
         rx.borrow_and_update();
 
         let cluster = create_grpc_client(config.service_addr(), channel_pool).await?;
-        let mut task =
-            ShardAssignmentTask::new(config.clone(), channel_pool.clone(), shards.clone(), tx);
-        let shutdown_requested = shutdown_requested.clone();
+        let mut task = ShardAssignmentTask::new(
+            config.clone(),
+            channel_pool.clone(),
+            shards.clone(),
+            token.clone(),
+            tx,
+        );
         let handle = tokio::spawn(async move {
-            task.run(cluster, shutdown_requested).await;
+            task.run(cluster).await;
         });
 
         // Wait for the notification that the task has started up
@@ -1549,7 +1578,7 @@ impl Manager {
 
 impl Drop for Manager {
     fn drop(&mut self) {
-        self.shutdown_requested.store(true, Ordering::Relaxed);
+        self.cancel_token.cancel();
         self.task_handle.abort();
     }
 }
@@ -1634,7 +1663,14 @@ mod tests {
 
         fn make_test_client(config: &Arc<config::Config>) -> Client {
             let pool = ChannelPool::new(config);
-            Client::new(pool, config.clone(), ShardId::new(1), "localhost:1234").unwrap()
+            Client::new(
+                pool,
+                config.clone(),
+                CancellationToken::new(),
+                ShardId::new(1),
+                "localhost:1234",
+            )
+            .unwrap()
         }
 
         #[test_log::test(tokio::test)]

@@ -24,6 +24,7 @@ use std::{io, path};
 use tempfile::TempDir;
 
 #[inline]
+#[allow(dead_code)]
 pub fn non_zero(x: u32) -> NonZeroU32 {
     NonZeroU32::new(x).unwrap()
 }
