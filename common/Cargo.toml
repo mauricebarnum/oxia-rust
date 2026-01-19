@@ -7,13 +7,13 @@ license = "Apache-2.0"
 
 [dependencies]
 bytes = "1.11.0"
-prost = "0.14.1"                                                       # If using Protobuf
-prost-types = "0.14.1"
+prost = "0.14.3"                                                       # If using Protobuf
+prost-types = "0.14.3"
 tonic = { version = "0.14.2", features = ["gzip", "channel", "zstd"] }
 tonic-prost = "0.14.2"
 
 [build-dependencies]
-prost-build = "0.14.1"
+prost-build = "0.14.3"
 tonic-build = "0.14.2"
 tonic-prost-build = "0.14.2"
 
