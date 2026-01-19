@@ -1336,6 +1336,10 @@ mod searchable {
         pub(super) fn len(&self) -> usize {
             self.shards.len()
         }
+
+        pub(crate) fn get(&self, id: ShardId) -> Option<&Client> {
+            self.shards.get(id)
+        }
     }
 }
 
@@ -1407,19 +1411,28 @@ impl ShardAssignmentTask {
     async fn process_assignments(&self, ns: oxia_proto::NamespaceShardsAssignment) -> Result<()> {
         // Create shard mappings and bail out if we find anything silly.
         let mapper = Self::make_mapper(&ns)?;
+        let current = self.shards.load();
 
-        // Now build the shard clients. Each Client holds a reference to the channel pool
-        // and will fetch channels on demand, allowing for reconnection on errors.
         let mut shards = ShardIdMap::<Client>::default();
+
         for a in &ns.assignments {
             info!(?a, "processing assignments");
-            let client = Client::new(
-                self.channel_pool.clone(),
-                self.config.clone(),
-                self.token.clone(),
-                a.shard.into(),
-                &a.leader,
-            )?;
+            let id = a.shard.into();
+            let client = if let Some(c) = current
+                .get(id)
+                .filter(|x| x.data.leader == a.leader)
+                .cloned()
+            {
+                c
+            } else {
+                Client::new(
+                    self.channel_pool.clone(),
+                    Arc::clone(&self.config),
+                    self.token.clone(),
+                    a.shard.into(),
+                    &a.leader,
+                )?
+            };
             shards.insert(a.shard.into(), client);
         }
 
