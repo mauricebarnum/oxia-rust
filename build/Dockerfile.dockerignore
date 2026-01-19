@@ -8,6 +8,7 @@
 # Include minimal sources to make cargo fetch happy
 !**/src/lib.rs
 !**/src/main.rs
+!client/benches/*.rs
 
 # Allow build files (Dockerfile and any supporting scripts in build/)
 !build/**
