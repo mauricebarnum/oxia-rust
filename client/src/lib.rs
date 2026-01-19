@@ -872,7 +872,7 @@ impl Client {
         let execute_get = |shard: shard::Client, key: Arc<str>, options: GetOptions| async move {
             execute_with_retry(&self.config, move || {
                 let shard = shard.clone();
-                let key = key.clone();
+                let key = Arc::clone(&key);
                 let options = options.clone();
                 async move { shard.get(&key, &options).await }
             })
@@ -897,7 +897,7 @@ impl Client {
         };
 
         let best_response = futures::stream::iter(self.get_shard_manager()?.get_shard_clients())
-            .map(|shard| execute_get(shard, key.clone(), options.clone()))
+            .map(|shard| execute_get(shard, Arc::clone(&key), options.clone()))
             .buffer_unordered(max_parallel)
             .try_fold(None, |best, response| async {
                 Ok(match response {
@@ -992,7 +992,7 @@ impl Client {
         let shard = self.get_shard(selector)?;
         execute_with_retry(&self.config, move || {
             let shard = shard.clone();
-            let key = key.clone();
+            let key = Arc::clone(&key);
             let value = value.clone();
             let options = options.clone();
             async move { shard.put(&key, value, &options).await }
@@ -1019,7 +1019,7 @@ impl Client {
         let shard = self.get_shard(selector)?;
         execute_with_retry(&self.config, move || {
             let shard = shard.clone();
-            let key = key.clone();
+            let key = Arc::clone(&key);
             let options = options.clone();
             async move { shard.delete(&key, &options).await }
         })
@@ -1043,8 +1043,8 @@ impl Client {
                                options: DeleteRangeOptions| async move {
             execute_with_retry(&self.config, move || {
                 let shard = shard.clone();
-                let start = start.clone();
-                let end = end.clone();
+                let start = Arc::clone(&start);
+                let end = Arc::clone(&end);
                 let options = options.clone();
                 async move { shard.delete_range(&start, &end, &options).await }
             })
@@ -1073,7 +1073,9 @@ impl Client {
 
         let mut result_stream =
             futures::stream::iter(self.get_shard_manager()?.get_shard_clients())
-                .map(|shard| do_delete_range(shard, start.clone(), end.clone(), options.clone()))
+                .map(|shard| {
+                    do_delete_range(shard, Arc::clone(&start), Arc::clone(&end), options.clone())
+                })
                 .buffer_unordered(n);
 
         let mut errs = Vec::new();
@@ -1117,8 +1119,8 @@ impl Client {
                        options: ListOptions| async move {
             execute_with_retry(&self.config, move || {
                 let shard = shard.clone();
-                let start = start.clone();
-                let end = end.clone();
+                let start = Arc::clone(&start);
+                let end = Arc::clone(&end);
                 let options = options.clone();
                 async move { shard.list(&start, &end, &options).await }
             })
@@ -1140,7 +1142,7 @@ impl Client {
 
         let mut result_stream =
             futures::stream::iter(self.get_shard_manager()?.get_shard_clients())
-                .map(|shard| do_list(shard, start.clone(), end.clone(), options.clone()))
+                .map(|shard| do_list(shard, Arc::clone(&start), Arc::clone(&end), options.clone()))
                 .buffer_unordered(n);
 
         let mut response = ListResponse::default();
@@ -1182,8 +1184,8 @@ impl Client {
                              options: RangeScanOptions| async move {
             execute_with_retry(&self.config, move || {
                 let shard = shard.clone();
-                let start = start.clone();
-                let end = end.clone();
+                let start = Arc::clone(&start);
+                let end = Arc::clone(&end);
                 let options = options.clone();
                 async move { shard.range_scan(&start, &end, &options).await }
             })
@@ -1205,7 +1207,9 @@ impl Client {
 
         let mut result_stream =
             futures::stream::iter(self.get_shard_manager()?.get_shard_clients())
-                .map(|shard| do_range_scan(shard, start.clone(), end.clone(), options.clone()))
+                .map(|shard| {
+                    do_range_scan(shard, Arc::clone(&start), Arc::clone(&end), options.clone())
+                })
                 .buffer_unordered(n);
 
         let mut response = RangeScanResponse::default();
@@ -1247,8 +1251,8 @@ impl Client {
     ) -> Result<notification::NotificationsStream> {
         let shard_manager = self.get_shard_manager()?;
         Ok(NotificationsStream::new(
-            self.config.clone(),
-            shard_manager.clone(),
+            Arc::clone(&self.config),
+            Arc::clone(&shard_manager),
             options,
         ))
     }

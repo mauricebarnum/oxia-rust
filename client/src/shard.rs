@@ -866,7 +866,7 @@ impl Client {
         let keys: Vec<Arc<str>> = batch_req
             .items
             .iter()
-            .map(|item| item.key.clone())
+            .map(|item| Arc::clone(&item.key))
             .collect();
 
         let gets: Vec<oxia_proto::GetRequest> = batch_req
@@ -890,7 +890,7 @@ impl Client {
             .rpc(|mut grpc| async move { grpc.read(read_req).await })
             .await;
 
-        Self::demux_stream(self.data.clone(), keys, read_result).await
+        Self::demux_stream(Arc::clone(&self.data), keys, read_result).await
     }
 
     /// Puts a value with the given options
@@ -1570,9 +1570,9 @@ impl Manager {
 
         let cluster = create_grpc_client(config.service_addr(), channel_pool).await?;
         let mut task = ShardAssignmentTask::new(
-            config.clone(),
+            Arc::clone(config),
             channel_pool.clone(),
-            shards.clone(),
+            Arc::clone(shards),
             token.clone(),
             tx,
         );
