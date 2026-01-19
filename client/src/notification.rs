@@ -175,7 +175,7 @@ impl NotificationsStream {
         });
 
         Self {
-            state: Self::configure(config.clone(), shard_manager.clone(), None),
+            state: Self::configure(Arc::clone(&config), Arc::clone(&shard_manager), None),
             config,
             shard_manager,
             options,
@@ -228,7 +228,7 @@ impl NotificationsStream {
 
                 debug!(?id, "creating notification stream for shard");
                 futs.push({
-                    let config = config.clone();
+                    let config = Arc::clone(&config);
                     let offset = offsets.get(id);
                     async move {
                         let r = crate::execute_with_retry(&config, move || {
@@ -315,8 +315,8 @@ impl NotificationsStream {
         id: ShardId,
         offset: Option<i64>,
     ) {
-        let config = config.clone();
-        let shard_manager = shard_manager.clone();
+        let config = Arc::clone(config);
+        let shard_manager = Arc::clone(shard_manager);
         let future = async move {
             let client = match shard_manager.get_client_by_shard_id(id) {
                 Ok(c) => c,
@@ -451,8 +451,8 @@ impl Stream for NotificationsStream {
                             Cmd::Configure => {
                                 debug!("config change signal received");
                                 this.state = Self::configure(
-                                    this.config.clone(),
-                                    this.shard_manager.clone(),
+                                    Arc::clone(&this.config),
+                                    Arc::clone(&this.shard_manager),
                                     Some(std::mem::take(s)),
                                 );
                             }

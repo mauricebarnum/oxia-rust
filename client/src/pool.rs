@@ -85,7 +85,7 @@ pub struct ChannelPool<F = DefaultChannelFactory> {
 impl ChannelPool<DefaultChannelFactory> {
     pub fn new(config: &Arc<Config>) -> Self {
         Self {
-            inner: Arc::new(inner::Inner::new(config.clone())),
+            inner: Arc::new(inner::Inner::new(Arc::clone(config))),
             factory: DefaultChannelFactory {},
         }
     }
@@ -95,7 +95,7 @@ impl ChannelPool<DefaultChannelFactory> {
 impl<F: ChannelFactory> ChannelPool<F> {
     pub fn with_channel_factory(config: &Arc<Config>, factory: F) -> Self {
         Self {
-            inner: Arc::new(inner::Inner::new(config.clone())),
+            inner: Arc::new(inner::Inner::new(Arc::clone(config))),
             factory,
         }
     }
