@@ -491,10 +491,22 @@ impl Default for DeleteRangeOptions {
 /// reconnection behavior.
 #[derive(Builder, Clone, Debug)]
 pub struct NotificationsOptions {
-    /// Reconnect to a shard when its stream closes normally
+    /// Enable automatic reconnection when a shard stream closes normally.
+    ///
+    /// When enabled, the notifications stream will automatically attempt to
+    /// reconnect to a shard when its stream ends without an error, resuming
+    /// from the last received offset.
     #[builder(default = false)]
     pub(crate) reconnect_on_close: bool,
-    /// Reconnect to a shard when its stream encounters an error
+
+    /// Enable automatic reconnection when a shard stream encounters an error.
+    ///
+    /// When enabled, the notifications stream will automatically attempt to
+    /// reconnect to a shard when an error occurs, resuming from the last
+    /// received offset.
+    ///
+    /// Note: Errors indicating the shard is no longer available (e.g., shard
+    /// reassignment) will not trigger a reconnection attempt.
     #[builder(default = false)]
     pub(crate) reconnect_on_error: bool,
 }

@@ -15,7 +15,6 @@
 use clap::Args;
 use futures::stream::StreamExt;
 
-use mauricebarnum_oxia_client::GetOptions;
 use mauricebarnum_oxia_client::batch_get;
 use tracing::trace;
 
@@ -47,18 +46,15 @@ pub struct BatchGetCommand {
 impl CommandRunnable for BatchGetCommand {
     async fn run(self, ctx: crate::Context) -> anyhow::Result<()> {
         trace!(?self, ?ctx, "params");
-        let opts = GetOptions::builder()
+        let opts = batch_get::Options::builder()
             .include_value(!self.exists)
             .maybe_secondary_index_name(self.index)
             .maybe_partition_key(self.partition)
             .build();
 
-        let req = batch_get::Request::builder_with_options(opts)
-            .with(|b| {
-                for k in self.keys {
-                    b.add(k);
-                }
-            })
+        let req = batch_get::Request::builder()
+            .options(opts)
+            .add_keys(self.keys)
             .build();
 
         let mut gets = ctx.client().await?.batch_get(req).await?;

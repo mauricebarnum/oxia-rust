@@ -861,24 +861,15 @@ impl Client {
         &self,
         batch_req: batch_get::Request,
     ) -> impl Stream<Item = batch_get::ResponseItem> + use<> {
-        let def_opts = GetOptions::default();
-
-        let keys: Vec<Arc<str>> = batch_req
-            .items
-            .iter()
-            .map(|item| Arc::clone(&item.key))
-            .collect();
+        let opts = match batch_req.opts {
+            Some(o) => o.into(),
+            None => GetOptions::default(),
+        };
 
         let gets: Vec<oxia_proto::GetRequest> = batch_req
-            .items
-            .into_iter()
-            .map(|item| {
-                let opts = item
-                    .opts
-                    .as_ref()
-                    .unwrap_or_else(|| batch_req.opts.as_ref().unwrap_or(&def_opts));
-                Self::make_proto_get_req(opts, item.key.to_string())
-            })
+            .keys
+            .iter()
+            .map(|key| Self::make_proto_get_req(&opts, key.to_string()))
             .collect();
 
         let read_req = oxia_proto::ReadRequest {
@@ -890,7 +881,7 @@ impl Client {
             .rpc(|mut grpc| async move { grpc.read(read_req).await })
             .await;
 
-        Self::demux_stream(Arc::clone(&self.data), keys, read_result).await
+        Self::demux_stream(Arc::clone(&self.data), batch_req.keys, read_result).await
     }
 
     /// Puts a value with the given options

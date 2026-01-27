@@ -15,100 +15,89 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use bon::Builder;
 use futures::stream::BoxStream;
 use futures::stream::StreamExt;
 
-use crate::ClientError;
 use crate::Error;
-use crate::GetOptions;
 use crate::GetResponse;
 use crate::KeyComparisonType;
 use crate::Result;
 use crate::ShardId;
 use crate::shard;
 
-#[derive(Debug)]
-pub struct RequestItem {
-    pub key: Arc<str>,
-    pub opts: Option<GetOptions>,
+#[derive(Builder, Clone, Debug)]
+#[builder(on(String, into))]
+pub struct Options {
+    #[builder(default = true)]
+    include_value: bool,
+    partition_key: Option<String>,
+    secondary_index_name: Option<String>,
 }
 
-impl RequestItem {
-    fn new(key: impl Into<Arc<str>>, opts: Option<GetOptions>) -> Self {
-        let key = key.into();
-        Self { key, opts }
+impl<S: options_builder::State> OptionsBuilder<S> {
+    pub fn exclude_value(self) -> OptionsBuilder<options_builder::SetIncludeValue<S>>
+    where
+        S::IncludeValue: options_builder::IsUnset,
+    {
+        self.include_value(false)
     }
 }
 
-#[derive(Debug)]
-pub struct Request {
-    pub items: Vec<RequestItem>,
-    pub opts: Option<GetOptions>,
-}
-
-impl Request {
-    pub fn builder() -> Builder {
-        Builder::new(None)
-    }
-
-    // Supply default GetOptions for each key
-    pub fn builder_with_options(opts: GetOptions) -> Builder {
-        Builder::new(Some(opts))
+impl From<Options> for crate::GetOptions {
+    fn from(opts: Options) -> Self {
+        Self::builder()
+            .include_value(opts.include_value)
+            .comparison_type(KeyComparisonType::Equal)
+            .maybe_partition_key(opts.partition_key)
+            .maybe_secondary_index_name(opts.secondary_index_name)
+            .build()
     }
 }
 
-#[derive(Debug)]
-pub struct Builder {
-    items: Vec<RequestItem>,
-    opts: Option<GetOptions>,
+#[derive(Debug, Default)]
+pub struct RequestBuilder {
+    opts: Option<Options>,
+    keys: Vec<Arc<str>>,
 }
 
-impl Builder {
-    fn new(opts: Option<GetOptions>) -> Self {
-        Self {
-            items: Vec::new(),
-            opts,
-        }
-    }
-
-    pub fn with(mut self, f: impl FnOnce(&mut Self)) -> Self {
-        f(&mut self);
+impl RequestBuilder {
+    pub fn options(mut self, opts: Options) -> Self {
+        self.opts = Some(opts);
         self
     }
 
-    pub fn add(&mut self, key: impl Into<Arc<str>>) {
-        self.items.push(RequestItem::new(key.into(), None));
+    pub fn add_key(mut self, key: impl Into<Arc<str>>) -> Self {
+        self.keys.push(key.into());
+        self
     }
 
-    pub fn add_with_options(&mut self, key: impl Into<Arc<str>>, opts: GetOptions) {
-        self.items.push(RequestItem::new(key.into(), Some(opts)));
-    }
-
-    pub fn add_keys<I, S>(&mut self, keys: I)
+    pub fn add_keys<I, S>(mut self, keys: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<Arc<str>>,
     {
-        self.items
-            .extend(keys.into_iter().map(|k| RequestItem::new(k.into(), None)));
-    }
-
-    pub fn add_keys_with_options<I, S>(&mut self, keys: I, opts: GetOptions)
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        self.items.extend(
-            keys.into_iter()
-                .map(|k| RequestItem::new(k.into(), Some(opts.clone()))),
-        );
+        self.keys.extend(keys.into_iter().map(|k| k.into()));
+        self
     }
 
     pub fn build(self) -> Request {
         Request {
-            items: self.items,
+            keys: self.keys,
             opts: self.opts,
         }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct Request {
+    pub keys: Vec<Arc<str>>,
+    pub opts: Option<Options>,
+}
+
+impl Request {
+    pub fn builder() -> RequestBuilder {
+        RequestBuilder::default()
     }
 }
 
@@ -141,32 +130,27 @@ pub(super) async fn prepare_requests(
     let mut failures: Vec<ResponseItem> = Vec::new();
     let mut reqs: BTreeMap<ShardId, Request> = BTreeMap::new();
 
-    for item in client_req.items {
-        if let Some(opts) = &item.opts
-            && opts.comparison_type != KeyComparisonType::Equal
-        {
-            return Err(ClientError::UnsupportedKeyComparator(opts.comparison_type).into());
-        }
+    let partition_key = client_req
+        .opts
+        .as_ref()
+        .and_then(|o| o.partition_key.as_deref());
 
-        let selector = item
-            .opts
-            .as_ref()
-            .and_then(|o| o.partition_key.as_deref())
-            .unwrap_or(&item.key);
+    for key in client_req.keys {
+        let selector = partition_key.unwrap_or(&key);
 
-        match shard_manager.get_shard_id(selector) {
-            Some(shard_id) => {
-                let request_ref = reqs.entry(shard_id).or_insert_with(|| Request {
-                    items: Vec::new(),
-                    opts: client_req.opts.clone(),
-                });
-                request_ref.items.push(item);
-            }
-            None => {
-                let err = Error::NoShardMappingForKey(selector.into());
-                failures.push(ResponseItem::failed(item.key, err));
-            }
-        }
+        let Some(shard_id) = shard_manager.get_shard_id(selector) else {
+            let err = Error::NoShardMappingForKey(selector.into());
+            failures.push(ResponseItem::failed(key, err));
+            continue;
+        };
+
+        reqs.entry(shard_id)
+            .or_insert_with(|| Request {
+                keys: vec![],
+                opts: client_req.opts.clone(),
+            })
+            .keys
+            .push(key);
     }
 
     let mut batch_get_futures = Vec::with_capacity(reqs.len());
@@ -177,9 +161,11 @@ pub(super) async fn prepare_requests(
                 batch_get_futures.push(async move { shard.batch_get(req).await.boxed() });
             }
             Err(err) => {
-                for item in req.items.into_iter() {
-                    failures.push(ResponseItem::failed(item.key, err.clone()));
-                }
+                failures.extend(
+                    req.keys
+                        .into_iter()
+                        .map(|key| ResponseItem::failed(key, err.clone())),
+                );
             }
         }
     }
