@@ -1,4 +1,4 @@
-// Copyright 2025 Maurice S. Barnum
+// Copyright 2025-2026 Maurice S. Barnum
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -72,21 +72,12 @@ pub struct GetCommand {
 impl CommandRunnable for GetCommand {
     async fn run(self, ctx: crate::Context) -> anyhow::Result<()> {
         trace!(?self, ?ctx, "params");
-        let opts = GetOptions::new().with(|opts| {
-            opts.comparison_type(self.key_comp.into());
-
-            if self.exists {
-                opts.exclude_value();
-            }
-
-            if let Some(index) = self.index {
-                opts.secondary_index_name(index);
-            }
-
-            if let Some(pkey) = self.partition {
-                opts.partition_key(pkey);
-            }
-        });
+        let opts = GetOptions::builder()
+            .comparison_type(self.key_comp.into())
+            .include_value(!self.exists)
+            .maybe_secondary_index_name(self.index)
+            .maybe_partition_key(self.partition)
+            .build();
 
         let result = ctx.client().await?.get_with_options(self.key, opts).await;
         trace!(?result, "result");

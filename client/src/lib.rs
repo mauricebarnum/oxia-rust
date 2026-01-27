@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
+use bon::Builder;
 use bytes::Bytes;
 use futures::stream::StreamExt;
 use futures::stream::TryStreamExt;
@@ -100,48 +101,28 @@ impl SecondaryIndex {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Builder, Clone, Debug)]
 pub struct PutOptions {
     expected_version_id: Option<i64>,
+    #[builder(into)]
     partition_key: Option<String>,
+    #[builder(into)]
     sequence_key_deltas: Option<Arc<[u64]>>,
+    #[builder(into)]
     secondary_indexes: Option<Arc<[SecondaryIndex]>>,
+    #[builder(default = false)]
     ephemeral: bool,
 }
 
 impl PutOptions {
     pub fn new() -> Self {
-        PutOptions::default()
+        Self::default()
     }
+}
 
-    pub fn with(mut self, f: impl FnOnce(&mut Self)) -> Self {
-        f(&mut self);
-        self
-    }
-
-    pub fn expected_version_id(&mut self, value: i64) -> &mut Self {
-        self.expected_version_id = Some(value);
-        self
-    }
-
-    pub fn partition_key(&mut self, value: impl Into<String>) -> &mut Self {
-        self.partition_key = Some(value.into());
-        self
-    }
-
-    pub fn sequence_key_deltas(&mut self, value: impl Into<Arc<[u64]>>) -> &mut Self {
-        self.sequence_key_deltas = Some(value.into());
-        self
-    }
-
-    pub fn secondary_indexes(&mut self, value: impl Into<Arc<[SecondaryIndex]>>) -> &mut Self {
-        self.secondary_indexes = Some(value.into());
-        self
-    }
-
-    pub fn ephemeral(&mut self) -> &mut Self {
-        self.ephemeral = true;
-        self
+impl Default for PutOptions {
+    fn default() -> Self {
+        Self::builder().build()
     }
 }
 
@@ -199,58 +180,35 @@ impl Display for KeyComparisonType {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Builder, Clone, Debug)]
+#[builder(on(String, into))]
 pub struct GetOptions {
-    include_value: bool,                  // default: true
-    comparison_type: KeyComparisonType,   // default: Equal
+    #[builder(default = true)]
+    include_value: bool, // default: true
+    #[builder(default = KeyComparisonType::Equal)]
+    comparison_type: KeyComparisonType, // default: Equal
     partition_key: Option<String>,        // default: None
     secondary_index_name: Option<String>, // default: None
 }
 
 impl GetOptions {
     pub fn new() -> Self {
-        Self {
-            include_value: true,
-            comparison_type: KeyComparisonType::Equal,
-            partition_key: None,
-            secondary_index_name: None,
-        }
-    }
-
-    pub fn with(mut self, f: impl FnOnce(&mut Self)) -> Self {
-        f(&mut self);
-        self
-    }
-
-    pub fn include_value(&mut self) -> &mut Self {
-        self.include_value = true;
-        self
-    }
-
-    pub fn exclude_value(&mut self) -> &mut Self {
-        self.include_value = false;
-        self
-    }
-
-    pub fn comparison_type(&mut self, value: KeyComparisonType) -> &mut Self {
-        self.comparison_type = value;
-        self
-    }
-
-    pub fn partition_key(&mut self, value: impl Into<String>) -> &mut Self {
-        self.partition_key = Some(value.into());
-        self
-    }
-
-    pub fn secondary_index_name(&mut self, value: impl Into<String>) -> &mut Self {
-        self.secondary_index_name = Some(value.into());
-        self
+        Self::default()
     }
 }
 
 impl Default for GetOptions {
     fn default() -> Self {
-        GetOptions::new()
+        Self::builder().build()
+    }
+}
+
+impl<S: get_options_builder::State> GetOptionsBuilder<S> {
+    pub fn exclude_value(self) -> GetOptionsBuilder<get_options_builder::SetIncludeValue<S>>
+    where
+        S::IncludeValue: get_options_builder::IsUnset,
+    {
+        self.include_value(false)
     }
 }
 
@@ -351,40 +309,37 @@ impl Ord for GetResponse {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Builder, Clone, Debug)]
 pub struct DeleteOptions {
     expected_version_id: Option<i64>,
-    partition_key: Option<String>, // default: None
+    #[builder(into)]
+    partition_key: Option<String>,
 }
 
 impl DeleteOptions {
     pub fn new() -> Self {
         Self::default()
     }
+}
 
-    pub fn with(mut self, f: impl FnOnce(&mut Self)) -> Self {
-        f(&mut self);
-        self
-    }
-
-    pub fn expected_version_id(&mut self, value: i64) -> &mut Self {
-        self.expected_version_id = Some(value);
-        self
-    }
-
-    pub fn partition_key(&mut self, value: impl Into<String>) -> &mut Self {
-        self.partition_key = Some(value.into());
-        self
+impl Default for DeleteOptions {
+    fn default() -> Self {
+        Self::builder().build()
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Builder, Clone, Debug)]
+#[builder(on(String, into))]
 pub struct ListOptions {
+    #[allow(dead_code)]
     shard: Option<i64>,
     secondary_index_name: Option<String>,
+    #[builder(default = true)]
     sort: bool,
+    #[builder(default = true)]
     partial_ok: bool,
     partition_key: Option<String>,
+    #[builder(default = false)]
     include_internal_keys: bool,
 }
 
@@ -392,53 +347,11 @@ impl ListOptions {
     pub fn new() -> Self {
         Self::default()
     }
-
-    pub fn with(mut self, f: impl FnOnce(&mut Self)) -> Self {
-        f(&mut self);
-        self
-    }
-
-    pub fn shard(&mut self, value: i64) -> &mut Self {
-        self.shard = Some(value);
-        self
-    }
-
-    pub fn secondary_index_name(&mut self, value: impl Into<String>) -> &mut Self {
-        self.secondary_index_name = Some(value.into());
-        self
-    }
-
-    pub fn sort(&mut self, value: bool) -> &mut Self {
-        self.sort = value;
-        self
-    }
-
-    pub fn partial_ok(&mut self, value: bool) -> &mut Self {
-        self.partial_ok = value;
-        self
-    }
-
-    pub fn partition_key(&mut self, value: impl Into<String>) -> &mut Self {
-        self.partition_key = Some(value.into());
-        self
-    }
-
-    pub fn include_internal_keys(&mut self, value: bool) -> &mut Self {
-        self.include_internal_keys = value;
-        self
-    }
 }
 
 impl Default for ListOptions {
     fn default() -> Self {
-        Self {
-            shard: None,
-            secondary_index_name: None,
-            sort: true,
-            partial_ok: true,
-            partition_key: None,
-            include_internal_keys: false,
-        }
+        Self::builder().build()
     }
 }
 
@@ -483,13 +396,18 @@ impl Default for ListResponse {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Builder, Clone, Debug)]
+#[builder(on(String, into))]
 pub struct RangeScanOptions {
+    #[allow(dead_code)]
     shard: Option<i64>,
     secondary_index_name: Option<String>,
+    #[builder(default = true)]
     sort: bool,
+    #[builder(default = true)]
     partial_ok: bool,
     partition_key: Option<String>,
+    #[builder(default = false)]
     include_internal_keys: bool,
 }
 
@@ -497,53 +415,11 @@ impl RangeScanOptions {
     pub fn new() -> Self {
         Self::default()
     }
-
-    pub fn with(mut self, f: impl FnOnce(&mut Self)) -> Self {
-        f(&mut self);
-        self
-    }
-
-    pub fn shard(&mut self, value: i64) -> &mut Self {
-        self.shard = Some(value);
-        self
-    }
-
-    pub fn sort(&mut self, value: bool) -> &mut Self {
-        self.sort = value;
-        self
-    }
-
-    pub fn partial_ok(&mut self, value: bool) -> &mut Self {
-        self.partial_ok = value;
-        self
-    }
-
-    pub fn secondary_index_name(&mut self, value: impl Into<String>) -> &mut Self {
-        self.secondary_index_name = Some(value.into());
-        self
-    }
-
-    pub fn partition_key(&mut self, value: impl Into<String>) -> &mut Self {
-        self.partition_key = Some(value.into());
-        self
-    }
-
-    pub fn include_internal_keys(&mut self, value: bool) -> &mut Self {
-        self.include_internal_keys = value;
-        self
-    }
 }
 
 impl Default for RangeScanOptions {
     fn default() -> Self {
-        Self {
-            shard: None,
-            secondary_index_name: None,
-            sort: true,
-            partial_ok: false,
-            partition_key: None,
-            include_internal_keys: false,
-        }
+        Self::builder().build()
     }
 }
 
@@ -589,9 +465,10 @@ impl Default for RangeScanResponse {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Builder, Clone, Debug)]
 pub struct DeleteRangeOptions {
     shard: Option<i64>,
+    #[builder(into)]
     partition_key: Option<String>,
 }
 
@@ -599,20 +476,11 @@ impl DeleteRangeOptions {
     pub fn new() -> Self {
         Self::default()
     }
+}
 
-    pub fn with(mut self, f: impl FnOnce(&mut Self)) -> Self {
-        f(&mut self);
-        self
-    }
-
-    pub fn shard(&mut self, value: i64) -> &mut Self {
-        self.shard = Some(value);
-        self
-    }
-
-    pub fn partition_key(&mut self, value: impl Into<String>) -> &mut Self {
-        self.partition_key = Some(value.into());
-        self
+impl Default for DeleteRangeOptions {
+    fn default() -> Self {
+        Self::builder().build()
     }
 }
 
@@ -621,11 +489,13 @@ impl DeleteRangeOptions {
 /// By default, the stream will not automatically reconnect when a shard stream
 /// closes or encounters an error. Use the reconnect options to enable automatic
 /// reconnection behavior.
-#[derive(Clone, Debug, Default)]
+#[derive(Builder, Clone, Debug)]
 pub struct NotificationsOptions {
     /// Reconnect to a shard when its stream closes normally
+    #[builder(default = false)]
     pub(crate) reconnect_on_close: bool,
     /// Reconnect to a shard when its stream encounters an error
+    #[builder(default = false)]
     pub(crate) reconnect_on_error: bool,
 }
 
@@ -633,33 +503,11 @@ impl NotificationsOptions {
     pub fn new() -> Self {
         Self::default()
     }
+}
 
-    pub fn with(mut self, f: impl FnOnce(&mut Self)) -> Self {
-        f(&mut self);
-        self
-    }
-
-    /// Enable automatic reconnection when a shard stream closes normally.
-    ///
-    /// When enabled, the notifications stream will automatically attempt to
-    /// reconnect to a shard when its stream ends without an error, resuming
-    /// from the last received offset.
-    pub fn reconnect_on_close(&mut self) -> &mut Self {
-        self.reconnect_on_close = true;
-        self
-    }
-
-    /// Enable automatic reconnection when a shard stream encounters an error.
-    ///
-    /// When enabled, the notifications stream will automatically attempt to
-    /// reconnect to a shard when an error occurs, resuming from the last
-    /// received offset.
-    ///
-    /// Note: Errors indicating the shard is no longer available (e.g., shard
-    /// reassignment) will not trigger a reconnection attempt.
-    pub fn reconnect_on_error(&mut self) -> &mut Self {
-        self.reconnect_on_error = true;
-        self
+impl Default for NotificationsOptions {
+    fn default() -> Self {
+        Self::builder().build()
     }
 }
 
@@ -1005,8 +853,7 @@ impl Client {
         key: impl Into<String>,
         value: impl Into<Bytes>,
     ) -> Result<PutResponse> {
-        self.put_with_options(key, value, PutOptions::default())
-            .await
+        self.put_with_options(key, value, PutOptions::new()).await
     }
 
     pub async fn delete_with_options(

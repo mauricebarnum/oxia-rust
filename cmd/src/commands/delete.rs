@@ -1,4 +1,4 @@
-// Copyright 2025 Maurice S. Barnum
+// Copyright 2025-2026 Maurice S. Barnum
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -36,15 +36,10 @@ pub struct DeleteCommand {
 impl CommandRunnable for DeleteCommand {
     async fn run(self, ctx: crate::Context) -> anyhow::Result<()> {
         trace!(?self, ?ctx, "params");
-        let opts = DeleteOptions::new().with(|opts| {
-            if let Some(pk) = self.partition {
-                opts.partition_key(pk);
-            }
-
-            if let Some(x) = self.expected_version {
-                opts.expected_version_id(x);
-            }
-        });
+        let opts = DeleteOptions::builder()
+            .maybe_partition_key(self.partition)
+            .maybe_expected_version_id(self.expected_version)
+            .build();
         let result = ctx
             .client()
             .await?

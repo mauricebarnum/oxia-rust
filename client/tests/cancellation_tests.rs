@@ -65,9 +65,7 @@ async fn test_ephemeral_key_expires_after_client_drop() -> anyhow::Result<()> {
             .put_with_options(
                 key,
                 "ephemeral-value",
-                client::PutOptions::new().with(|o| {
-                    o.ephemeral();
-                }),
+                client::PutOptions::builder().ephemeral(true).build()
             )
             .await
     )?;
@@ -113,9 +111,7 @@ async fn test_reconnect_cleans_up_old_manager() -> anyhow::Result<()> {
             .put_with_options(
                 key,
                 "value1",
-                client::PutOptions::new().with(|o| {
-                    o.ephemeral();
-                }),
+                client::PutOptions::builder().ephemeral(true).build()
             )
             .await
     )?;
