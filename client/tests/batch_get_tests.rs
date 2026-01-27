@@ -44,9 +44,7 @@ async fn test_batch_get_basic() -> anyhow::Result<()> {
 
         // Build batch_get request
         let req = client::batch_get::Request::builder()
-            .with(|b| {
-                b.add_keys(keys.clone());
-            })
+            .add_keys(keys.clone())
             .build();
 
         // Execute batch_get
@@ -84,9 +82,7 @@ async fn test_batch_get_missing_keys() -> anyhow::Result<()> {
 
         // Request both existing and non-existing keys
         let req = client::batch_get::Request::builder()
-            .with(|b| {
-                b.add_keys(vec!["exists-1", "missing-2", "exists-3", "missing-4"]);
-            })
+            .add_keys(vec!["exists-1", "missing-2", "exists-3", "missing-4"])
             .build();
 
         let mut stream = trace_err!(client.batch_get(req).await)?;
@@ -123,35 +119,27 @@ async fn test_batch_get_with_options() -> anyhow::Result<()> {
         let client = trace_err!(server.connect().await)?;
 
         // Insert test data
-        trace_err!(client.put("key-with-value", "some-value").await)?;
-        trace_err!(client.put("key-no-value", "another-value").await)?;
+        trace_err!(client.put("k1", "some-value").await)?;
+        trace_err!(client.put("k2", "another-value").await)?;
 
         // Request with different options
         let req = client::batch_get::Request::builder()
-            .with(|b| {
-                b.add("key-with-value");
-                b.add_with_options(
-                    "key-no-value",
-                    client::GetOptions::builder().exclude_value().build(),
-                );
-            })
+            .options(
+                client::batch_get::Options::builder()
+                    .exclude_value()
+                    .build(),
+            )
+            .add_key("k1")
+            .add_key("k2")
             .build();
 
         let mut stream = trace_err!(client.batch_get(req).await)?;
-        let mut results = HashMap::new();
 
         while let Some(item) = stream.next().await {
             let response = trace_err!(item.response)?;
-            results.insert(item.key, response);
+            assert!(response.is_some());
+            assert!(response.unwrap().value.is_none());
         }
-
-        // Verify key-with-value has the value
-        let with_value = results.get("key-with-value").unwrap().as_ref().unwrap();
-        assert!(with_value.value.is_some());
-
-        // Verify key-no-value excludes the value
-        let no_value = results.get("key-no-value").unwrap().as_ref().unwrap();
-        assert!(no_value.value.is_none());
 
         trace_err!(fs::remove_dir_all(server.data_dir.path()))?;
         Ok(())
@@ -159,50 +147,6 @@ async fn test_batch_get_with_options() -> anyhow::Result<()> {
     .await?
 }
 
-#[test_log::test(tokio::test)]
-async fn test_batch_get_with_batch_options() -> anyhow::Result<()> {
-    timeout(Duration::from_secs(TEST_TIMEOUT_SECS), async {
-        let server = trace_err!(common::TestServer::start_nshards(non_zero(2)))?;
-        let client = trace_err!(server.connect().await)?;
-
-        // Insert test data
-        trace_err!(client.put("key-with-value", "some-value").await)?;
-        trace_err!(client.put("key-no-value", "another-value").await)?;
-
-        // Request with different options
-        let req = client::batch_get::Request::builder_with_options(
-            client::GetOptions::builder().exclude_value().build(),
-        )
-        .with(|b| {
-            b.add_with_options(
-                "key-with-value",
-                client::GetOptions::builder().include_value(true).build(),
-            );
-            b.add("key-no-value");
-        })
-        .build();
-
-        let mut stream = trace_err!(client.batch_get(req).await)?;
-        let mut results = HashMap::new();
-
-        while let Some(item) = stream.next().await {
-            let response = trace_err!(item.response)?;
-            results.insert(item.key, response);
-        }
-
-        // Verify key-with-value has the value
-        let with_value = results.get("key-with-value").unwrap().as_ref().unwrap();
-        assert!(with_value.value.is_some());
-
-        // Verify key-no-value excludes the value
-        let no_value = results.get("key-no-value").unwrap().as_ref().unwrap();
-        assert!(no_value.value.is_none());
-
-        trace_err!(fs::remove_dir_all(server.data_dir.path()))?;
-        Ok(())
-    })
-    .await?
-}
 #[test_log::test(tokio::test)]
 async fn test_batch_get_across_shards() -> anyhow::Result<()> {
     timeout(Duration::from_secs(TEST_TIMEOUT_SECS), async {
@@ -218,9 +162,7 @@ async fn test_batch_get_across_shards() -> anyhow::Result<()> {
 
         // Request all keys via batch_get
         let req = client::batch_get::Request::builder()
-            .with(|b| {
-                b.add_keys(keys.clone());
-            })
+            .add_keys(keys.clone())
             .build();
 
         let mut stream = trace_err!(client.batch_get(req).await)?;
@@ -284,14 +226,13 @@ async fn test_batch_get_with_partition_keys() -> anyhow::Result<()> {
         )?;
 
         // Request with partition key options
-        let get_opts = client::GetOptions::builder()
+        let opts = client::batch_get::Options::builder()
             .partition_key(partition_key)
             .build();
 
-        let req = client::batch_get::Request::builder_with_options(get_opts)
-            .with(|b| {
-                b.add_keys(vec!["pk-key-1", "pk-key-2"]);
-            })
+        let req = client::batch_get::Request::builder()
+            .options(opts)
+            .add_keys(vec!["pk-key-1", "pk-key-2"])
             .build();
 
         let mut stream = trace_err!(client.batch_get(req).await)?;
@@ -329,9 +270,7 @@ async fn test_batch_get_large_batch() -> anyhow::Result<()> {
 
         // Batch get all keys
         let req = client::batch_get::Request::builder()
-            .with(|b| {
-                b.add_keys(keys.clone());
-            })
+            .add_keys(keys.clone())
             .build();
 
         let mut stream = trace_err!(client.batch_get(req).await)?;
@@ -363,11 +302,9 @@ async fn test_batch_get_duplicate_keys() -> anyhow::Result<()> {
 
         // Request same key multiple times
         let req = client::batch_get::Request::builder()
-            .with(|b| {
-                b.add("dup-key");
-                b.add("dup-key");
-                b.add("dup-key");
-            })
+            .add_key("dup-key")
+            .add_key("dup-key")
+            .add_key("dup-key")
             .build();
 
         let mut stream = trace_err!(client.batch_get(req).await)?;
@@ -401,9 +338,7 @@ async fn test_batch_get_mixed_success_failure() -> anyhow::Result<()> {
 
         // Mix of existing and non-existing keys
         let req = client::batch_get::Request::builder()
-            .with(|b| {
-                b.add_keys(vec!["success-1", "missing-1", "success-2", "missing-2"]);
-            })
+            .add_keys(vec!["success-1", "missing-1", "success-2", "missing-2"])
             .build();
 
         let mut stream = trace_err!(client.batch_get(req).await)?;
@@ -441,9 +376,7 @@ async fn test_batch_get_version_tracking() -> anyhow::Result<()> {
 
         // Batch get should return the latest version
         let req = client::batch_get::Request::builder()
-            .with(|b| {
-                b.add("versioned-key");
-            })
+            .add_key("versioned-key")
             .build();
 
         let mut stream = trace_err!(client.batch_get(req).await)?;
