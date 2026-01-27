@@ -1,4 +1,4 @@
-// Copyright 2025 Maurice S. Barnum
+// Copyright 2025-2026 Maurice S. Barnum
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -38,11 +38,9 @@ pub struct DeleteRangeCommand {
 impl CommandRunnable for DeleteRangeCommand {
     async fn run(self, ctx: crate::Context) -> anyhow::Result<()> {
         trace!(?self, ?ctx, "params");
-        let opts = DeleteRangeOptions::new().with(|opts| {
-            if let Some(pk) = self.partition {
-                opts.partition_key(pk);
-            }
-        });
+        let opts = DeleteRangeOptions::builder()
+            .maybe_partition_key(self.partition)
+            .build();
         let key_min = self.key_min;
         let key_max = self.key_max;
 

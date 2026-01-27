@@ -132,9 +132,7 @@ async fn test_batch_get_with_options() -> anyhow::Result<()> {
                 b.add("key-with-value");
                 b.add_with_options(
                     "key-no-value",
-                    client::GetOptions::new().with(|o| {
-                        o.exclude_value();
-                    }),
+                    client::GetOptions::builder().exclude_value().build(),
                 );
             })
             .build();
@@ -172,20 +170,17 @@ async fn test_batch_get_with_batch_options() -> anyhow::Result<()> {
         trace_err!(client.put("key-no-value", "another-value").await)?;
 
         // Request with different options
-        let req =
-            client::batch_get::Request::builder_with_options(client::GetOptions::new().with(|o| {
-                o.exclude_value();
-            }))
-            .with(|b| {
-                b.add_with_options(
-                    "key-with-value",
-                    client::GetOptions::new().with(|o| {
-                        o.include_value();
-                    }),
-                );
-                b.add("key-no-value");
-            })
-            .build();
+        let req = client::batch_get::Request::builder_with_options(
+            client::GetOptions::builder().exclude_value().build(),
+        )
+        .with(|b| {
+            b.add_with_options(
+                "key-with-value",
+                client::GetOptions::builder().include_value(true).build(),
+            );
+            b.add("key-no-value");
+        })
+        .build();
 
         let mut stream = trace_err!(client.batch_get(req).await)?;
         let mut results = HashMap::new();
@@ -273,9 +268,9 @@ async fn test_batch_get_with_partition_keys() -> anyhow::Result<()> {
         let partition_key = "my-partition";
 
         // Insert keys with partition key
-        let opts = client::PutOptions::new().with(|o| {
-            o.partition_key(partition_key);
-        });
+        let opts = client::PutOptions::builder()
+            .partition_key(partition_key)
+            .build();
 
         trace_err!(
             client
@@ -289,9 +284,9 @@ async fn test_batch_get_with_partition_keys() -> anyhow::Result<()> {
         )?;
 
         // Request with partition key options
-        let get_opts = client::GetOptions::new().with(|o| {
-            o.partition_key(partition_key);
-        });
+        let get_opts = client::GetOptions::builder()
+            .partition_key(partition_key)
+            .build();
 
         let req = client::batch_get::Request::builder_with_options(get_opts)
             .with(|b| {

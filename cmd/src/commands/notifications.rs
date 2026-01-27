@@ -45,22 +45,18 @@ impl CommandRunnable for NotificationsCommand {
     async fn run(self, ctx: crate::Context) -> anyhow::Result<()> {
         trace!(?self, ?ctx, "params");
 
-        let opts = NotificationsOptions::new().with(|o| {
-            for mode in &self.reconnect {
-                match mode {
-                    ReconnectMode::All => {
-                        o.reconnect_on_close();
-                        o.reconnect_on_error();
-                    }
-                    ReconnectMode::Close => {
-                        o.reconnect_on_close();
-                    }
-                    ReconnectMode::Error => {
-                        o.reconnect_on_error();
-                    }
-                }
-            }
-        });
+        let reconnect_on_close = self
+            .reconnect
+            .iter()
+            .any(|m| matches!(m, ReconnectMode::All | ReconnectMode::Close));
+        let reconnect_on_error = self
+            .reconnect
+            .iter()
+            .any(|m| matches!(m, ReconnectMode::All | ReconnectMode::Error));
+        let opts = NotificationsOptions::builder()
+            .reconnect_on_close(reconnect_on_close)
+            .reconnect_on_error(reconnect_on_error)
+            .build();
 
         let mut notifications_stream = ctx
             .client()

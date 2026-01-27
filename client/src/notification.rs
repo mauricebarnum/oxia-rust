@@ -639,28 +639,28 @@ mod tests {
 
     #[test]
     fn test_notifications_options_reconnect_on_close() {
-        let opts = NotificationsOptions::new().with(|o| {
-            o.reconnect_on_close();
-        });
+        let opts = NotificationsOptions::builder()
+            .reconnect_on_close(true)
+            .build();
         assert!(opts.reconnect_on_close);
         assert!(!opts.reconnect_on_error);
     }
 
     #[test]
     fn test_notifications_options_reconnect_on_error() {
-        let opts = NotificationsOptions::new().with(|o| {
-            o.reconnect_on_error();
-        });
+        let opts = NotificationsOptions::builder()
+            .reconnect_on_error(true)
+            .build();
         assert!(!opts.reconnect_on_close);
         assert!(opts.reconnect_on_error);
     }
 
     #[test]
     fn test_notifications_options_both() {
-        let opts = NotificationsOptions::new().with(|o| {
-            o.reconnect_on_close();
-            o.reconnect_on_error();
-        });
+        let opts = NotificationsOptions::builder()
+            .reconnect_on_close(true)
+            .reconnect_on_error(true)
+            .build();
         assert!(opts.reconnect_on_close);
         assert!(opts.reconnect_on_error);
     }

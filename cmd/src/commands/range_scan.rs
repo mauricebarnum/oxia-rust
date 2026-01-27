@@ -1,4 +1,4 @@
-// Copyright 2025 Maurice S. Barnum
+// Copyright 2025-2026 Maurice S. Barnum
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -46,17 +46,11 @@ pub struct RangeScanCommand {
 impl CommandRunnable for RangeScanCommand {
     async fn run(self, ctx: crate::Context) -> anyhow::Result<()> {
         trace!(?self, ?ctx, "params");
-        let opts = RangeScanOptions::new().with(|opts| {
-            if let Some(pk) = self.partition {
-                opts.partition_key(pk);
-            }
-
-            if let Some(ik) = self.index {
-                opts.secondary_index_name(ik);
-            }
-
-            opts.include_internal_keys(self.include_internal_keys);
-        });
+        let opts = RangeScanOptions::builder()
+            .maybe_partition_key(self.partition)
+            .maybe_secondary_index_name(self.index)
+            .include_internal_keys(self.include_internal_keys)
+            .build();
         let key_min = self.key_min;
         let key_max = self.key_max;
 

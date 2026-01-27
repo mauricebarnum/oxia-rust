@@ -50,9 +50,7 @@ fn main() -> Result<()> {
             .put_with_options(
                 &key,
                 key.clone(),
-                PutOptions::new().with(|x| {
-                    x.ephemeral();
-                }),
+                PutOptions::builder().ephemeral(true).build(),
             )
             .await?;
         println!("put result: {result:?}");

@@ -1,4 +1,4 @@
-// Copyright 2025 Maurice S. Barnum
+// Copyright 2025-2026 Maurice S. Barnum
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -83,23 +83,12 @@ impl CommandRunnable for PutCommand {
     async fn run(self, ctx: crate::Context) -> anyhow::Result<()> {
         trace!(?self, ?ctx, "params");
         let value = decode(self.encoding, self.value)?;
-        let opts = PutOptions::new().with(|opts| {
-            if let Some(pk) = self.partition {
-                opts.partition_key(pk);
-            }
-
-            if let Some(x) = self.expected_version {
-                opts.expected_version_id(x);
-            }
-
-            if let Some(deltas) = self.sequence_keys_deltas {
-                opts.sequence_key_deltas(deltas);
-            }
-
-            if self.ephemeral {
-                opts.ephemeral();
-            }
-        });
+        let opts = PutOptions::builder()
+            .maybe_partition_key(self.partition)
+            .maybe_expected_version_id(self.expected_version)
+            .maybe_sequence_key_deltas(self.sequence_keys_deltas)
+            .ephemeral(self.ephemeral)
+            .build();
         let result = ctx
             .client()
             .await?
