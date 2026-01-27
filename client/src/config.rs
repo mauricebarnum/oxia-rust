@@ -1,4 +1,4 @@
-// Copyright 2025 Maurice S. Barnum
+// Copyright 2025-2026 Maurice S. Barnum
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,8 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::Error;
-use crate::Result;
+use bon::Builder;
 
 #[derive(Clone, Copy, Debug)]
 pub struct RetryConfig {
@@ -41,13 +40,20 @@ impl RetryConfig {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Builder, Clone, Debug)]
+#[builder(finish_fn(name = do_build, vis = ""))]
+#[builder(on(String, into))]
+#[builder(state_mod(vis = "pub"))]
 pub struct Config {
-    service_addr: String,              // must not be empty
-    namespace: String,                 // may Option<be empty
-    identity: String,                  // used for ephemeral records, may be empty
-    session_timeout: Duration,         // if non-zero, create a session with the specified timeout
-    max_parallel_requests: usize,      // maximum number of parallel requests if non-zero
+    service_addr: String,
+    #[builder(default = "default")]
+    namespace: String,
+    #[builder(default)]
+    identity: String, // used for ephemeral records
+    #[builder(default)]
+    session_timeout: Duration, // if non-zero, create a session with the specified timeout
+    #[builder(default = 1)]
+    max_parallel_requests: usize, // maximum number of parallel requests if non-zero
     request_timeout: Option<Duration>, // timeout if non-zero
     retry: Option<RetryConfig>,
 }
@@ -76,85 +82,11 @@ impl Config {
     }
 }
 
-#[derive(Clone)]
-pub struct Builder {
-    c: Config,
-}
-
-impl Builder {
-    pub fn new() -> Self {
-        Self {
-            c: Config {
-                service_addr: String::new(),
-                namespace: String::new(),
-                identity: String::new(),
-                session_timeout: Duration::default(),
-                max_parallel_requests: 1,
-                request_timeout: None,
-                retry: None,
-            },
-        }
-    }
-
-    pub fn new_from(config: &Config) -> Self {
-        Self { c: config.clone() }
-    }
-
-    #[must_use]
-    pub fn service_addr(mut self, x: impl Into<String>) -> Self {
-        self.c.service_addr = x.into();
-        self
-    }
-
-    #[must_use]
-    pub fn namespace(mut self, x: impl Into<String>) -> Self {
-        self.c.namespace = x.into();
-        self
-    }
-
-    #[must_use]
-    pub fn identity(mut self, x: impl Into<String>) -> Self {
-        self.c.identity = x.into();
-        self
-    }
-
-    #[must_use]
-    pub fn session_timeout(mut self, x: Duration) -> Self {
-        self.c.session_timeout = x;
-        self
-    }
-
-    #[must_use]
-    pub fn max_parallel_requests(mut self, x: usize) -> Self {
-        self.c.max_parallel_requests = x.min(1);
-        self
-    }
-
-    #[must_use]
-    pub fn request_timeout(mut self, x: Duration) -> Self {
-        self.c.request_timeout = if x.is_zero() { None } else { Some(x) };
-        self
-    }
-
-    #[must_use]
-    pub fn retry(mut self, x: RetryConfig) -> Self {
-        self.c.retry = Some(x);
-        self
-    }
-
-    pub fn build(mut self) -> Result<Arc<Config>> {
-        if self.c.service_addr.is_empty() {
-            return Err(Error::NoServiceAddress);
-        }
-        if self.c.namespace.is_empty() {
-            self.c.namespace = "default".to_string();
-        }
-        Ok(Arc::new(self.c))
-    }
-}
-
-impl Default for Builder {
-    fn default() -> Self {
-        Self::new()
+impl<S: config_builder::State> ConfigBuilder<S> {
+    pub fn build(self) -> Arc<Config>
+    where
+        S: config_builder::IsComplete,
+    {
+        Arc::new(self.do_build())
     }
 }

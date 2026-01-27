@@ -1,4 +1,4 @@
-// Copyright 2025 Maurice S. Barnum
+// Copyright 2025-2026 Maurice S. Barnum
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,6 +15,8 @@
 use mauricebarnum_oxia_client::{Client, Result, config};
 use std::time::Duration;
 use tracing_subscriber::{EnvFilter, fmt};
+
+use crate::config::Config;
 
 fn main() -> Result<()> {
     unsafe {
@@ -36,11 +38,11 @@ fn main() -> Result<()> {
         // we shouldn't use it here
         let server_address = "localhost:6648";
 
-        let config = crate::config::Builder::new()
+        let config = Config::builder()
             .service_addr(server_address)
             .max_parallel_requests(3)
             .session_timeout(Duration::from_millis(2001))
-            .build()?;
+            .build();
         let mut client = Client::new(config.clone());
 
         client.connect().await?;

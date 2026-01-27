@@ -50,11 +50,11 @@ use tokio::time::timeout;
 async fn create_test_client_nshards(nshards: u32) -> Result<(common::TestServer, Client)> {
     let session_timeout = Duration::from_secs(2);
     let server = trace_err!(common::TestServer::start_nshards(non_zero(nshards)))?;
-    let builder = config::Builder::new()
+    let builder = config::Config::builder()
         .retry(config::RetryConfig::new(3, Duration::from_millis(23)))
         .max_parallel_requests(3)
         .session_timeout(session_timeout);
-    let client = trace_err!(server.connect(Some(builder)).await)?;
+    let client = trace_err!(server.connect_with(builder).await)?;
     Ok((server, client))
 }
 
@@ -859,7 +859,7 @@ async fn test_notifications_with_options() -> anyhow::Result<()> {
 #[test_log::test(tokio::test)]
 async fn test_notifications_reconnect_on_close() -> anyhow::Result<()> {
     let mut server = common::TestServer::start()?;
-    let client = trace_err!(server.connect(Some(config::Builder::new())).await)?;
+    let client = trace_err!(server.connect().await)?;
 
     // Create stream with reconnect_on_close enabled
     let opts = NotificationsOptions::new().with(|o| {
@@ -926,7 +926,7 @@ async fn test_notifications_reconnect_on_close() -> anyhow::Result<()> {
 #[test_log::test(tokio::test)]
 async fn test_notifications_no_reconnect_default() -> anyhow::Result<()> {
     let mut server = common::TestServer::start()?;
-    let client = trace_err!(server.connect(Some(config::Builder::new())).await)?;
+    let client = trace_err!(server.connect().await)?;
 
     // Create stream with default options (no reconnect)
     let mut notifications = client.create_notifications_stream()?;

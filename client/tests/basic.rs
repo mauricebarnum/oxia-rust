@@ -1,4 +1,4 @@
-// Copyright 2025 Maurice S. Barnum
+// Copyright 2025-2026 Maurice S. Barnum
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -32,14 +32,14 @@ const RETRY_TIMEOUT_MSECS: u64 = 23;
 async fn test_basic() -> anyhow::Result<()> {
     let session_timeout = Duration::from_secs(SESSION_TIMEOUT_SECS);
     let server = trace_err!(common::TestServer::start_nshards(non_zero(4)))?;
-    let builder = config::Builder::new()
+    let builder = config::Config::builder()
         .retry(config::RetryConfig::new(
             3,
             Duration::from_millis(RETRY_TIMEOUT_MSECS),
         ))
         .max_parallel_requests(3)
         .session_timeout(session_timeout);
-    let client = trace_err!(server.connect(Some(builder)).await)?;
+    let client = trace_err!(server.connect_with(builder).await)?;
 
     let mut key = String::new();
     for i in 0..11 {
@@ -97,17 +97,17 @@ async fn test_basic() -> anyhow::Result<()> {
 
 async fn do_test_disconnect(retry: bool) -> anyhow::Result<()> {
     let mut server = common::TestServer::start()?;
-    let builder = config::Builder::new()
+    let builder = config::Config::builder()
         .max_parallel_requests(3)
         .request_timeout(Duration::from_millis(300))
-        .session_timeout(Duration::from_millis(2001));
-    let builder = if retry {
-        builder.retry(config::RetryConfig::new(3, Duration::from_millis(100)))
-    } else {
-        builder
-    };
+        .session_timeout(Duration::from_millis(2001))
+        .maybe_retry(if retry {
+            Some(config::RetryConfig::new(3, Duration::from_millis(100)))
+        } else {
+            None
+        });
 
-    let client = server.connect(Some(builder)).await?;
+    let client = server.connect_with(builder).await?;
     assert_eq!(None, trace_err!(client.get("foo").await)?);
 
     trace_err!(client.put("foo", "bar").await)?;
@@ -143,8 +143,8 @@ async fn test_range_delete() -> anyhow::Result<()> {
     let nshards = non_zero(3);
     let server = trace_err!(common::TestServer::start_nshards(nshards))?;
 
-    let builder = config::Builder::new();
-    let client = trace_err!(server.connect(Some(builder)).await)?;
+    let builder = config::Config::builder();
+    let client = trace_err!(server.connect_with(builder).await)?;
 
     let keys: Vec<String> = (0..N * 2).map(|i| format!("k{i:04}")).collect();
     for key in &keys {

@@ -31,7 +31,7 @@ use common::TestResultExt;
 #[test_log::test(tokio::test)]
 async fn test_client_drop_completes() -> anyhow::Result<()> {
     let server = trace_err!(common::TestServer::start())?;
-    let client = trace_err!(server.connect(None).await)?;
+    let client = trace_err!(server.connect().await)?;
 
     // Do some operations to ensure background tasks are running
     trace_err!(client.put("test-key", "test-value").await)?;
@@ -55,8 +55,8 @@ async fn test_ephemeral_key_expires_after_client_drop() -> anyhow::Result<()> {
     let session_timeout = Duration::from_secs(2);
 
     let server = trace_err!(common::TestServer::start())?;
-    let builder = config::Builder::new().session_timeout(session_timeout);
-    let client = trace_err!(server.connect(Some(builder)).await)?;
+    let builder = config::Config::builder().session_timeout(session_timeout);
+    let client = trace_err!(server.connect_with(builder).await)?;
 
     // Create an ephemeral key - this starts a session with heartbeats
     let key = "ephemeral-cancel-test";
@@ -86,7 +86,7 @@ async fn test_ephemeral_key_expires_after_client_drop() -> anyhow::Result<()> {
     tokio::time::sleep(wait_time).await;
 
     // Reconnect and verify key is gone
-    let client2 = trace_err!(server.connect(None).await)?;
+    let client2 = trace_err!(server.connect().await)?;
     let result = trace_err!(client2.get(key).await)?;
     assert!(
         result.is_none(),
@@ -103,8 +103,8 @@ async fn test_reconnect_cleans_up_old_manager() -> anyhow::Result<()> {
     let session_timeout = Duration::from_secs(2);
 
     let server = trace_err!(common::TestServer::start())?;
-    let builder = config::Builder::new().session_timeout(session_timeout);
-    let mut client = trace_err!(server.connect(Some(builder)).await)?;
+    let builder = config::Config::builder().session_timeout(session_timeout);
+    let mut client = trace_err!(server.connect_with(builder).await)?;
 
     // Create an ephemeral key with the first connection
     let key = "ephemeral-reconnect-test";
@@ -147,7 +147,7 @@ async fn test_reconnect_cleans_up_old_manager() -> anyhow::Result<()> {
 #[test_log::test(tokio::test)]
 async fn test_cloned_clients_share_lifecycle() -> anyhow::Result<()> {
     let server = trace_err!(common::TestServer::start())?;
-    let client1 = trace_err!(server.connect(None).await)?;
+    let client1 = trace_err!(server.connect().await)?;
     let client2 = client1.clone();
 
     // Both clients should work
@@ -172,7 +172,7 @@ async fn test_cloned_clients_share_lifecycle() -> anyhow::Result<()> {
 #[test_log::test(tokio::test)]
 async fn test_concurrent_ops_during_shutdown() -> anyhow::Result<()> {
     let server = trace_err!(common::TestServer::start())?;
-    let client = trace_err!(server.connect(None).await)?;
+    let client = trace_err!(server.connect().await)?;
 
     // Seed some data
     for i in 0..10 {
@@ -227,7 +227,7 @@ async fn test_notifications_stream_drop_completes() -> anyhow::Result<()> {
     use futures::StreamExt;
 
     let server = trace_err!(common::TestServer::start())?;
-    let client = trace_err!(server.connect(None).await)?;
+    let client = trace_err!(server.connect().await)?;
 
     // Create a notifications stream
     let mut stream = trace_err!(client.create_notifications_stream())?;
