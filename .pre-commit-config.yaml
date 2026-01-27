@@ -25,7 +25,16 @@ repos:
         entry: cargo clippy
         language: system
         types: [rust]
-        args: ["--no-deps", "--all-targets", "--all-features", "--offline"]
+        args:
+          [
+            "--no-deps",
+            "--all-targets",
+            "--all-features",
+            "--offline",
+            "--",
+            "-D",
+            "warnings",
+          ]
         pass_filenames: false
 
       - id: cargo-fmt
