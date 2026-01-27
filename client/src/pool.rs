@@ -25,13 +25,12 @@ use tracing::warn;
 
 use crate::Error;
 use crate::Result;
-use crate::config;
 use crate::config::Config;
 
 type CompletionResult = crate::Result<Channel>;
 
 mod inner {
-    use super::{Arc, Channel, CompletionResult, HashMap, RwLock, broadcast, config};
+    use super::{Arc, Channel, CompletionResult, Config, HashMap, RwLock, broadcast};
 
     #[derive(Clone, Debug)]
     pub(super) enum Item {
@@ -47,12 +46,12 @@ mod inner {
 
     #[derive(Clone, Debug)]
     pub(super) struct Inner {
-        pub(super) config: Arc<config::Config>,
+        pub(super) config: Arc<Config>,
         pub(super) state: Arc<RwLock<State>>,
     }
 
     impl Inner {
-        pub(super) fn new(config: Arc<config::Config>) -> Self {
+        pub(super) fn new(config: Arc<Config>) -> Self {
             Self {
                 config,
                 state: Arc::new(RwLock::new(State::default())),
@@ -277,7 +276,7 @@ mod tests {
 
     #[test_log::test(tokio::test(flavor = "current_thread"))]
     async fn test_construct() -> anyhow::Result<()> {
-        let config = config::Builder::new().service_addr("localhost").build()?;
+        let config = Config::builder().service_addr("localhost").build();
         let pool = ChannelPool::new(&config);
         let _ = pool.get("").await;
         Ok(())
@@ -294,7 +293,7 @@ mod tests {
 
     #[test_log::test(tokio::test(flavor = "current_thread"))]
     async fn test_construct_factory() -> anyhow::Result<()> {
-        let config = config::Builder::new().service_addr("localhost").build()?;
+        let config = Config::builder().service_addr("localhost").build();
         let pool = ChannelPool::with_channel_factory(&config, FailDefaultChannelFactory {});
         assert!(pool.get("").await.is_err());
         Ok(())

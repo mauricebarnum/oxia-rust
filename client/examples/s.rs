@@ -1,4 +1,4 @@
-// Copyright 2025 Maurice S. Barnum
+// Copyright 2025-2026 Maurice S. Barnum
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use mauricebarnum_oxia_client::{Client, Result, config};
+use mauricebarnum_oxia_client::Client;
+use mauricebarnum_oxia_client::Result;
+use mauricebarnum_oxia_client::config::Config;
+
 // use tracing::{debug, error, info, span, warn};
 // use tracing_subscriber::{EnvFilter, fmt};
 
@@ -25,9 +28,7 @@ async fn main() -> Result<()> {
     // Replace with your Oxia server address
     let server_address = "localhost:6648";
 
-    let config = crate::config::Builder::new()
-        .service_addr(server_address)
-        .build()?;
+    let config = Config::builder().service_addr(server_address).build();
     let mut client = Client::new(config);
     client.connect().await?;
 

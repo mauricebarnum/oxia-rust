@@ -1,4 +1,4 @@
-// Copyright 2025 Maurice S. Barnum
+// Copyright 2025-2026 Maurice S. Barnum
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -33,8 +33,8 @@ const TEST_TIMEOUT_SECS: u64 = 5;
 async fn test_batch_get_basic() -> anyhow::Result<()> {
     timeout(Duration::from_secs(TEST_TIMEOUT_SECS), async {
         let server = trace_err!(common::TestServer::start_nshards(non_zero(3)))?;
-        let builder = config::Builder::new().max_parallel_requests(5);
-        let client = trace_err!(server.connect(Some(builder)).await)?;
+        let builder = config::Config::builder().max_parallel_requests(5);
+        let client = trace_err!(server.connect_with(builder).await)?;
 
         // Insert test data
         let keys = vec!["batch-key-1", "batch-key-2", "batch-key-3"];
@@ -76,7 +76,7 @@ async fn test_batch_get_basic() -> anyhow::Result<()> {
 async fn test_batch_get_missing_keys() -> anyhow::Result<()> {
     timeout(Duration::from_secs(TEST_TIMEOUT_SECS), async {
         let server = trace_err!(common::TestServer::start_nshards(non_zero(2)))?;
-        let client = trace_err!(server.connect(None).await)?;
+        let client = trace_err!(server.connect().await)?;
 
         // Insert only some keys
         trace_err!(client.put("exists-1", "value-1").await)?;
@@ -120,7 +120,7 @@ async fn test_batch_get_missing_keys() -> anyhow::Result<()> {
 async fn test_batch_get_with_options() -> anyhow::Result<()> {
     timeout(Duration::from_secs(TEST_TIMEOUT_SECS), async {
         let server = trace_err!(common::TestServer::start_nshards(non_zero(2)))?;
-        let client = trace_err!(server.connect(None).await)?;
+        let client = trace_err!(server.connect().await)?;
 
         // Insert test data
         trace_err!(client.put("key-with-value", "some-value").await)?;
@@ -165,7 +165,7 @@ async fn test_batch_get_with_options() -> anyhow::Result<()> {
 async fn test_batch_get_with_batch_options() -> anyhow::Result<()> {
     timeout(Duration::from_secs(TEST_TIMEOUT_SECS), async {
         let server = trace_err!(common::TestServer::start_nshards(non_zero(2)))?;
-        let client = trace_err!(server.connect(None).await)?;
+        let client = trace_err!(server.connect().await)?;
 
         // Insert test data
         trace_err!(client.put("key-with-value", "some-value").await)?;
@@ -213,7 +213,7 @@ async fn test_batch_get_across_shards() -> anyhow::Result<()> {
     timeout(Duration::from_secs(TEST_TIMEOUT_SECS), async {
         let nshards = non_zero(4);
         let server = trace_err!(common::TestServer::start_nshards(nshards))?;
-        let client = trace_err!(server.connect(None).await)?;
+        let client = trace_err!(server.connect().await)?;
 
         // Insert keys that will likely hash to different shards
         let keys: Vec<String> = (0..20).map(|i| format!("shard-key-{}", i)).collect();
@@ -248,7 +248,7 @@ async fn test_batch_get_across_shards() -> anyhow::Result<()> {
 async fn test_batch_get_empty_request() -> anyhow::Result<()> {
     timeout(Duration::from_secs(TEST_TIMEOUT_SECS), async {
         let server = trace_err!(common::TestServer::start())?;
-        let client = trace_err!(server.connect(None).await)?;
+        let client = trace_err!(server.connect().await)?;
 
         // Empty request
         let req = client::batch_get::Request::builder().build();
@@ -268,7 +268,7 @@ async fn test_batch_get_empty_request() -> anyhow::Result<()> {
 async fn test_batch_get_with_partition_keys() -> anyhow::Result<()> {
     timeout(Duration::from_secs(TEST_TIMEOUT_SECS), async {
         let server = trace_err!(common::TestServer::start_nshards(non_zero(3)))?;
-        let client = trace_err!(server.connect(None).await)?;
+        let client = trace_err!(server.connect().await)?;
 
         let partition_key = "my-partition";
 
@@ -319,10 +319,10 @@ async fn test_batch_get_with_partition_keys() -> anyhow::Result<()> {
 async fn test_batch_get_large_batch() -> anyhow::Result<()> {
     timeout(Duration::from_secs(TEST_TIMEOUT_SECS), async {
         let server = trace_err!(common::TestServer::start_nshards(non_zero(4)))?;
-        let builder = config::Builder::new()
+        let builder = config::Config::builder()
             .max_parallel_requests(10)
             .request_timeout(Duration::from_secs(TEST_TIMEOUT_SECS));
-        let client = trace_err!(server.connect(Some(builder)).await)?;
+        let client = trace_err!(server.connect_with(builder).await)?;
 
         // Insert many keys
         const N: usize = 100;
@@ -362,7 +362,7 @@ async fn test_batch_get_large_batch() -> anyhow::Result<()> {
 async fn test_batch_get_duplicate_keys() -> anyhow::Result<()> {
     timeout(Duration::from_secs(TEST_TIMEOUT_SECS), async {
         let server = trace_err!(common::TestServer::start())?;
-        let client = trace_err!(server.connect(None).await)?;
+        let client = trace_err!(server.connect().await)?;
 
         trace_err!(client.put("dup-key", "value").await)?;
 
@@ -398,7 +398,7 @@ async fn test_batch_get_duplicate_keys() -> anyhow::Result<()> {
 async fn test_batch_get_mixed_success_failure() -> anyhow::Result<()> {
     timeout(Duration::from_secs(TEST_TIMEOUT_SECS), async {
         let server = trace_err!(common::TestServer::start_nshards(non_zero(2)))?;
-        let client = trace_err!(server.connect(None).await)?;
+        let client = trace_err!(server.connect().await)?;
 
         // Insert some keys
         trace_err!(client.put("success-1", "value-1").await)?;
@@ -435,7 +435,7 @@ async fn test_batch_get_mixed_success_failure() -> anyhow::Result<()> {
 async fn test_batch_get_version_tracking() -> anyhow::Result<()> {
     timeout(Duration::from_secs(TEST_TIMEOUT_SECS), async {
         let server = trace_err!(common::TestServer::start())?;
-        let client = trace_err!(server.connect(None).await)?;
+        let client = trace_err!(server.connect().await)?;
 
         // Insert and update a key multiple times
         let mut version = trace_err!(client.put("versioned-key", "v1").await)?;

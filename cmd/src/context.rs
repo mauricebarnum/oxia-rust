@@ -31,18 +31,18 @@ pub struct Context {
 }
 
 impl Context {
-    pub(super) fn new(cli: &crate::Cli) -> Result<Self> {
-        let config = config::Builder::new()
+    pub(super) fn new(cli: &crate::Cli) -> Self {
+        let config = config::Config::builder()
             .service_addr(cli.service_address.clone())
             .max_parallel_requests(cli.max_parallel_requests)
             .session_timeout(cli.session_timeout)
             .request_timeout(cli.request_timeout)
-            .build()?;
+            .build();
 
         let client = Client::new(config);
-        Ok(Self {
+        Self {
             state: Arc::new(Mutex::new(State { client })),
-        })
+        }
     }
 
     pub async fn client(&self) -> Result<Client> {

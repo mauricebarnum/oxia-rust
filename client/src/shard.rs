@@ -1665,13 +1665,10 @@ mod tests {
 
     mod client_tests {
         use super::*;
-        use crate::pool::ChannelPool;
+        use crate::{config::Config, pool::ChannelPool};
 
         fn make_test_config() -> Arc<config::Config> {
-            config::Builder::new()
-                .service_addr("localhost:1234")
-                .build()
-                .unwrap()
+            Config::builder().service_addr("localhost:1234").build()
         }
 
         fn make_test_client(config: &Arc<config::Config>) -> Client {

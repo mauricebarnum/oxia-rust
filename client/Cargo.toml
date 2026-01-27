@@ -22,6 +22,7 @@ xxhash-rust = { version = "0.8.15", default-features = false, features = [
 backon = "1.6.0"
 arc-swap = "1.8"
 tokio-util = "0.7.18"
+bon = { version = "3.8.2", features = ["implied-bounds"] }
 
 [dev-dependencies]
 tokio = { version = "1.49.0", features = ["rt-multi-thread", "macros"] }
@@ -52,4 +53,6 @@ allowed_external_types = [
     "tonic::status::Status",
     "tonic::transport::error::Error",
     "futures_core::stream::Stream",
+    "bon::builder_state::IsSet",
+    "bon::builder_state::IsUnset",
 ]

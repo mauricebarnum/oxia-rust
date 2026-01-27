@@ -180,13 +180,23 @@ impl TestServer {
         Ok(())
     }
 
-    pub async fn connect(&self, optc: Option<config::Builder>) -> Result<Client, ClientError> {
-        let builder = optc
-            .unwrap_or_default()
-            .service_addr(self.args.service_addr.clone());
-        let mut client = Client::new(trace_err!(builder.build())?);
+    pub async fn connect_with<S>(
+        &self,
+        opts: config::ConfigBuilder<S>,
+    ) -> Result<Client, ClientError>
+    where
+        S: config::config_builder::State,
+        S::ServiceAddr: config::config_builder::IsUnset,
+    {
+        let service_addr = self.args.service_addr.clone();
+        let config = opts.service_addr(service_addr).build();
+        let mut client = Client::new(config);
         trace_err!(client.connect().await)?;
         Ok(client)
+    }
+
+    pub async fn connect(&self) -> Result<Client, ClientError> {
+        self.connect_with(config::Config::builder()).await
     }
 }
 
