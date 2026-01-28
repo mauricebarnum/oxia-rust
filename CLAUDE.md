@@ -1,125 +1,61 @@
-# CLAUDE.md
+# CLAUDE.md - Project Guidance for Claude Code
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This CLAUDE.md guides Claude Code (`claude`) for this experimental Rust Oxia client repo. Follow strictly for safe, efficient collaboration. TITLE CLAUDE.md [file:43]
+
+## Safety & Workflow Rules (New)
+
+- **Branches**: ALWAYS prefix `claude-` (e.g., `claude-feature`). Checkout new feature branch before edits: `git checkout -b claude-task-name`. Never touch `main`/`origin/main`. [file:43]
+- **Isolation**: Write to `./claude-temp/` first (create if needed: `mkdir claude-temp`). Propose diffs with `/diff`; confirm before main files. Read via `@file.rs` on-demand. [web:35]
+- **Git Safety**: Pre-session: `git stash push -m "pre-claude"`. Stash changes: `git stash push`. No commits/pushes without `/confirm`. Post: `git stash pop` selectively. Block destructives via hooks. [web:33][conversation_history:24]
+- **Tokens**: Use `/rewind` (Esc Esc) for undos. Limit tools (`ENABLE_TOOL_SEARCH=auto:5%`). Test incrementally; summarize with `/compact`. Monitor `/cost`. [web:10]
+- **Read-Only**: NEVER modify `./extoxia/` (vendored Oxia mirror). [file:43]
 
 ## Project Overview
 
-This is an experimental, incomplete Rust implementation of an [Oxia](https://github.com/oxia-db/oxia) client.
+Experimental Rust Oxia client: sharding, gRPC, notifications. Workspace: common (bindings), client (async API), cmd (CLI `oxia-cmd`), oxia-bin-util (server binary). [file:43]
 
-## Build Commands
+## Build & Test Commands
 
-```bash
-# Build all targets
-cargo build --all-targets
+| Task     | Command                                                    | Notes                       |
+| -------- | ---------------------------------------------------------- | --------------------------- |
+| Build    | `cargo build --all-targets`                                | All targets                 |
+| Tests    | `cargo nextest run`                                        | Full; or `--package client` |
+| Lint     | `cargo clippy --all-targets --all-features -- -D warnings` | Strict                      |
+| Format   | `cargo fmt` / `--check`                                    | -                           |
+| Security | `cargo deny check`                                         | Licenses                    |
+| Miri     | `+nightly cargo miri nextest run --package client`         | UB detection [file:43]      |
 
-# Run tests (uses cargo-nextest)
-cargo nextest run
-
-# Run a single test
-cargo nextest run test_name
-
-# Run tests for a specific package
-cargo nextest run --package mauricebarnum-oxia-client
-
-# Lint (strict - treats warnings as errors)
-cargo clippy --no-deps --all-targets --all-features -- -D warnings
-
-# Format
-cargo fmt
-
-# Format check
-cargo fmt --check
-
-# Dependency security/license check
-cargo deny check
-
-# Miri (undefined behavior detection) - client only
-cargo +nightly miri nextest run --package mauricebarnum-oxia-client
-```
-
-CI uses `--release --frozen` flags. Local development typically omits these.
+CI uses `--release --frozen`. Local: omit.
 
 ## Workspace Structure
 
-- **common** (`mauricebarnum-oxia-common`): Low-level gRPC bindings generated from protobuf via tonic-prost-build
-- **client** (`mauricebarnum-oxia-client`): Higher-level async client with sharding, dispatch, and ergonomic APIs
-- **cmd** (`mauricebarnum-oxia-cmd`): CLI tool (`oxia-cmd`) with commands: get, put, delete, list, range-scan, range-delete, notifications, shell
-- **oxia-bin-util**: Internal crate that builds the Go Oxia server binary for integration tests (sources vendored in `ext/oxia/`)
+- `common`: gRPC protos (tonic-prost-build).
+- `client`: Async client (sharding, dispatch).
+- `cmd`: `oxia-cmd` CLI (get/put/delete/list/range/notifications/shell).
+- `oxia-bin-util`: Builds vendored Go Oxia server for tests. [file:43]
 
-## Read-Only Directories
+## Key Architecture
 
-These directories should NEVER be modified:
+- **API**: `Client` struct; `put(key, value)` + `with_options()`. Zero-cost abstractions.
+- **Sharding**: XXHASH3 routing; dynamic via `shard.rs`.
+- **Pooling**: `pool.rs` per-shard gRPC; `ArcSwap` caches.
+- **Notifications**: Streaming key changes.
+- **Protos**: Auto from `./extoxia/common/proto`. No manual edits.
+- **Tests**: Spawn servers via `client/tests/common.rs`. [file:43]
 
-- `ext/oxia/` - Mirror of a subset of <https://github.com/oxia-db/oxia> to build a standalone oxia server for testing. The source code is relevant for understanding how Oxia works
+**Concurrency** (Hot Path: Lock-free):
 
-## Architecture Notes
+1. `ArcSwap::load` shards/clients.
+2. `RwLock::read` pool (misses).
+   Guidelines: arcswap > RwLock; tokio-sync; no locks pre-`.await`. [file:43]
 
-### Client API Design
+## Coding Style
 
-`Client` is a concrete struct (not a trait object) with generic parameters for flexibility:
+- Clippy: All lints (exceptions documented).
+- Docs: Terse; Rust API guidelines; `const fn`.
+- Github: Draft PRs; `--force-with-lease`; tests/clippy pre-push. Ignore local `main`. [file:43]
 
-```rust
-pub async fn put(&self, key: impl Into<String>, value: impl Into<Bytes>) -> Result<PutResponse>
-```
+## Efficiency Prompts
 
-The `x` / `x_with_options` pattern provides zero-cost abstractions (e.g., `put()` and `put_with_options()`).
-
-### Key Components
-
-- **Sharding**: Uses XXHASH3 for key routing to shards
-- **Channel pooling**: `pool.rs` manages gRPC connections per shard
-- **Shard assignment**: `shard.rs` handles dynamic shard assignment from server
-- **Notifications**: Streaming support for key change notifications
-
-### Proto Compilation
-
-The `common/build.rs` compiles protos from `ext/oxia/common/proto/`. Don't manually edit generated code.
-
-### Integration Tests
-
-Tests in `client/tests/` require the Oxia server binary, built automatically by `oxia-bin-util/build.rs` from vendored Go sources. The test harness (`client/tests/common.rs`) spawns servers and manages ports.
-
-## Concurrency Architecture
-
-### Synchronization Patterns
-
-The client uses async-first synchronization from `tokio::sync` and `arc_swap`:
-
-| Component | Primitive | Purpose | Access Pattern |
-|-----------|-----------|---------|----------------|
-| `Manager.shards` | `ArcSwap<Shards>` | Shard routing table | Read-heavy, rare writes |
-| `ClientData.grpc` | `ArcSwapOption<GrpcClient>` | Per-shard gRPC client cache | Read-heavy, rare writes |
-| `ChannelPool.state` | `RwLock<State>` | Connection pool | Read-heavy, rare writes |
-| Session init | `OnceCell` | One-time session setup | Write-once |
-| Shard changes | `watch::channel` | Config change broadcast | Multi-reader |
-| Pending connections | `broadcast::channel` | Coordinate waiters | Multi-reader |
-
-### Hot Path Design
-
-The request hot path prioritizes lock-free reads:
-
-1. **Shard lookup**: `ArcSwap::load()` - lock-free atomic load
-2. **gRPC client**: `ArcSwapOption::load()` - lock-free cache access
-3. **Channel pool**: `RwLock::read()` - only if cache miss in step 2
-
-### Guidelines
-
-- Prefer `arc_swap` for read-heavy shared state over `Mutex`/`RwLock`
-- Use `tokio::sync` types (not `std::sync`) in async code
-- Release locks before `.await` points to prevent holding across yields
-- Use channels (`watch`, `mpsc`, `broadcast`) for signaling over shared state
-
-## Coding style
-
-- Clippy uses all + pedantic lints with a few exceptions in workspace Cargo.toml
-- Document rationale when disabling a warning
-- Consider Rust API [guidelines](https://rust-lang.github.io/api-guidelines/)
-- Prefer terse comments that do not restate code in prose
-
-## Github integration
-
-- Always use the prefix `claude-` when creating a branch
-- For a force push, always use `--force-with-lease --force-if-includes` and suggest alternative only upon failure
-- Run clippy and tests before pushing
-- Create PRs as drafts unless instructed otherwise
-- Ignore the local `main` branch. Use `origin/main` as the upstream main branch
+- "Plan in `./claude-temp/`; diff before apply."
+- "Verify with tests; /cost check."
