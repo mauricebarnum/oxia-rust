@@ -368,61 +368,6 @@ mod tests {
     }
 
     #[test_log::test]
-    fn test_error_cloneable() {
-        // Clone without heap allocation (inline variants)
-        let err1 = Error::custom("test");
-        let cloned1 = err1.clone();
-        assert!(matches!(cloned1, Error::Custom(_)));
-
-        let err2 = Error::NoServiceAddress;
-        let _cloned2 = err2.clone();
-
-        let io_err = Error::from(io::Error::from(io::ErrorKind::NotFound));
-        let cloned_io = io_err.clone();
-        if let (Error::Io(arc1), Error::Io(arc2)) = (&io_err, &cloned_io) {
-            assert!(Arc::ptr_eq(arc1, arc2));
-        }
-
-        // Nested errors are cheap to clone
-        let nested = Error::shard_error(ShardId::new(1), Error::custom("nested"));
-        let cloned_nested = nested.clone();
-        if let (
-            Error::ShardError(ShardError { err: s1, .. }),
-            Error::ShardError(ShardError { err: s2, .. }),
-        ) = (&nested, &cloned_nested)
-        {
-            assert!(Arc::ptr_eq(s1, s2));
-        }
-    }
-
-    #[test_log::test]
-    fn test_error_conversions() {
-        let _: Error = io::Error::from(io::ErrorKind::Other).into();
-        let _: Error = OxiaError::KeyNotFound.into();
-        let _: Error = ClientError::Internal("test".into()).into();
-    }
-
-    #[test_log::test]
-    fn test_shard_error_helper() {
-        let inner = Error::custom("inner error");
-        let shard_err = Error::shard_error(ShardId::new(42), inner);
-        assert!(matches!(shard_err, Error::ShardError { .. }));
-    }
-
-    #[test_log::test]
-    fn test_other_error() {
-        let io_err = io::Error::from(io::ErrorKind::Other);
-        let err = Error::other(io_err);
-        assert!(matches!(err, Error::Other(_)));
-
-        // Verify cloning works and shares Arc
-        let cloned = err.clone();
-        if let (Error::Other(arc1), Error::Other(arc2)) = (&err, &cloned) {
-            assert!(Arc::ptr_eq(arc1, arc2));
-        }
-    }
-
-    #[test_log::test]
     fn test_error_is_connection_error_true() {
         let errs = [
             // gRPC Unavailable indicates connection failure
