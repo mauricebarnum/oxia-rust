@@ -21,30 +21,51 @@ use thiserror::Error as ThisError;
 use crate::KeyComparisonType;
 use crate::ShardId;
 
-/// Errors that map directly from the Oxia gRPC service responses
-#[derive(ThisError, Debug, Clone, PartialEq, Eq)]
-pub enum OxiaError {
-    #[error("Key not found")]
-    KeyNotFound,
+/// Error codes from Oxia gRPC service responses.
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct OxiaError(i32);
 
-    #[error("Unexpected version ID")]
-    UnexpectedVersionId,
+impl OxiaError {
+    pub const KEY_NOT_FOUND: Self = Self(1);
+    pub const UNEXPECTED_VERSION_ID: Self = Self(2);
+    pub const SESSION_DOES_NOT_EXIST: Self = Self(3);
 
-    #[error("Session does not exist")]
-    SessionDoesNotExist,
+    #[inline]
+    pub const fn new(code: i32) -> Self {
+        Self(code)
+    }
 
-    #[error("Unknown Oxia status code: {0}")]
-    Code(i32),
+    #[inline]
+    pub const fn code(self) -> i32 {
+        self.0
+    }
 }
 
-impl From<i32> for OxiaError {
-    fn from(value: i32) -> Self {
-        match value {
-            1 => OxiaError::KeyNotFound,
-            2 => OxiaError::UnexpectedVersionId,
-            3 => OxiaError::SessionDoesNotExist,
-            n => OxiaError::Code(n),
+impl std::fmt::Display for OxiaError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::KEY_NOT_FOUND => f.write_str("key not found code=1"),
+            Self::UNEXPECTED_VERSION_ID => f.write_str("unexpected version ID code=2"),
+            Self::SESSION_DOES_NOT_EXIST => f.write_str("session does not exist code=3"),
+            _ => write!(f, "unknown Oxia error code={}", self.0),
         }
+    }
+}
+
+impl std::error::Error for OxiaError {}
+
+impl From<i32> for OxiaError {
+    #[inline]
+    fn from(code: i32) -> Self {
+        Self(code)
+    }
+}
+
+impl From<OxiaError> for i32 {
+    #[inline]
+    fn from(err: OxiaError) -> Self {
+        err.0
     }
 }
 

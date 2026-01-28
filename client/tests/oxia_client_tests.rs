@@ -663,7 +663,7 @@ async fn test_error_conditions() -> Result<()> {
 
     // Test delete non-existent key (should succeed silently in Oxia)
     let result = client.delete(&key).await;
-    assert!(matches!(result, Err(Error::Oxia(OxiaError::KeyNotFound))));
+    assert!(matches!(result, Err(Error::Oxia(e)) if e == OxiaError::KEY_NOT_FOUND));
 
     // Test put with wrong expected version
     client.put(&key, "value").await?;
