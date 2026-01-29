@@ -27,9 +27,11 @@ use rand::SeedableRng;
 use rand::distr::Distribution;
 use rand::distr::Uniform;
 use rand::rngs::StdRng;
+use tokio::sync::Notify;
 use tokio::sync::OnceCell;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tonic::Streaming;
@@ -60,6 +62,22 @@ use crate::batch_get;
 use crate::config;
 use crate::create_grpc_client;
 use crate::pool::ChannelPool;
+
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct ShardMapEpoch(u64);
+
+impl ShardMapEpoch {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn next(&self) -> Self {
+        Self(self.0 + 1)
+    }
+}
+
+pub(crate) type ShardMapUpdateResult = std::result::Result<ShardMapEpoch, Error>;
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
@@ -1308,27 +1326,42 @@ mod int32_hash_range {
 } // mod int32_hash_range
 
 mod searchable {
+    use crate::shard::ShardMapEpoch;
+
     use super::{Client, Error, Result, ShardId, ShardIdMap, ShardMapper, int32_hash_range};
 
     #[derive(Debug, Default)]
-    pub(super) struct Shards {
+    pub(crate) struct Shards {
         shards: ShardIdMap<Client>,
         mapper: int32_hash_range::Mapper,
+        epoch: ShardMapEpoch,
     }
 
     impl Shards {
-        pub(super) fn new(shards: ShardIdMap<Client>, mapper: int32_hash_range::Mapper) -> Self {
-            Self { shards, mapper }
+        pub(super) fn new(
+            shards: ShardIdMap<Client>,
+            mapper: int32_hash_range::Mapper,
+            epoch: ShardMapEpoch,
+        ) -> Self {
+            Self {
+                shards,
+                mapper,
+                epoch,
+            }
         }
 
-        pub(super) fn find_by_id(&self, id: ShardId) -> Result<Client> {
+        pub(super) fn epoch(&self) -> ShardMapEpoch {
+            self.epoch
+        }
+
+        pub(crate) fn find_by_id(&self, id: ShardId) -> Result<Client> {
             self.shards
                 .get(id)
                 .cloned()
                 .ok_or_else(|| Error::NoShardMapping(id))
         }
 
-        pub(super) fn get_shard_id(&self, key: &str) -> Option<ShardId> {
+        pub(crate) fn get_shard_id(&self, key: &str) -> Option<ShardId> {
             self.mapper.get_shard_id(key)
         }
 
@@ -1393,7 +1426,9 @@ struct ShardAssignmentTask {
     /// Clients hold a reference to this and look up leaders dynamically.
     leaders: LeaderDirectory,
     token: CancellationToken,
-    changed: watch::Sender<std::result::Result<(), Error>>,
+    changed: watch::Sender<ShardMapUpdateResult>,
+    refresh_signal: Arc<Notify>,
+    last_refresh: Instant,
 }
 
 impl ShardAssignmentTask {
@@ -1403,7 +1438,8 @@ impl ShardAssignmentTask {
         shards: Arc<ArcSwap<searchable::Shards>>,
         leaders: LeaderDirectory,
         token: CancellationToken,
-        changed: watch::Sender<std::result::Result<(), Error>>,
+        changed: watch::Sender<ShardMapUpdateResult>,
+        refresh_signal: Arc<Notify>,
     ) -> Self {
         Self {
             config,
@@ -1412,6 +1448,8 @@ impl ShardAssignmentTask {
             leaders,
             token,
             changed,
+            refresh_signal,
+            last_refresh: Instant::now(),
         }
     }
 
@@ -1457,8 +1495,9 @@ impl ShardAssignmentTask {
             shards.insert(a.shard.into(), client);
         }
 
+        let new_epoch = current.epoch().next();
         self.shards
-            .store(Arc::new(searchable::Shards::new(shards, mapper)));
+            .store(Arc::new(searchable::Shards::new(shards, mapper, new_epoch)));
 
         Ok(())
     }
@@ -1474,7 +1513,7 @@ impl ShardAssignmentTask {
                         // than clone it
                         let a = std::mem::take(a);
                         let pr = self.process_assignments(a).await;
-                        let _ = self.changed.send(pr);
+                        let _ = self.changed.send(pr.map(|()| self.shards.load().epoch()));
                     }
                 }
                 Err(e) => {
@@ -1485,6 +1524,8 @@ impl ShardAssignmentTask {
     }
 
     async fn run(&mut self, mut cluster: GrpcClient) {
+        const MIN_REFRESH_INTERVAL: Duration = Duration::from_millis(50);
+
         #[derive(Debug)]
         enum ExitReason {
             Cancelled,
@@ -1496,19 +1537,25 @@ impl ShardAssignmentTask {
                 _ = self.token.cancelled() => {
                     break ExitReason::Cancelled;
                 }
-                _ = interval.tick() => {
-                    let req = oxia_proto::ShardAssignmentsRequest {
-                        namespace: self.config.namespace().into(),
-                    };
-                    match cluster.get_shard_assignments(req).await {
-                        Ok(rsp) => self.process_assignments_stream(rsp.into_inner()).await,
-                        Err(err) => {
-                            warn!(?err, "get_shard_assignments");
-                        }
+                _ = self.refresh_signal.notified() => {
+                    if self.last_refresh.elapsed() < MIN_REFRESH_INTERVAL {
+                        continue; // Rate limit
                     }
-                    trace!(?self.shards);
+                }
+                _ = interval.tick() => {}
+            }
+            let req = oxia_proto::ShardAssignmentsRequest {
+                namespace: self.config.namespace().into(),
+            };
+            match cluster.get_shard_assignments(req).await {
+                Ok(rsp) => self.process_assignments_stream(rsp.into_inner()).await,
+                Err(err) => {
+                    warn!(?err, "get_shard_assignments");
+                    let _ = self.changed.send(Err(err.into()));
                 }
             }
+            self.last_refresh = Instant::now();
+            trace!(?self.shards);
         };
         info!(?reason, "ShardAssignmentTask exiting");
     }
@@ -1521,7 +1568,8 @@ pub(crate) struct Manager {
     leaders: LeaderDirectory,
     cancel_token: CancellationToken,
     task_handle: JoinHandle<()>,
-    changed: watch::Receiver<std::result::Result<(), Error>>,
+    changed: watch::Receiver<ShardMapUpdateResult>,
+    refresh_signal: Arc<Notify>,
 }
 
 impl Manager {
@@ -1531,12 +1579,14 @@ impl Manager {
         let shards = Arc::new(ArcSwap::from_pointee(searchable::Shards::default()));
         let leaders: LeaderDirectory = Arc::new(ArcSwap::from_pointee(ShardIdMap::default()));
         let cancel_token = CancellationToken::new();
+        let refresh_signal = Arc::new(Notify::new());
         let (task_handle, changed) = Self::start_shard_assignment_task(
             config,
             &channel_pool,
             &cancel_token,
             &shards,
             &leaders,
+            &refresh_signal,
         )
         .await?;
         Ok(Manager {
@@ -1545,6 +1595,7 @@ impl Manager {
             cancel_token,
             task_handle,
             changed,
+            refresh_signal,
         })
     }
 
@@ -1581,8 +1632,55 @@ impl Manager {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn recv_changed(&self) -> watch::Receiver<std::result::Result<(), Error>> {
+    pub(crate) fn recv_changed(&self) -> watch::Receiver<ShardMapUpdateResult> {
         self.changed.clone()
+    }
+
+    /// Returns the current shard map epoch. Epoch increments with each shard assignment update.
+    pub fn epoch(&self) -> ShardMapEpoch {
+        self.shards.load().epoch()
+    }
+
+    /// Signals the background task to refresh shard assignments.
+    /// Rate-limited to prevent excessive refreshes.
+    pub fn trigger_refresh(&self) {
+        self.refresh_signal.notify_one();
+    }
+
+    /// Waits for the shard map to be updated to an epoch greater than `after_epoch`.
+    ///
+    /// Returns immediately if the current epoch is already greater than `after_epoch`.
+    /// On success, returns the new epoch.
+    /// Logs errors from failed shard assignment fetches but continues waiting.
+    pub async fn wait_for_update(
+        &self,
+        after_epoch: ShardMapEpoch,
+        timeout: Duration,
+    ) -> Result<ShardMapEpoch> {
+        // Fast path: already past the requested epoch
+        if self.epoch() > after_epoch {
+            return Ok(self.epoch());
+        }
+
+        let mut rx = self.changed.clone();
+        tokio::time::timeout(timeout, async {
+            loop {
+                rx.changed().await.map_err(|_| Error::Cancelled)?;
+
+                match rx.borrow_and_update().as_ref() {
+                    Err(e) => {
+                        warn!(?e, "shard assignment update failed");
+                    }
+                    Ok(&epoch) => {
+                        if epoch > after_epoch {
+                            return Ok(epoch);
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|_| Error::RequestTimeout)?
     }
 
     async fn start_shard_assignment_task(
@@ -1591,11 +1689,9 @@ impl Manager {
         token: &CancellationToken,
         shards: &Arc<ArcSwap<searchable::Shards>>,
         leaders: &LeaderDirectory,
-    ) -> Result<(
-        JoinHandle<()>,
-        watch::Receiver<std::result::Result<(), Error>>,
-    )> {
-        let (tx, mut rx) = watch::channel(Ok(()));
+        refresh_signal: &Arc<Notify>,
+    ) -> Result<(JoinHandle<()>, watch::Receiver<ShardMapUpdateResult>)> {
+        let (tx, mut rx) = watch::channel::<ShardMapUpdateResult>(Ok(ShardMapEpoch::new()));
         // Consume the initial value
         rx.borrow_and_update();
 
@@ -1607,6 +1703,7 @@ impl Manager {
             Arc::clone(leaders),
             token.clone(),
             tx,
+            Arc::clone(refresh_signal),
         );
         let handle = tokio::spawn(async move {
             task.run(cluster).await;
