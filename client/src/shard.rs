@@ -20,7 +20,6 @@ use std::task::Poll;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use arc_swap::ArcSwapOption;
 use bytes::Bytes;
 use futures::stream::Stream;
 use futures::stream::StreamExt;
@@ -28,7 +27,6 @@ use rand::SeedableRng;
 use rand::distr::Distribution;
 use rand::distr::Uniform;
 use rand::rngs::StdRng;
-use tokio::sync::Mutex;
 use tokio::sync::OnceCell;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -267,19 +265,30 @@ impl Drop for Session {
     }
 }
 
+/// Shared directory mapping shard IDs to pre-formatted leader URLs (`Arc<str>`).
+/// Updated atomically when shard assignments change; clients look up dynamically.
+///
+/// URLs are formatted once during assignment processing, eliminating per-RPC
+/// `format!("http://...")` allocations.
+pub(crate) type LeaderDirectory = Arc<ArcSwap<ShardIdMap<Arc<str>>>>;
+
+fn format_leader_url(a: &oxia_proto::ShardAssignment) -> Arc<str> {
+    Arc::from(format!("http://{}", a.leader))
+}
+
 #[derive(Debug)]
 struct ClientData {
     config: Arc<config::Config>,
     channel_pool: ChannelPool,
     shard_id: ShardId,
-    leader: String,
+    /// Shared reference to leader directory - enables dynamic leader lookup.
+    /// When leader changes, clients automatically use the new leader on next RPC.
+    leaders: LeaderDirectory,
     meta: tonic::metadata::MetadataMap,
     cancel_token: CancellationToken,
-    /// Cached gRPC client. Set to None when invalidated, lazily populated on first use.
-    /// Using ArcSwapOption for lock-free reads on the hot path.
-    grpc: ArcSwapOption<GrpcClient>,
-    /// Mutex to serialize initialization attempts (prevents thundering herd on cache miss).
-    grpc_init: Mutex<()>,
+    // Note: No gRPC client caching - we rely on ChannelPool which already caches
+    // connections by URL. This simplifies wrong-leader handling since there's no
+    // stale client to invalidate.
 }
 
 impl ClientData {
@@ -287,7 +296,7 @@ impl ClientData {
         config: Arc<config::Config>,
         channel_pool: ChannelPool,
         shard_id: ShardId,
-        leader: impl Into<String>,
+        leaders: LeaderDirectory,
         meta: tonic::metadata::MetadataMap,
         cancel_token: CancellationToken,
     ) -> Self {
@@ -295,12 +304,15 @@ impl ClientData {
             config,
             channel_pool,
             shard_id,
-            leader: leader.into(),
+            leaders,
             meta,
             cancel_token,
-            grpc: ArcSwapOption::empty(),
-            grpc_init: Mutex::new(()),
         }
+    }
+
+    /// Get the current leader address for this shard, if known.
+    fn get_leader(&self) -> Option<Arc<str>> {
+        self.leaders.load().get(self.shard_id).cloned()
     }
 }
 
@@ -311,34 +323,29 @@ pub struct Client {
 }
 
 impl Client {
-    /// Get the cached gRPC client, or create one from the pool if not cached.
-    async fn get_grpc_client(&self) -> crate::Result<GrpcClient> {
-        // Fast path: lock-free check if we have a cached client
-        if let Some(client) = self.data.grpc.load_full() {
-            return Ok((*client).clone());
-        }
-
-        // Slow path: acquire init lock to prevent thundering herd
-        let _guard = self.data.grpc_init.lock().await;
-
-        // Double-check after acquiring lock (another task may have initialized)
-        if let Some(client) = self.data.grpc.load_full() {
-            return Ok((*client).clone());
-        }
-
-        // Create new client from pool
-        let url = format!("http://{}", self.data.leader);
-        let channel = self.data.channel_pool.get(&url).await?;
-        let client = GrpcClient::new(channel);
-        self.data.grpc.store(Some(Arc::new(client.clone())));
-        Ok(client)
+    /// Look up current leader address from the shared leader directory.
+    fn get_leader(&self) -> Option<Arc<str>> {
+        self.data.leaders.load().get(self.data.shard_id).cloned()
     }
 
-    /// Invalidate the cached gRPC client for this shard's leader.
+    /// Get a gRPC client for the current leader.
+    ///
+    /// Performs dynamic leader lookup on each call - no caching at this level.
+    /// The ChannelPool handles connection caching by URL, so repeated calls
+    /// to the same leader reuse the existing connection.
+    async fn get_grpc_client(&self) -> crate::Result<GrpcClient> {
+        let leader = self
+            .get_leader()
+            .ok_or_else(|| Error::NoShardMapping(self.data.shard_id))?;
+        let channel = self.data.channel_pool.get(&leader).await?;
+        Ok(GrpcClient::new(channel))
+    }
+
+    /// Invalidate the cached channel for the current leader.
     async fn invalidate_channel(&self) {
-        self.data.grpc.store(None);
-        let url = format!("http://{}", self.data.leader);
-        self.data.channel_pool.remove(&url).await;
+        if let Some(leader) = self.get_leader() {
+            self.data.channel_pool.remove(&leader).await;
+        }
     }
 
     /// Execute an RPC with automatic channel invalidation on connection errors.
@@ -352,7 +359,9 @@ impl Client {
         if let Err(ref e) = result
             && e.is_connection_error()
         {
-            debug!(leader = %self.data.leader, "connection error, invalidating channel");
+            if let Some(leader) = self.get_leader() {
+                debug!(leader = %leader, "connection error, invalidating channel");
+            }
             self.invalidate_channel().await;
         }
         result
@@ -431,7 +440,8 @@ fn check_delete_range_response(r: &oxia_proto::WriteResponse) -> Option<Error> {
 }
 
 #[inline]
-fn no_response_error(server: &str, shard_id: ShardId) -> Error {
+fn no_response_error(server: Option<&str>, shard_id: ShardId) -> Error {
+    let server = server.unwrap_or("unknown");
     let msg = format!("server={server} shard={shard_id}");
     Error::NoResponseFromServer(msg)
 }
@@ -493,13 +503,16 @@ impl Client {
         })
     }
 
-    /// Creates a new Client instance for a specific shard
+    /// Creates a new Client instance for a specific shard.
+    ///
+    /// The client looks up the current leader dynamically from the shared `leaders`
+    /// directory on each RPC, enabling automatic recovery when leaders change.
     pub(crate) fn new(
         channel_pool: ChannelPool,
         config: Arc<config::Config>,
         cancel_token: CancellationToken,
         shard_id: ShardId,
-        dest: impl Into<String>,
+        leaders: LeaderDirectory,
     ) -> Result<Self> {
         // Create metadata with shard ID and namespace
         let mut meta = tonic::metadata::MetadataMap::new();
@@ -515,7 +528,7 @@ impl Client {
                 config,
                 channel_pool,
                 shard_id,
-                dest,
+                leaders,
                 meta,
                 cancel_token,
             )),
@@ -751,7 +764,10 @@ impl Client {
             Some(Ok(response)) => response,
             Some(Err(err)) => return Err(err.into()),
             None => {
-                return Err(no_response_error(&self.data.leader, self.data.shard_id));
+                return Err(no_response_error(
+                    self.data.get_leader().as_deref(),
+                    self.data.shard_id,
+                ));
             }
         };
 
@@ -804,7 +820,7 @@ impl Client {
                 },
                 None => State::Failing {
                     keys_iter,
-                    err: no_response_error(&context.leader, context.shard_id),
+                    err: no_response_error(context.get_leader().as_deref(), context.shard_id),
                 },
             },
             Err(err) => State::Failing { keys_iter, err },
@@ -823,7 +839,10 @@ impl Client {
                                 return None;
                             }
                             // gets exhausted early; fail remaining keys
-                            let err = no_response_error(&context.leader, context.shard_id);
+                            let err = no_response_error(
+                                context.get_leader().as_deref(),
+                                context.shard_id,
+                            );
                             state = State::Failing { keys_iter, err };
                             continue;
                         };
@@ -1370,6 +1389,9 @@ struct ShardAssignmentTask {
     config: Arc<config::Config>,
     channel_pool: ChannelPool,
     shards: Arc<ArcSwap<searchable::Shards>>,
+    /// Shared leader directory - updated atomically when assignments change.
+    /// Clients hold a reference to this and look up leaders dynamically.
+    leaders: LeaderDirectory,
     token: CancellationToken,
     changed: watch::Sender<std::result::Result<(), Error>>,
 }
@@ -1379,6 +1401,7 @@ impl ShardAssignmentTask {
         config: Arc<config::Config>,
         channel_pool: ChannelPool,
         shards: Arc<ArcSwap<searchable::Shards>>,
+        leaders: LeaderDirectory,
         token: CancellationToken,
         changed: watch::Sender<std::result::Result<(), Error>>,
     ) -> Self {
@@ -1386,6 +1409,7 @@ impl ShardAssignmentTask {
             config,
             channel_pool,
             shards,
+            leaders,
             token,
             changed,
         }
@@ -1404,16 +1428,22 @@ impl ShardAssignmentTask {
         let mapper = Self::make_mapper(&ns)?;
         let current = self.shards.load();
 
+        // Build new leaders map from assignments
+        let mut new_leaders = ShardIdMap::<Arc<str>>::default();
+        for a in &ns.assignments {
+            new_leaders.insert(a.shard.into(), format_leader_url(a));
+        }
+        // Update leaders atomically - clients will see new leaders on next RPC
+        self.leaders.store(Arc::new(new_leaders));
+
         let mut shards = ShardIdMap::<Client>::default();
 
         for a in &ns.assignments {
             info!(?a, "processing assignments");
             let id = a.shard.into();
-            let client = if let Some(c) = current
-                .get(id)
-                .filter(|x| x.data.leader == a.leader)
-                .cloned()
-            {
+            // Reuse existing client if present - it will look up leader dynamically.
+            // No need to compare leaders since clients don't cache them anymore.
+            let client = if let Some(c) = current.get(id).cloned() {
                 c
             } else {
                 Client::new(
@@ -1421,7 +1451,7 @@ impl ShardAssignmentTask {
                     Arc::clone(&self.config),
                     self.token.clone(),
                     a.shard.into(),
-                    &a.leader,
+                    Arc::clone(&self.leaders),
                 )?
             };
             shards.insert(a.shard.into(), client);
@@ -1487,6 +1517,8 @@ impl ShardAssignmentTask {
 #[derive(Debug)]
 pub(crate) struct Manager {
     shards: Arc<ArcSwap<searchable::Shards>>,
+    #[allow(dead_code)]
+    leaders: LeaderDirectory,
     cancel_token: CancellationToken,
     task_handle: JoinHandle<()>,
     changed: watch::Receiver<std::result::Result<(), Error>>,
@@ -1497,12 +1529,19 @@ impl Manager {
     pub(crate) async fn new(config: &Arc<config::Config>) -> Result<Self> {
         let channel_pool = ChannelPool::new(config);
         let shards = Arc::new(ArcSwap::from_pointee(searchable::Shards::default()));
+        let leaders: LeaderDirectory = Arc::new(ArcSwap::from_pointee(ShardIdMap::default()));
         let cancel_token = CancellationToken::new();
-        let (task_handle, changed) =
-            Self::start_shard_assignment_task(config, &channel_pool, &cancel_token, &shards)
-                .await?;
+        let (task_handle, changed) = Self::start_shard_assignment_task(
+            config,
+            &channel_pool,
+            &cancel_token,
+            &shards,
+            &leaders,
+        )
+        .await?;
         Ok(Manager {
             shards,
+            leaders,
             cancel_token,
             task_handle,
             changed,
@@ -1551,6 +1590,7 @@ impl Manager {
         channel_pool: &ChannelPool,
         token: &CancellationToken,
         shards: &Arc<ArcSwap<searchable::Shards>>,
+        leaders: &LeaderDirectory,
     ) -> Result<(
         JoinHandle<()>,
         watch::Receiver<std::result::Result<(), Error>>,
@@ -1564,6 +1604,7 @@ impl Manager {
             Arc::clone(config),
             channel_pool.clone(),
             Arc::clone(shards),
+            Arc::clone(leaders),
             token.clone(),
             tx,
         );
@@ -1662,25 +1703,36 @@ mod tests {
             Config::builder().service_addr("localhost:1234").build()
         }
 
+        fn make_test_leaders(shard_id: ShardId, leader: &str) -> LeaderDirectory {
+            let mut leaders = ShardIdMap::default();
+            leaders.insert(shard_id, Arc::from(format!("http://{}", leader)));
+            Arc::new(ArcSwap::from_pointee(leaders))
+        }
+
         fn make_test_client(config: &Arc<config::Config>) -> Client {
             let pool = ChannelPool::new(config);
+            let shard_id = ShardId::new(1);
+            let leaders = make_test_leaders(shard_id, "localhost:1234");
             Client::new(
                 pool,
                 config.clone(),
                 CancellationToken::new(),
-                ShardId::new(1),
-                "localhost:1234",
+                shard_id,
+                leaders,
             )
             .unwrap()
         }
 
         #[test_log::test(tokio::test)]
-        async fn test_client_initial_state() {
+        async fn test_client_get_leader() {
             let config = make_test_config();
             let client = make_test_client(&config);
 
-            // Initially, no gRPC client should be cached
-            assert!(client.data.grpc.load().is_none());
+            // Client should be able to look up its leader
+            assert_eq!(
+                client.get_leader().as_deref(),
+                Some("http://localhost:1234")
+            );
         }
 
         #[cfg(not(miri))] // Miri doesn't support network operations (getaddrinfo)
@@ -1692,26 +1744,20 @@ mod tests {
             // get_grpc_client should fail when server is unreachable
             let result = client.get_grpc_client().await;
             assert!(result.is_err());
-
-            // Cache should still be empty since connection failed
-            assert!(client.data.grpc.load().is_none());
         }
 
         #[test_log::test(tokio::test)]
-        async fn test_client_invalidate_on_empty_cache() {
+        async fn test_client_invalidate_on_empty_pool() {
             let config = make_test_config();
             let client = make_test_client(&config);
 
-            // invalidate_channel on empty cache should not panic
+            // invalidate_channel should not panic even when pool is empty
             client.invalidate_channel().await;
-
-            // Cache should still be None
-            assert!(client.data.grpc.load().is_none());
         }
 
         #[cfg(not(miri))] // Miri doesn't support network operations (getaddrinfo)
         #[test_log::test(tokio::test)]
-        async fn test_rpc_invalidates_on_connection_error() {
+        async fn test_rpc_handles_connection_error() {
             let config = make_test_config();
             let client = make_test_client(&config);
 
