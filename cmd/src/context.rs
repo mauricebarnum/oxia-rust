@@ -37,6 +37,7 @@ impl Context {
             .max_parallel_requests(cli.max_parallel_requests)
             .session_timeout(cli.session_timeout)
             .request_timeout(cli.request_timeout)
+            .retry_on_stale_shard_map(cli.retry_on_stale_shard_map)
             .build();
 
         let client = Client::new(config);

@@ -56,6 +56,8 @@ pub struct Config {
     max_parallel_requests: usize, // maximum number of parallel requests if non-zero
     request_timeout: Option<Duration>, // timeout if non-zero
     retry: Option<RetryConfig>,
+    #[builder(default = false)]
+    retry_on_stale_shard_map: bool,
 }
 
 impl Config {
@@ -79,6 +81,9 @@ impl Config {
     }
     pub fn retry(&self) -> Option<RetryConfig> {
         self.retry
+    }
+    pub fn retry_on_stale_shard_map(&self) -> bool {
+        self.retry_on_stale_shard_map
     }
 }
 
