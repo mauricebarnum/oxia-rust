@@ -34,6 +34,7 @@ oxia-bin-util = { path = "../oxia-bin-util" }
 tempfile = "3.24.0"
 anyhow = "1.0.100"
 itertools = "0.14.0"
+criterion = "0.5"
 
 [[bench]]
 name = "shard_lookup"

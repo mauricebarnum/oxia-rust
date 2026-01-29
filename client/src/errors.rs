@@ -30,15 +30,25 @@ impl OxiaError {
     pub const KEY_NOT_FOUND: Self = Self(1);
     pub const UNEXPECTED_VERSION_ID: Self = Self(2);
     pub const SESSION_DOES_NOT_EXIST: Self = Self(3);
+    /// Leader has fenced the shard
+    pub const INVALID_STATUS: Self = Self(102);
+    /// Leader is closing
+    pub const ALREADY_CLOSED: Self = Self(104);
+    /// Node is not the leader for this shard
+    pub const NODE_IS_NOT_LEADER: Self = Self(106);
 
     #[inline]
     pub const fn new(code: i32) -> Self {
         Self(code)
     }
 
+    /// Returns true if this error indicates the request was sent to the wrong leader.
     #[inline]
-    pub const fn code(self) -> i32 {
-        self.0
+    pub const fn is_wrong_leader(self) -> bool {
+        matches!(
+            self,
+            Self::INVALID_STATUS | Self::ALREADY_CLOSED | Self::NODE_IS_NOT_LEADER
+        )
     }
 }
 
@@ -48,6 +58,9 @@ impl std::fmt::Display for OxiaError {
             Self::KEY_NOT_FOUND => f.write_str("key not found code=1"),
             Self::UNEXPECTED_VERSION_ID => f.write_str("unexpected version ID code=2"),
             Self::SESSION_DOES_NOT_EXIST => f.write_str("session does not exist code=3"),
+            Self::INVALID_STATUS => f.write_str("invalid status (leader fenced) code=102"),
+            Self::ALREADY_CLOSED => f.write_str("already closed (leader closing) code=104"),
+            Self::NODE_IS_NOT_LEADER => f.write_str("node is not leader code=106"),
             _ => write!(f, "unknown Oxia error code={}", self.0),
         }
     }
@@ -300,6 +313,16 @@ impl Error {
             // Check nested errors
             Error::ShardError(e) => e.err.is_shard_unavailable(),
             Error::MultipleShardError(errs) => errs.iter().all(|e| e.err.is_shard_unavailable()),
+            _ => false,
+        }
+    }
+
+    /// Whether the error indicates the request was sent to the wrong leader.
+    pub fn is_wrong_leader(&self) -> bool {
+        match self {
+            Error::Oxia(oxia_err) => oxia_err.is_wrong_leader(),
+            Error::ShardError(e) => e.err.is_wrong_leader(),
+            Error::MultipleShardError(errs) => errs.iter().any(|e| e.err.is_wrong_leader()),
             _ => false,
         }
     }

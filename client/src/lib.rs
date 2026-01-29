@@ -30,6 +30,7 @@ use mauricebarnum_oxia_common::proto as oxia_proto;
 
 use crate::notification::NotificationsStream;
 use crate::pool::ChannelPool;
+use crate::shard::ShardMapEpoch;
 
 pub mod batch_get;
 pub mod config;
@@ -704,6 +705,47 @@ impl Client {
     pub async fn reconnect(&mut self) -> Result<()> {
         self.shard_manager = None;
         self.connect().await
+    }
+
+    /// Returns the current shard map epoch.
+    ///
+    /// Epoch increments with each shard assignment update within this client's lifetime.
+    pub fn epoch(&self) -> Result<ShardMapEpoch> {
+        Ok(self.get_shard_manager()?.epoch())
+    }
+
+    /// Signals the background task to refresh shard assignments.
+    pub fn trigger_refresh(&self) -> Result<()> {
+        self.get_shard_manager()?.trigger_refresh();
+        Ok(())
+    }
+
+    /// Waits for the shard map to be updated to an epoch greater than `after_epoch`.
+    ///
+    /// Returns immediately if the current epoch is already greater than `after_epoch`.
+    /// On success, returns the new epoch.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let epoch = client.epoch()?;
+    /// match client.put("key", "value").await {
+    ///     Err(e) if e.is_wrong_leader() => {
+    ///         client.trigger_refresh()?;
+    ///         client.wait_for_update(epoch, Duration::from_millis(500)).await?;
+    ///         // Retry the operation
+    ///     }
+    ///     result => result
+    /// }
+    /// ```
+    pub async fn wait_for_update(
+        &self,
+        after_epoch: ShardMapEpoch,
+        timeout: std::time::Duration,
+    ) -> Result<ShardMapEpoch> {
+        self.get_shard_manager()?
+            .wait_for_update(after_epoch, timeout)
+            .await
     }
 
     #[inline]
