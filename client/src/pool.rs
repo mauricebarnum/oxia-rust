@@ -12,16 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
-use tokio::sync::RwLock;
 use tokio::sync::broadcast;
+use tokio::sync::broadcast::Receiver;
+use tokio::sync::broadcast::Sender;
 use tonic::transport::Channel;
 use tonic::transport::Endpoint;
-use tracing::info;
-use tracing::warn;
 
 use crate::Error;
 use crate::Result;
@@ -29,36 +26,68 @@ use crate::config::Config;
 
 type CompletionResult = crate::Result<Channel>;
 
-mod inner {
-    use super::{Arc, Channel, CompletionResult, Config, HashMap, RwLock, broadcast};
+mod state {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use arc_swap::ArcSwap;
+    use tokio::sync::Mutex;
+    use tokio::sync::broadcast;
+    use tonic::transport::Channel;
+
+    use crate::pool::CompletionResult;
 
     #[derive(Clone, Debug)]
-    pub(super) enum Item {
-        Channel(Channel),
+    pub enum Entry {
+        Connected(Channel),
         Pending(broadcast::Sender<CompletionResult>),
     }
 
-    #[derive(Debug, Default)]
-    pub(super) struct State {
-        pub(super) clients: HashMap<String, Item>,
-        // todo: metrics
+    pub type EntryMap = HashMap<String, Entry>;
+
+    pub struct Txn<'a> {
+        entries: &'a ArcSwap<EntryMap>,
     }
 
-    #[derive(Clone, Debug)]
-    pub(super) struct Inner {
-        pub(super) config: Arc<Config>,
-        pub(super) state: Arc<RwLock<State>>,
-    }
+    impl<'a> Txn<'a> {
+        pub const fn new(entries: &'a ArcSwap<EntryMap>) -> Self {
+            Self { entries }
+        }
 
-    impl Inner {
-        pub(super) fn new(config: Arc<Config>) -> Self {
-            Self {
-                config,
-                state: Arc::new(RwLock::new(State::default())),
-            }
+        pub fn load(&self) -> Arc<EntryMap> {
+            // use load_full() to avoid borrowing self.entries
+            self.entries.load_full()
+        }
+
+        pub fn store(&self, x: EntryMap) {
+            self.entries.store(Arc::new(x));
         }
     }
-} // mod inner
+
+    #[derive(Debug, Default)]
+    pub struct State {
+        entries: ArcSwap<EntryMap>,
+        lock: Mutex<()>,
+    }
+
+    impl State {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        pub fn load(&self) -> arc_swap::Guard<Arc<EntryMap>> {
+            self.entries.load()
+        }
+
+        pub async fn update<F, R>(&self, f: F) -> R
+        where
+            F: FnOnce(Txn<'_>) -> R,
+        {
+            let _lock = self.lock.lock().await;
+            f(Txn::new(&self.entries))
+        }
+    }
+}
 
 pub trait ChannelFactory: Clone + Send + Sync {
     async fn create(&self, config: &Arc<Config>, target: &str) -> Result<Channel>;
@@ -76,25 +105,27 @@ impl ChannelFactory for DefaultChannelFactory {
 
 #[derive(Clone, Debug)]
 pub struct ChannelPool<F = DefaultChannelFactory> {
-    inner: Arc<inner::Inner>,
+    state: Arc<state::State>,
+    config: Arc<Config>,
     factory: F,
 }
 
-#[allow(dead_code)]
 impl ChannelPool<DefaultChannelFactory> {
     pub fn new(config: &Arc<Config>) -> Self {
         Self {
-            inner: Arc::new(inner::Inner::new(Arc::clone(config))),
+            state: Arc::new(state::State::new()),
+            config: Arc::clone(config),
             factory: DefaultChannelFactory {},
         }
     }
 }
 
-#[allow(dead_code)]
-impl<F: ChannelFactory> ChannelPool<F> {
-    pub fn with_channel_factory(config: &Arc<Config>, factory: F) -> Self {
+impl<Fact: ChannelFactory> ChannelPool<Fact> {
+    #[allow(dead_code)]
+    pub fn with_channel_factory(config: &Arc<Config>, factory: Fact) -> Self {
         Self {
-            inner: Arc::new(inner::Inner::new(Arc::clone(config))),
+            state: Arc::new(state::State::new()),
+            config: Arc::clone(config),
             factory,
         }
     }
@@ -108,164 +139,105 @@ impl<F: ChannelFactory> ChannelPool<F> {
         }
     }
 
-    // Return a pooled item, waiting for a pending insert if one is in progress.
-    // The pending insert may fail, which is why this is wrapped in Result<>
-    async fn try_get(&self, target: &str) -> Option<CompletionResult> {
-        use inner::Item;
-        let guard = self.inner.state.read().await;
-        let item = guard.clients.get(target)?;
-        match item {
-            Item::Channel(c) => Some(Ok(c.clone())),
-            Item::Pending(tx) => {
-                let rx = tx.subscribe();
-                drop(guard); // allow pending operation to complete
-                Some(Self::await_pending_op(rx).await)
-            }
-        }
-    }
-
     async fn create_channel(&self, target: &str) -> Result<Channel> {
-        self.factory.create(&self.inner.config, target).await
+        self.factory.create(&self.config, target).await
     }
 
-    async fn send_completion(
+    async fn finalize_connection(
         &self,
         target: &str,
-        tx: broadcast::Sender<CompletionResult>,
-        r: CompletionResult,
-    ) {
-        let mut guard = self.inner.state.write().await;
-
-        match tx.send(r.clone()) {
-            Err(err) => warn!(?err, "ChannelPool::get() send completion failed"),
-            Ok(subscriptions) => {
-                info!(subscriptions, "ChannelPool::get() send completion");
-            }
-        }
-
-        if let Ok(c) = r {
-            guard
-                .clients
-                .insert(target.to_string(), inner::Item::Channel(c));
-        } else {
-            match tx.send(r) {
-                Err(err) => warn!(?err, "ChannelPool::get() send completion failed"),
-                Ok(subscriptions) => {
-                    info!(subscriptions, "ChannelPool::get() send completion");
-                }
-            }
-            guard.clients.remove(target);
-        }
-    }
-
-    async fn complete(
-        &self,
-        target: &str,
-        tx: broadcast::Sender<CompletionResult>,
-        r: Result<Channel>,
+        tx: Sender<CompletionResult>,
+        mut res: Result<Channel>,
     ) -> Result<Channel> {
-        use inner::Item;
-
-        // If the entry was removed while we had the lock dropped, discard the channel.
-        // There's no need to notify anyone waiting for a completion, when the the
-        // last sender is dropped, they'll see a cancellation
-        let mut guard = self.inner.state.write().await;
-        match guard.clients.entry(target.to_string()) {
-            Entry::Vacant(_) => Err(Error::Cancelled),
-            Entry::Occupied(mut o) => {
-                match o.get() {
-                    Item::Pending(otx) => {
-                        // While the lock was dropped, our request could have been cancelled and replaced
-                        // by anoter request.  Verify we still "own" the pending state.
-                        if otx.same_channel(&tx) {
-                            // Still our pending operation, so complete it
-                            let notification = match r {
-                                Ok(c) => {
-                                    o.insert(Item::Channel(c.clone()));
-                                    Ok(c)
-                                }
-                                Err(e) => {
-                                    o.remove();
-                                    Err(e)
-                                }
-                            };
-
-                            match tx.send(notification.clone()) {
-                                Err(err) => {
-                                    warn!(?err, "ChannelPool::get() send completion failed");
-                                }
-                                Ok(subscriptions) => {
-                                    info!(subscriptions, "ChannelPool::get() send completion");
-                                }
-                            }
-
-                            // Now map the notification back to a cloneable Result
-                            notification
-                        } else {
-                            // Our operation was cancelled, so don't notify and return an error.
-                            // Waiting for the new operation is likely useless: we got caoncelled for a
-                            // reason.
-                            Err(Error::Cancelled)
-                        }
+        use state::Entry;
+        self.state
+            .update(|txn| {
+                let current = txn.load();
+                let entry = current.get(target);
+                if let Some(Entry::Connected(c)) = entry {
+                    res = Ok(c.clone());
+                } else if let Some(Entry::Pending(etx)) = entry
+                    && etx.same_channel(&tx)
+                {
+                    let mut new_map = current.as_ref().clone();
+                    if let Ok(c) = &res {
+                        new_map.insert(target.to_string(), Entry::Connected(c.clone()));
+                    } else {
+                        new_map.remove(target);
                     }
-                    Item::Channel(c) => Ok(c.clone()),
+                    txn.store(new_map);
                 }
-            }
-        }
+
+                let _ = tx.send(res.clone());
+                res
+            })
+            .await
     }
 
-    #[allow(dead_code)]
     pub(crate) async fn get(&self, target: &str) -> Result<Channel> {
-        use inner::Item;
+        use state::Entry;
 
-        // Already there, we're done and don't need the write lock
-        if let Some(item) = self.try_get(target).await {
-            return item;
+        enum Next<F>
+        where
+            F: Future<Output = Result<Channel>>,
+        {
+            Connected(Channel),
+            Pending(Receiver<CompletionResult>),
+            Prepared((Sender<CompletionResult>, F)),
         }
 
-        let state = &self.inner.state;
-        let mut guard = state.write().await;
-        let entry = guard.clients.entry(target.to_string());
+        if let Some(Entry::Connected(c)) = self.state.load().get(target) {
+            return Ok(c.clone());
+        }
 
-        if let Entry::Occupied(item) = entry {
-            return match item.get() {
-                Item::Channel(c) => Ok(c.clone()),
-                Item::Pending(tx) => {
-                    let rx = tx.subscribe();
-                    drop(guard); // allow pending operation to complete
-                    Self::await_pending_op(rx).await
+        let next = self
+            .state
+            .update(|txn| {
+                let current = txn.load();
+                match current.get(target) {
+                    Some(Entry::Connected(c)) => Next::Connected(c.clone()),
+                    Some(Entry::Pending(tx)) => Next::Pending(tx.subscribe()),
+                    None => {
+                        let (tx, _) = broadcast::channel(1);
+                        let mut new_map = current.as_ref().clone();
+                        new_map.insert(target.to_string(), Entry::Pending(tx.clone()));
+                        txn.store(new_map);
+                        Next::Prepared((tx, self.create_channel(target)))
+                    }
                 }
-            };
+            })
+            .await;
+
+        match next {
+            Next::Connected(c) => Ok(c),
+            Next::Pending(rx) => Self::await_pending_op(rx).await,
+            Next::Prepared((tx, fut)) => self.finalize_connection(target, tx, fut.await).await,
         }
-
-        // Set up the notification channel, let's others know we're working on it...
-        let tx = {
-            let (tx, _) = broadcast::channel(1);
-            entry.insert_entry(Item::Pending(tx.clone()));
-            tx
-        };
-
-        // Create the channel without the write lock to avoid blocking all
-        drop(guard);
-        let cr = self.create_channel(target).await;
-
-        self.complete(target, tx, cr).await
     }
 
-    pub(crate) async fn create(&self, target: &str) -> Result<Channel> {
-        // We could try to be smarter here, but this method is unlikely to be called often
-        self.inner.state.write().await.clients.remove(target);
+    #[allow(dead_code)] // do we need this for anything?
+    pub(crate) async fn replace(&self, target: &str) -> Result<Channel> {
+        self.remove(target).await;
         self.get(target).await
     }
 
-    pub(crate) async fn remove(&self, target: &str) -> Option<Channel> {
-        let state = &self.inner.state;
-        let mut guard = state.write().await;
-        if let Some(inner::Item::Channel(c)) = guard.clients.remove(target) {
-            Some(c)
-        } else {
-            None
+    pub(crate) async fn remove(&self, target: &str) {
+        if !self.state.load().contains_key(target) {
+            // Almost always, this early exit won't happen. But the lookup isn't a waste: under
+            // extreme load we can be losing races with other tasks and that's when avoiding lock
+            // contention is most critical.
+            return;
         }
+        self.state
+            .update(|txn| {
+                let current = txn.load();
+                if current.contains_key(target) {
+                    let mut new_map = current.as_ref().clone();
+                    let _ = new_map.remove(target);
+                    txn.store(new_map);
+                }
+            })
+            .await;
     }
 }
 
