@@ -130,6 +130,8 @@ pub(super) async fn prepare_requests(
     let mut failures: Vec<ResponseItem> = Vec::new();
     let mut reqs: BTreeMap<ShardId, Request> = BTreeMap::new();
 
+    let shards = shard_manager.load_shards();
+
     let partition_key = client_req
         .opts
         .as_ref()
@@ -138,7 +140,7 @@ pub(super) async fn prepare_requests(
     for key in client_req.keys {
         let selector = partition_key.unwrap_or(&key);
 
-        let Some(shard_id) = shard_manager.get_shard_id(selector) else {
+        let Some(shard_id) = shards.get_shard_id(selector) else {
             let err = Error::NoShardMappingForKey(selector.into());
             failures.push(ResponseItem::failed(key, err));
             continue;
@@ -156,7 +158,7 @@ pub(super) async fn prepare_requests(
     let mut batch_get_futures = Vec::with_capacity(reqs.len());
 
     for (shard_id, req) in reqs {
-        match shard_manager.get_client_by_shard_id(shard_id) {
+        match shards.find_by_id(shard_id) {
             Ok(shard) => {
                 batch_get_futures.push(async move { shard.batch_get(req).await.boxed() });
             }
