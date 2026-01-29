@@ -631,6 +631,7 @@ pub(crate) async fn create_grpc_client(
 
 pub(crate) async fn execute_with_retry<Fut, R>(
     config: &Arc<config::Config>,
+    shard_manager: Option<&Arc<shard::Manager>>,
     op: impl Fn() -> Fut,
 ) -> Result<R>
 where
@@ -639,7 +640,9 @@ where
 {
     let timeout = config.request_timeout();
     let retry_config = config.retry();
-    let start = if retry_config.is_some() && timeout.unwrap_or_default() > Duration::ZERO {
+    let start = if (retry_config.is_some() || config.retry_on_stale_shard_map())
+        && timeout.unwrap_or_default() > Duration::ZERO
+    {
         Some(Instant::now())
     } else {
         None
@@ -657,6 +660,18 @@ where
         return result;
     }
 
+    // Stale shard map: refresh and retry before falling through to transient retry
+    if config.retry_on_stale_shard_map()
+        && let Some(sm) = shard_manager
+        && let Err(ref e) = result
+        && e.is_wrong_leader()
+    {
+        let remaining = timeout
+            .zip(start)
+            .map(|(t, s)| t.saturating_sub(s.elapsed()));
+        return stale_shard_map_retry(config, sm, remaining, start, &op).await;
+    }
+
     // Or... no retries are requested
     if retry_config.is_none() {
         return result;
@@ -669,6 +684,66 @@ where
 
     let retry_op = move || op();
     util::with_timeout(timeout, util::with_retry(retry_config, retry_op)).await
+}
+
+/// Retry loop for stale shard map (wrong leader) errors.
+///
+/// Each iteration: capture epoch → trigger refresh → wait for update → retry op.
+/// Bounded by retry attempts (or 1 if no retry config) and the overall request timeout.
+async fn stale_shard_map_retry<Fut, R>(
+    config: &Arc<config::Config>,
+    shard_manager: &Arc<shard::Manager>,
+    remaining: Option<Duration>,
+    start: Option<Instant>,
+    op: &impl Fn() -> Fut,
+) -> Result<R>
+where
+    Fut: std::future::Future<Output = Result<R>> + Send,
+    R: Send,
+{
+    let max_attempts = config.retry().map_or(1, |r| r.attempts);
+    let request_timeout = config.request_timeout();
+
+    for _ in 0..max_attempts {
+        // Check remaining time budget
+        let remaining = match request_timeout.zip(start) {
+            Some((t, s)) => {
+                let left = t.saturating_sub(s.elapsed());
+                if left.is_zero() {
+                    return Err(Error::RequestTimeout);
+                }
+                Some(left)
+            }
+            None => remaining,
+        };
+
+        let epoch = shard_manager.epoch();
+        shard_manager.trigger_refresh();
+
+        // Wait for the shard map to update, using remaining timeout or a reasonable default
+        let wait_timeout = remaining.unwrap_or(Duration::from_secs(30));
+        shard_manager.wait_for_update(epoch, wait_timeout).await?;
+
+        // Retry the operation with remaining timeout
+        let remaining = match request_timeout.zip(start) {
+            Some((t, s)) => Some(t.saturating_sub(s.elapsed())),
+            None => remaining,
+        };
+        let result = util::with_timeout(remaining, op()).await;
+
+        match &result {
+            Ok(_) => return result,
+            Err(Error::RequestTimeout) => return result,
+            Err(e) if e.is_wrong_leader() => continue,
+            Err(_) => return result,
+        }
+    }
+
+    // Final attempt after exhausting retry budget
+    let remaining = request_timeout
+        .zip(start)
+        .map(|(t, s)| t.saturating_sub(s.elapsed()));
+    util::with_timeout(remaining, op()).await
 }
 
 #[derive(Clone, Debug)]
@@ -772,7 +847,7 @@ impl Client {
 
         // Define the core operation with retry/timeout wrapper
         let execute_get = |shard: shard::Client, key: Arc<str>, options: GetOptions| async move {
-            execute_with_retry(&self.config, move || {
+            execute_with_retry(&self.config, self.shard_manager.as_ref(), move || {
                 let shard = shard.clone();
                 let key = Arc::clone(&key);
                 let options = options.clone();
@@ -892,7 +967,7 @@ impl Client {
         let value = value.into();
         let selector = options.partition_key.as_deref().unwrap_or(&key);
         let shard = self.get_shard(selector)?;
-        execute_with_retry(&self.config, move || {
+        execute_with_retry(&self.config, self.shard_manager.as_ref(), move || {
             let shard = shard.clone();
             let key = Arc::clone(&key);
             let value = value.clone();
@@ -918,7 +993,7 @@ impl Client {
         let key = Arc::from(key.into());
         let selector = options.partition_key.as_deref().unwrap_or(&key);
         let shard = self.get_shard(selector)?;
-        execute_with_retry(&self.config, move || {
+        execute_with_retry(&self.config, self.shard_manager.as_ref(), move || {
             let shard = shard.clone();
             let key = Arc::clone(&key);
             let options = options.clone();
@@ -942,7 +1017,7 @@ impl Client {
                                start: Arc<str>,
                                end: Arc<str>,
                                options: DeleteRangeOptions| async move {
-            execute_with_retry(&self.config, move || {
+            execute_with_retry(&self.config, self.shard_manager.as_ref(), move || {
                 let shard = shard.clone();
                 let start = Arc::clone(&start);
                 let end = Arc::clone(&end);
@@ -1018,7 +1093,7 @@ impl Client {
                        start: Arc<str>,
                        end: Arc<str>,
                        options: ListOptions| async move {
-            execute_with_retry(&self.config, move || {
+            execute_with_retry(&self.config, self.shard_manager.as_ref(), move || {
                 let shard = shard.clone();
                 let start = Arc::clone(&start);
                 let end = Arc::clone(&end);
@@ -1083,7 +1158,7 @@ impl Client {
                              start: Arc<str>,
                              end: Arc<str>,
                              options: RangeScanOptions| async move {
-            execute_with_retry(&self.config, move || {
+            execute_with_retry(&self.config, self.shard_manager.as_ref(), move || {
                 let shard = shard.clone();
                 let start = Arc::clone(&start);
                 let end = Arc::clone(&end);

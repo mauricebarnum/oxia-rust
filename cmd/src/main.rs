@@ -50,6 +50,9 @@ pub struct Cli {
 
     #[arg(long, default_value = "100ms", value_parser = humantime::parse_duration)]
     request_timeout: Duration,
+
+    #[arg(long, default_value_t = false)]
+    retry_on_stale_shard_map: bool,
 }
 
 #[tokio::main]

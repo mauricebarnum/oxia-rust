@@ -231,7 +231,7 @@ impl NotificationsStream {
                     let config = Arc::clone(&config);
                     let offset = offsets.get(id);
                     async move {
-                        let r = crate::execute_with_retry(&config, move || {
+                        let r = crate::execute_with_retry(&config, None, move || {
                             let client = client.clone();
                             async move { client.get_notifications(offset).await }
                         })
@@ -323,7 +323,7 @@ impl NotificationsStream {
                 Err(e) => return (id, Err(e)),
             };
 
-            let result = crate::execute_with_retry(&config, move || {
+            let result = crate::execute_with_retry(&config, None, move || {
                 let client = client.clone();
                 async move { client.get_notifications(offset).await }
             })
