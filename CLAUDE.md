@@ -8,7 +8,7 @@ This CLAUDE.md guides Claude Code (`claude`) for this experimental Rust Oxia cli
 - **Isolation**: Write to `./claude-temp/` first (create if needed: `mkdir claude-temp`). Propose diffs with `/diff`; confirm before main files. Read via `@file.rs` on-demand. [web:35]
 - **Git Safety**: Pre-session: `git stash push -m "pre-claude"`. Stash changes: `git stash push`. No commits/pushes without `/confirm`. Post: `git stash pop` selectively. Block destructives via hooks. [web:33][conversation_history:24]
 - **Tokens**: Use `/rewind` (Esc Esc) for undos. Limit tools (`ENABLE_TOOL_SEARCH=auto:5%`). Test incrementally; summarize with `/compact`. Monitor `/cost`. [web:10]
-- **Read-Only**: NEVER modify `./extoxia/` (vendored Oxia mirror). [file:43]
+- **Read-Only**: NEVER modify `./ext/oxia/` (vendored Oxia mirror). [file:43]
 
 ## Project Overview
 
@@ -32,7 +32,7 @@ CI uses `--release --frozen`. Local: omit.
 - `common`: gRPC protos (tonic-prost-build).
 - `client`: Async client (sharding, dispatch).
 - `cmd`: `oxia-cmd` CLI (get/put/delete/list/range/notifications/shell).
-- `oxia-bin-util`: Builds vendored Go Oxia server for tests. [file:43]
+- `oxia-bin-util`: Builds vendored Go Oxia server for tests. Binary at `target/oxia/oxia` after build. [file:43]
 
 ## Key Architecture
 
@@ -40,18 +40,19 @@ CI uses `--release --frozen`. Local: omit.
 - **Sharding**: XXHASH3 routing; dynamic via `shard.rs`.
 - **Pooling**: `pool.rs` per-shard gRPC; `ArcSwap` caches.
 - **Notifications**: Streaming key changes.
-- **Protos**: Auto from `./extoxia/common/proto`. No manual edits.
+- **Protos**: Auto from `./ext/oxia/common/proto`. No manual edits.
 - **Tests**: Spawn servers via `client/tests/common.rs`. [file:43]
 
 **Concurrency** (Hot Path: Lock-free):
 
 1. `ArcSwap::load` shards/clients.
 2. `RwLock::read` pool (misses).
-   Guidelines: arcswap > RwLock; tokio-sync; no locks pre-`.await`. [file:43]
+   Guidelines: ArcSwap > RwLock; tokio-sync; no locks pre-`.await`. [file:43]
 
 ## Coding Style
 
 - Clippy: All lints (exceptions documented).
+- **Imports**: Prefer unmerged `use` statements (one item per line). No `use std::{foo, bar};` merging.
 - Docs: Terse; Rust API guidelines; `const fn`.
 - Github: Draft PRs; `--force-with-lease`; tests/clippy pre-push. Ignore local `main`. [file:43]
 

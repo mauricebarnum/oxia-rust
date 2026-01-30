@@ -14,15 +14,24 @@
 
 #![allow(clippy::missing_panics_doc)]
 
-use mauricebarnum_oxia_client::errors::Error as ClientError;
-use mauricebarnum_oxia_client::{Client, config};
+use std::fs;
+use std::io;
+use std::io::Write;
 use std::net::TcpStream;
 use std::num::NonZeroU32;
+use std::path;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::path::PathBuf;
+use std::process::Child;
+use std::process::Command;
+use std::process::Stdio;
 use std::thread::sleep;
-use std::time::{Duration, Instant};
-use std::{io, path};
+use std::time::Duration;
+use std::time::Instant;
+
+use mauricebarnum_oxia_client::Client;
+use mauricebarnum_oxia_client::config;
+use mauricebarnum_oxia_client::errors::Error as ClientError;
 use tempfile::TempDir;
 
 #[inline]
@@ -205,6 +214,221 @@ impl TestServer {
 }
 
 impl Drop for TestServer {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-server cluster test infrastructure
+// ---------------------------------------------------------------------------
+
+#[allow(dead_code)]
+struct ServerNode {
+    public_addr: String,
+    internal_addr: String,
+    metrics_addr: String,
+    data_dir: PathBuf,
+    wal_dir: PathBuf,
+    process: Child,
+}
+
+#[allow(dead_code)]
+struct CoordinatorNode {
+    internal_addr: String,
+    metrics_addr: String,
+    admin_addr: String,
+    process: Child,
+}
+
+#[allow(dead_code)]
+pub struct TestCluster {
+    pub data_dir: TempDir,
+    servers: Vec<ServerNode>,
+    coordinator: CoordinatorNode,
+    /// The public address of the first server (used for client connections).
+    service_addr: String,
+}
+
+#[allow(dead_code)]
+impl TestCluster {
+    /// Start a cluster with `num_servers` data nodes and one coordinator.
+    ///
+    /// `replication_factor` and `initial_shard_count` configure the namespace.
+    pub fn start(
+        num_servers: usize,
+        replication_factor: u32,
+        initial_shard_count: u32,
+    ) -> io::Result<Self> {
+        assert!(num_servers >= 2, "cluster needs at least 2 servers");
+        // 3 ports per server (public, internal, metrics) + 3 for coordinator
+        let total_ports = num_servers * 3 + 3;
+        let ports = trace_err!(find_free_ports(total_ports))?;
+
+        let data_dir = trace_err!(tempfile::Builder::new().disable_cleanup(true).tempdir())?;
+
+        // Partition ports: servers first, then coordinator
+        let server_ports = &ports[..num_servers * 3];
+        let coord_ports = &ports[num_servers * 3..];
+
+        // Build server metadata for YAML config
+        struct ServerAddr {
+            public: String,
+            internal: String,
+            metrics: String,
+        }
+
+        let server_addrs: Vec<ServerAddr> = (0..num_servers)
+            .map(|i| {
+                let base = i * 3;
+                ServerAddr {
+                    public: format!("127.0.0.1:{}", server_ports[base]),
+                    internal: format!("127.0.0.1:{}", server_ports[base + 1]),
+                    metrics: format!("127.0.0.1:{}", server_ports[base + 2]),
+                }
+            })
+            .collect();
+
+        let coord_internal = format!("127.0.0.1:{}", coord_ports[0]);
+        let coord_metrics = format!("127.0.0.1:{}", coord_ports[1]);
+        let coord_admin = format!("127.0.0.1:{}", coord_ports[2]);
+
+        // Write cluster-config.yaml
+        let config_path = data_dir.path().join("cluster-config.yaml");
+        {
+            let mut f = trace_err!(fs::File::create(&config_path))?;
+            trace_err!(writeln!(f, "namespaces:"))?;
+            trace_err!(writeln!(f, "  - name: \"default\""))?;
+            trace_err!(writeln!(f, "    replicationFactor: {replication_factor}"))?;
+            trace_err!(writeln!(f, "    initialShardCount: {initial_shard_count}"))?;
+            trace_err!(writeln!(f, "servers:"))?;
+            for sa in &server_addrs {
+                trace_err!(writeln!(f, "  - public: \"{}\"", sa.public))?;
+                trace_err!(writeln!(f, "    internal: \"{}\"", sa.internal))?;
+            }
+        }
+
+        // Start data servers
+        let mut servers = Vec::with_capacity(num_servers);
+        for (i, sa) in server_addrs.iter().enumerate() {
+            let srv_data = data_dir.path().join(format!("server-{i}"));
+            let srv_db = srv_data.join("db");
+            let srv_wal = srv_data.join("wal");
+
+            let child = trace_err!(
+                Command::new(oxia_cli_path())
+                    .arg("server")
+                    .arg("-p")
+                    .arg(&sa.public)
+                    .arg("-i")
+                    .arg(&sa.internal)
+                    .arg("-m")
+                    .arg(&sa.metrics)
+                    .arg("--data-dir")
+                    .arg(&srv_db)
+                    .arg("--wal-dir")
+                    .arg(&srv_wal)
+                    .stdin(Stdio::null())
+                    .spawn()
+            )?;
+
+            servers.push(ServerNode {
+                public_addr: sa.public.clone(),
+                internal_addr: sa.internal.clone(),
+                metrics_addr: sa.metrics.clone(),
+                data_dir: srv_db,
+                wal_dir: srv_wal,
+                process: child,
+            });
+        }
+
+        // Wait for each server's public port to be reachable
+        for srv in &servers {
+            trace_err!(wait_for_ready(&srv.public_addr, 30))?;
+        }
+
+        // Start coordinator
+        let coord_process = trace_err!(
+            Command::new(oxia_cli_path())
+                .arg("coordinator")
+                .arg("-f")
+                .arg(&config_path)
+                .arg("--metadata")
+                .arg("memory")
+                .arg("-i")
+                .arg(&coord_internal)
+                .arg("-m")
+                .arg(&coord_metrics)
+                .arg("-a")
+                .arg(&coord_admin)
+                .stdin(Stdio::null())
+                .spawn()
+        )?;
+
+        let coordinator = CoordinatorNode {
+            internal_addr: coord_internal,
+            metrics_addr: coord_metrics,
+            admin_addr: coord_admin,
+            process: coord_process,
+        };
+
+        // Wait for coordinator's internal port
+        trace_err!(wait_for_ready(&coordinator.internal_addr, 30))?;
+
+        // Allow shard assignment propagation
+        sleep(Duration::from_secs(3));
+
+        let service_addr = servers[0].public_addr.clone();
+
+        Ok(TestCluster {
+            data_dir,
+            servers,
+            coordinator,
+            service_addr,
+        })
+    }
+
+    pub fn shutdown(&mut self) -> io::Result<()> {
+        let _ = self.coordinator.process.kill();
+        for srv in &mut self.servers {
+            let _ = srv.process.kill();
+        }
+        Ok(())
+    }
+
+    /// Connect a client to the cluster, retrying to handle asynchronous shard
+    /// assignment propagation.
+    pub async fn connect(&self) -> Result<Client, ClientError> {
+        self.connect_with(config::Config::builder()).await
+    }
+
+    pub async fn connect_with<S>(
+        &self,
+        opts: config::ConfigBuilder<S>,
+    ) -> Result<Client, ClientError>
+    where
+        S: config::config_builder::State,
+        S::ServiceAddr: config::config_builder::IsUnset,
+    {
+        let cfg = opts.service_addr(self.service_addr.clone()).build();
+
+        let mut last_err = None;
+        for attempt in 0..10 {
+            let mut client = Client::new(cfg.clone());
+            match client.connect().await {
+                Ok(()) => return Ok(client),
+                Err(e) => {
+                    tracing::warn!(attempt, ?e, "cluster connect attempt failed, retrying");
+                    last_err = Some(e);
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
+        }
+        Err(last_err.unwrap())
+    }
+}
+
+impl Drop for TestCluster {
     fn drop(&mut self) {
         let _ = self.shutdown();
     }
