@@ -1601,6 +1601,7 @@ impl Manager {
 
     /// Maps a key to a shard id.  This is a volatile mapping, callers must be prepared for the
     /// mapping to be invalid by the time it is used.
+    #[allow(dead_code)]
     pub(crate) fn get_shard_id(&self, key: &str) -> Option<ShardId> {
         self.shards.load().get_shard_id(key)
     }
@@ -1634,6 +1635,12 @@ impl Manager {
     #[allow(dead_code)]
     pub(crate) fn recv_changed(&self) -> watch::Receiver<ShardMapUpdateResult> {
         self.changed.clone()
+    }
+
+    /// Returns a snapshot of the current shard mappings.
+    /// Use this when multiple lookups need a consistent view.
+    pub(crate) fn load_shards(&self) -> arc_swap::Guard<Arc<searchable::Shards>> {
+        self.shards.load()
     }
 
     /// Returns the current shard map epoch. Epoch increments with each shard assignment update.
@@ -1820,6 +1827,7 @@ mod tests {
             .unwrap()
         }
 
+        #[cfg(not(miri))] // Miri doesn't support network operations (getaddrinfo)
         #[test_log::test(tokio::test)]
         async fn test_client_get_leader() {
             let config = make_test_config();
@@ -1843,6 +1851,7 @@ mod tests {
             assert!(result.is_err());
         }
 
+        #[cfg(not(miri))] // Miri doesn't support network operations (getaddrinfo)
         #[test_log::test(tokio::test)]
         async fn test_client_invalidate_on_empty_pool() {
             let config = make_test_config();
