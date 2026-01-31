@@ -13,10 +13,9 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
-use tokio::sync::RwLock;
+use tokio::sync::Mutex;
 use tokio::sync::broadcast;
 use tonic::transport::Channel;
 use tonic::transport::Endpoint;
@@ -29,32 +28,92 @@ use crate::config::Config;
 
 type CompletionResult = crate::Result<Channel>;
 
+mod guarded {
+    use std::ops::Deref;
+    use std::sync::Arc;
+
+    use arc_swap::{ArcSwap, Guard};
+    use tokio::sync::{Mutex, MutexGuard};
+
+    /// An `ArcSwap<T>` whose `.store()` is only reachable through a
+    /// [`WriteGuard`], giving compile-time serialization of mutations.
+    /// Follows an RwLock-like pattern: [`ReadGuard`] for reads,
+    /// [`WriteGuard`] for writes.
+    #[derive(Debug)]
+    pub(super) struct GuardedArcSwap<T> {
+        data: ArcSwap<T>,
+        write_mutex: Mutex<()>,
+    }
+
+    impl<T> GuardedArcSwap<T> {
+        pub(super) fn new(value: T) -> Self {
+            Self {
+                data: ArcSwap::from_pointee(value),
+                write_mutex: Mutex::new(()),
+            }
+        }
+
+        /// Lock-free snapshot (hot path).
+        pub(super) fn read(&self) -> ReadGuard<T> {
+            ReadGuard(self.data.load())
+        }
+
+        /// Acquire exclusive write access.
+        pub(super) async fn write(&self) -> WriteGuard<'_, T> {
+            let guard = self.write_mutex.lock().await;
+            WriteGuard {
+                data: &self.data,
+                _guard: guard,
+            }
+        }
+    }
+
+    /// Zero-cost read handle. Derefs to `T`.
+    pub(super) struct ReadGuard<T>(Guard<Arc<T>>);
+
+    impl<T> Deref for ReadGuard<T> {
+        type Target = T;
+        fn deref(&self) -> &T {
+            &self.0
+        }
+    }
+
+    /// Proof-of-write-permission token.  The only way to call `.store()`.
+    pub(super) struct WriteGuard<'a, T> {
+        data: &'a ArcSwap<T>,
+        _guard: MutexGuard<'a, ()>,
+    }
+
+    impl<T> WriteGuard<'_, T> {
+        pub(super) fn load(&self) -> ReadGuard<T> {
+            ReadGuard(self.data.load())
+        }
+
+        pub(super) fn store(&self, value: Arc<T>) {
+            self.data.store(value);
+        }
+    }
+}
+
 mod inner {
-    use super::{Arc, Channel, CompletionResult, Config, HashMap, RwLock, broadcast};
+    use super::*;
 
-    #[derive(Clone, Debug)]
-    pub(super) enum Item {
-        Channel(Channel),
-        Pending(broadcast::Sender<CompletionResult>),
-    }
-
-    #[derive(Debug, Default)]
-    pub(super) struct State {
-        pub(super) clients: HashMap<String, Item>,
-        // todo: metrics
-    }
-
-    #[derive(Clone, Debug)]
+    #[derive(Debug)]
     pub(super) struct Inner {
         pub(super) config: Arc<Config>,
-        pub(super) state: Arc<RwLock<State>>,
+        /// Lock-free snapshot of established channels (hot path).
+        /// Writes are serialized via [`GuardedArcSwap::write()`].
+        pub(super) channels: guarded::GuardedArcSwap<HashMap<String, Channel>>,
+        /// Pending connection coordination (cold path, cache-miss only).
+        pub(super) pending: Mutex<HashMap<String, broadcast::Sender<CompletionResult>>>,
     }
 
     impl Inner {
         pub(super) fn new(config: Arc<Config>) -> Self {
             Self {
                 config,
-                state: Arc::new(RwLock::new(State::default())),
+                channels: guarded::GuardedArcSwap::new(HashMap::new()),
+                pending: Mutex::new(HashMap::new()),
             }
         }
     }
@@ -108,54 +167,8 @@ impl<F: ChannelFactory> ChannelPool<F> {
         }
     }
 
-    // Return a pooled item, waiting for a pending insert if one is in progress.
-    // The pending insert may fail, which is why this is wrapped in Result<>
-    async fn try_get(&self, target: &str) -> Option<CompletionResult> {
-        use inner::Item;
-        let guard = self.inner.state.read().await;
-        let item = guard.clients.get(target)?;
-        match item {
-            Item::Channel(c) => Some(Ok(c.clone())),
-            Item::Pending(tx) => {
-                let rx = tx.subscribe();
-                drop(guard); // allow pending operation to complete
-                Some(Self::await_pending_op(rx).await)
-            }
-        }
-    }
-
     async fn create_channel(&self, target: &str) -> Result<Channel> {
         self.factory.create(&self.inner.config, target).await
-    }
-
-    async fn send_completion(
-        &self,
-        target: &str,
-        tx: broadcast::Sender<CompletionResult>,
-        r: CompletionResult,
-    ) {
-        let mut guard = self.inner.state.write().await;
-
-        match tx.send(r.clone()) {
-            Err(err) => warn!(?err, "ChannelPool::get() send completion failed"),
-            Ok(subscriptions) => {
-                info!(subscriptions, "ChannelPool::get() send completion");
-            }
-        }
-
-        if let Ok(c) = r {
-            guard
-                .clients
-                .insert(target.to_string(), inner::Item::Channel(c));
-        } else {
-            match tx.send(r) {
-                Err(err) => warn!(?err, "ChannelPool::get() send completion failed"),
-                Ok(subscriptions) => {
-                    info!(subscriptions, "ChannelPool::get() send completion");
-                }
-            }
-            guard.clients.remove(target);
-        }
     }
 
     async fn complete(
@@ -164,105 +177,96 @@ impl<F: ChannelFactory> ChannelPool<F> {
         tx: broadcast::Sender<CompletionResult>,
         r: Result<Channel>,
     ) -> Result<Channel> {
-        use inner::Item;
+        let mut pending = self.inner.pending.lock().await;
 
-        // If the entry was removed while we had the lock dropped, discard the channel.
-        // There's no need to notify anyone waiting for a completion, when the the
-        // last sender is dropped, they'll see a cancellation
-        let mut guard = self.inner.state.write().await;
-        match guard.clients.entry(target.to_string()) {
-            Entry::Vacant(_) => Err(Error::Cancelled),
-            Entry::Occupied(mut o) => {
-                match o.get() {
-                    Item::Pending(otx) => {
-                        // While the lock was dropped, our request could have been cancelled and replaced
-                        // by anoter request.  Verify we still "own" the pending state.
-                        if otx.same_channel(&tx) {
-                            // Still our pending operation, so complete it
-                            let notification = match r {
-                                Ok(c) => {
-                                    o.insert(Item::Channel(c.clone()));
-                                    Ok(c)
-                                }
-                                Err(e) => {
-                                    o.remove();
-                                    Err(e)
-                                }
-                            };
-
-                            match tx.send(notification.clone()) {
-                                Err(err) => {
-                                    warn!(?err, "ChannelPool::get() send completion failed");
-                                }
-                                Ok(subscriptions) => {
-                                    info!(subscriptions, "ChannelPool::get() send completion");
-                                }
-                            }
-
-                            // Now map the notification back to a cloneable Result
-                            notification
-                        } else {
-                            // Our operation was cancelled, so don't notify and return an error.
-                            // Waiting for the new operation is likely useless: we got caoncelled for a
-                            // reason.
-                            Err(Error::Cancelled)
-                        }
-                    }
-                    Item::Channel(c) => Ok(c.clone()),
-                }
+        // Verify we still own the pending entry (same_channel guard)
+        match pending.get(target) {
+            Some(otx) if otx.same_channel(&tx) => {
+                // Still ours — complete it
+                pending.remove(target);
+            }
+            Some(_) => {
+                // Replaced by another operation — we've been cancelled
+                return Err(Error::Cancelled);
+            }
+            None => {
+                // Entry was removed (invalidated) while we were connecting
+                return Err(Error::Cancelled);
             }
         }
+
+        let notification = match r {
+            Ok(c) => {
+                // Clone-modify-swap: insert into channels
+                let write = self.inner.channels.write().await;
+                let mut map = HashMap::clone(&write.load());
+                map.insert(target.to_string(), c.clone());
+                write.store(Arc::new(map));
+                Ok(c)
+            }
+            Err(e) => Err(e),
+        };
+
+        // Notify waiters (best-effort)
+        match tx.send(notification.clone()) {
+            Err(err) => warn!(?err, "ChannelPool::complete() send failed"),
+            Ok(n) => info!(n, "ChannelPool::complete() notified waiters"),
+        }
+
+        notification
     }
 
     #[allow(dead_code)]
     pub(crate) async fn get(&self, target: &str) -> Result<Channel> {
-        use inner::Item;
-
-        // Already there, we're done and don't need the write lock
-        if let Some(item) = self.try_get(target).await {
-            return item;
+        // Fast path: lock-free read
+        {
+            let snap = self.inner.channels.read();
+            if let Some(c) = snap.get(target) {
+                return Ok(c.clone());
+            }
         }
 
-        let state = &self.inner.state;
-        let mut guard = state.write().await;
-        let entry = guard.clients.entry(target.to_string());
+        // Slow path: check pending or start new connection
+        let mut pending = self.inner.pending.lock().await;
 
-        if let Entry::Occupied(item) = entry {
-            return match item.get() {
-                Item::Channel(c) => Ok(c.clone()),
-                Item::Pending(tx) => {
-                    let rx = tx.subscribe();
-                    drop(guard); // allow pending operation to complete
-                    Self::await_pending_op(rx).await
-                }
-            };
+        // Double-check channels (may have been inserted while we waited for Mutex)
+        {
+            let snap = self.inner.channels.read();
+            if let Some(c) = snap.get(target) {
+                return Ok(c.clone());
+            }
         }
 
-        // Set up the notification channel, let's others know we're working on it...
-        let tx = {
-            let (tx, _) = broadcast::channel(1);
-            entry.insert_entry(Item::Pending(tx.clone()));
-            tx
-        };
+        // Check if another task is already connecting
+        if let Some(tx) = pending.get(target) {
+            let rx = tx.subscribe();
+            drop(pending);
+            return Self::await_pending_op(rx).await;
+        }
 
-        // Create the channel without the write lock to avoid blocking all
-        drop(guard);
+        // We're the first — install pending entry
+        let (tx, _) = broadcast::channel(1);
+        pending.insert(target.to_string(), tx.clone());
+        drop(pending);
+
+        // Create channel without any lock held
         let cr = self.create_channel(target).await;
-
         self.complete(target, tx, cr).await
     }
 
     pub(crate) async fn create(&self, target: &str) -> Result<Channel> {
-        // We could try to be smarter here, but this method is unlikely to be called often
-        self.inner.state.write().await.clients.remove(target);
+        self.remove(target).await;
         self.get(target).await
     }
 
     pub(crate) async fn remove(&self, target: &str) -> Option<Channel> {
-        let state = &self.inner.state;
-        let mut guard = state.write().await;
-        if let Some(inner::Item::Channel(c)) = guard.clients.remove(target) {
-            Some(c)
+        let write = self.inner.channels.write().await;
+        let old = write.load();
+        if old.contains_key(target) {
+            let mut map = HashMap::clone(&old);
+            let removed = map.remove(target);
+            write.store(Arc::new(map));
+            removed
         } else {
             None
         }

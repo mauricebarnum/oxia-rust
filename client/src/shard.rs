@@ -1820,6 +1820,7 @@ mod tests {
             .unwrap()
         }
 
+        #[cfg(not(miri))] // Miri doesn't support network operations (getaddrinfo)
         #[test_log::test(tokio::test)]
         async fn test_client_get_leader() {
             let config = make_test_config();
@@ -1843,6 +1844,7 @@ mod tests {
             assert!(result.is_err());
         }
 
+        #[cfg(not(miri))] // Miri doesn't support network operations (getaddrinfo)
         #[test_log::test(tokio::test)]
         async fn test_client_invalidate_on_empty_pool() {
             let config = make_test_config();
