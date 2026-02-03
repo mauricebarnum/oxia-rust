@@ -33,7 +33,9 @@ pub fn non_zero(x: u32) -> NonZeroU32 {
 
 pub trait TestResultExt<T> {
     #[allow(dead_code)]
+    #[must_use]
     fn trace_err(self) -> Self;
+    #[must_use]
     fn trace_err_at(self, target: &'static str, file: &'static str, line: u32) -> Self;
 }
 

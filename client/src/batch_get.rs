@@ -62,16 +62,19 @@ pub struct RequestBuilder {
 }
 
 impl RequestBuilder {
+    #[must_use]
     pub fn options(mut self, opts: Options) -> Self {
         self.opts = Some(opts);
         self
     }
 
+    #[must_use]
     pub fn add_key(mut self, key: impl Into<Arc<str>>) -> Self {
         self.keys.push(key.into());
         self
     }
 
+    #[must_use]
     pub fn add_keys<I, S>(mut self, keys: I) -> Self
     where
         I: IntoIterator<Item = S>,
