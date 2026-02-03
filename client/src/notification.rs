@@ -411,20 +411,15 @@ impl NotificationsStream {
             }));
         }
 
-        // Poll until back in Streaming state (all shards ready, buffer drained)
-        loop {
-            match &self.state {
-                State::Streaming(_) => return Ok(()),
-                _ => {
-                    let poll_result = tokio::time::timeout_at(deadline, self.next()).await;
-                    match poll_result {
-                        Err(_) => return Err(crate::Error::RequestTimeout),
-                        Ok(Some(Err(e))) => return Err(e),
-                        Ok(_) => continue,
-                    }
-                }
+        while !matches!(&self.state, State::Streaming(_)) {
+            let poll_result = tokio::time::timeout_at(deadline, self.next()).await;
+            match poll_result {
+                Err(_) => return Err(crate::Error::RequestTimeout),
+                Ok(Some(Err(e))) => return Err(e),
+                Ok(_) => (),
             }
         }
+        Ok(())
     }
 }
 
