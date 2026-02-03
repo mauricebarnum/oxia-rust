@@ -364,10 +364,10 @@ pub struct ListResponse {
 }
 
 impl ListResponse {
-    fn accum(&mut self, x: oxia_proto::ListResponse) {
+    fn accum(&mut self, mut x: oxia_proto::ListResponse) {
         if !x.keys.is_empty() {
             self.sorted = self.keys.is_empty();
-            self.keys.extend(x.keys.into_iter().map(|x| x.to_string()));
+            self.keys.append(&mut x.keys);
         }
     }
 
@@ -731,10 +731,11 @@ where
         };
         let result = util::with_timeout(remaining, op()).await;
 
+        #[allow(clippy::match_same_arms)]
         match &result {
             Ok(_) => return result,
             Err(Error::RequestTimeout) => return result,
-            Err(e) if e.is_wrong_leader() => continue,
+            Err(e) if e.is_wrong_leader() => (),
             Err(_) => return result,
         }
     }
@@ -896,16 +897,19 @@ impl Client {
         self.get_with_options(k, GetOptions::default()).await
     }
 
-    /// batch_get request multiple keys, minimizing requests to the backend
+    /// `batch_get` request multiple keys, minimizing requests to the backend
     ///
     /// On success, the result stream will yield one item per key, even in the event
     /// of a network failure or timeout.  The order of returned keys is not specified.
     ///
-    /// Only KeyComparisonType::Equal is accepted.
+    /// Only `KeyComparisonType::Equal` is accepted.
     pub async fn batch_get(
         &self,
         req: batch_get::Request,
     ) -> Result<impl futures::stream::Stream<Item = batch_get::ResponseItem> + use<>> {
+        use futures::future::Either::Left;
+        use futures::future::Either::Right;
+
         let shard_manager = self.get_shard_manager()?;
         let (batch_get_futures, failures) = batch_get::prepare_requests(req, shard_manager).await?;
 
@@ -936,9 +940,6 @@ impl Client {
         //
         // All of this syntatic mess lets us return precisely the stream we need without boxing it.
         // The only overhead is reading it, which hopefully will be done just this once.
-
-        use futures::future::Either::Left;
-        use futures::future::Either::Right;
 
         let final_stream = match (batch_get_stream, failures_stream) {
             // Requests, no early failures

@@ -94,7 +94,7 @@ async fn test_ephemeral_key_expires_after_client_drop() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Test that reconnect() properly cleans up old resources.
+/// Test that `reconnect()` properly cleans up old resources.
 /// The old shard manager should be dropped, cancelling its background tasks.
 #[test_log::test(tokio::test)]
 async fn test_reconnect_cleans_up_old_manager() -> anyhow::Result<()> {
@@ -185,7 +185,7 @@ async fn test_concurrent_ops_during_shutdown() -> anyhow::Result<()> {
     // Spawn tasks that will do operations
     for i in 0..3 {
         let c = client.clone();
-        let b = barrier.clone();
+        let b = Arc::clone(&barrier);
         handles.push(tokio::spawn(async move {
             b.wait().await;
             // These operations may succeed or fail depending on timing

@@ -72,7 +72,7 @@ impl ShardMapEpoch {
         Self::default()
     }
 
-    fn next(&self) -> Self {
+    fn next(self) -> Self {
         Self(self.0 + 1)
     }
 }
@@ -349,7 +349,7 @@ impl Client {
     /// Get a gRPC client for the current leader.
     ///
     /// Performs dynamic leader lookup on each call - no caching at this level.
-    /// The ChannelPool handles connection caching by URL, so repeated calls
+    /// The `ChannelPool` handles connection caching by URL, so repeated calls
     /// to the same leader reuse the existing connection.
     async fn get_grpc_client(&self) -> crate::Result<GrpcClient> {
         let leader = self
@@ -496,8 +496,8 @@ impl Client {
             };
             loop {
                 tokio::select! {
-                    _ = client.data.cancel_token.cancelled() => break,
-                    _ = async {
+                    () = client.data.cancel_token.cancelled() => break,
+                    () = async {
                         let req = client.create_request(oxia_proto::SessionHeartbeat {
                             session_id,
                             shard: client.data.shard_id.into(),
@@ -1332,6 +1332,7 @@ mod searchable {
 
     #[derive(Debug, Default)]
     pub(crate) struct Shards {
+        #[allow(clippy::struct_field_names)]
         shards: ShardIdMap<Client>,
         mapper: int32_hash_range::Mapper,
         epoch: ShardMapEpoch,
@@ -1534,10 +1535,10 @@ impl ShardAssignmentTask {
         let mut interval = tokio::time::interval(Duration::from_millis(600));
         let reason = loop {
             tokio::select! {
-                _ = self.token.cancelled() => {
+            () = self.token.cancelled() => {
                     break ExitReason::Cancelled;
                 }
-                _ = self.refresh_signal.notified() => {
+                    () = self.refresh_signal.notified() => {
                     if self.last_refresh.elapsed() < MIN_REFRESH_INTERVAL {
                         continue; // Rate limit
                     }
@@ -1729,6 +1730,10 @@ impl Drop for Manager {
 mod tests {
     use super::*;
 
+    fn make_shard_id(x: usize) -> ShardId {
+        i64::try_from(x).unwrap().into()
+    }
+
     #[test]
     fn test_shard_id_map() {
         use crate::ShardId;
@@ -1755,14 +1760,14 @@ mod tests {
         offsets.remove(id_zero);
         assert!(offsets.get(id_zero).is_none());
 
-        let id_direct: ShardId = (DIRECT_ID_MAX as i64 - 2).into();
+        let id_direct = make_shard_id(DIRECT_ID_MAX - 2);
         assert!(offsets.get(id_direct).is_none());
         offsets.insert(id_direct, 42);
         assert_eq!(*offsets.get(id_direct).unwrap(), 42);
         offsets.remove(id_direct);
         assert!(offsets.get(id_direct).is_none());
 
-        let id_spilled: ShardId = (DIRECT_ID_MAX as i64 + 13).into();
+        let id_spilled = make_shard_id(DIRECT_ID_MAX + 13);
         assert!(offsets.get(id_spilled).is_none());
         offsets.insert(id_spilled, 42);
         assert_eq!(*offsets.get(id_spilled).unwrap(), 42);
@@ -1802,7 +1807,7 @@ mod tests {
 
         fn make_test_leaders(shard_id: ShardId, leader: &str) -> LeaderDirectory {
             let mut leaders = ShardIdMap::default();
-            leaders.insert(shard_id, Arc::from(format!("http://{}", leader)));
+            leaders.insert(shard_id, Arc::from(format!("http://{leader}")));
             Arc::new(ArcSwap::from_pointee(leaders))
         }
 
@@ -1812,7 +1817,7 @@ mod tests {
             let leaders = make_test_leaders(shard_id, "localhost:1234");
             Client::new(
                 pool,
-                config.clone(),
+                Arc::clone(config),
                 CancellationToken::new(),
                 shard_id,
                 leaders,

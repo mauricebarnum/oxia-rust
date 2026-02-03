@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -41,7 +42,7 @@ fn main() -> Result<()> {
             .max_parallel_requests(3)
             .session_timeout(Duration::from_millis(2001))
             .build();
-        let mut client = Client::new(config.clone());
+        let mut client = Client::new(Arc::clone(&config));
         client.connect().await?;
 
         let now_str = Utc::now().format("%Y-%m-%dT%H:%M:%SZ");

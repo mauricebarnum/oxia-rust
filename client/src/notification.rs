@@ -126,7 +126,7 @@ impl ConfigEpoch {
     }
 
     pub fn next(&mut self) {
-        self.0 += 1
+        self.0 += 1;
     }
 }
 
@@ -265,7 +265,7 @@ impl NotificationsStream {
     }
 
     /// Poll pending reconnects. Returns an error to propagate if a close-triggered
-    /// reconnect fails and reconnect_on_error is not enabled.
+    /// reconnect fails and `reconnect_on_error` is not enabled.
     fn poll_reconnects(
         s: &mut StreamingState,
         cx: &mut Context<'_>,
@@ -376,7 +376,7 @@ impl NotificationsStream {
             match poll_result {
                 Err(_) => return Err(crate::Error::RequestTimeout),
                 Ok(Some(Err(e))) => return Err(e),
-                Ok(_) => continue,
+                Ok(_) => (),
             }
         }
 
@@ -430,6 +430,7 @@ impl NotificationsStream {
 
 impl Stream for NotificationsStream {
     type Item = Result<NotificationBatch>;
+    #[allow(clippy::too_many_lines)] // FIXME
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
 
@@ -528,7 +529,6 @@ impl Stream for NotificationsStream {
                     Poll::Ready(s) => {
                         this.state = s;
                         this.epoch.next();
-                        continue;
                     }
                     Poll::Pending => {
                         return Poll::Pending;
@@ -588,7 +588,6 @@ impl Stream for NotificationsStream {
                         offsets: std::mem::take(&mut w.offsets),
                         pending_reconnects: w.pending_reconnects.take(),
                     });
-                    continue;
                 }
             }
         }

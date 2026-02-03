@@ -691,7 +691,7 @@ async fn test_concurrent_operations() -> Result<()> {
 
     // Launch concurrent put operations
     for i in 0..10 {
-        let client_clone = client.clone();
+        let client_clone = Arc::clone(&client);
         let handle = tokio::spawn(async move {
             let key = format!("concurrent-{i}");
             let value = format!("value-{i}");
@@ -827,7 +827,7 @@ async fn test_notifications_with_options() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Test that notifications stream with reconnect_on_close option reconnects after server restart
+/// Test that notifications stream with `reconnect_on_close` option reconnects after server restart
 #[test_log::test(tokio::test)]
 async fn test_notifications_reconnect_on_close() -> anyhow::Result<()> {
     let mut server = common::TestServer::start()?;
@@ -926,6 +926,7 @@ async fn test_notifications_no_reconnect_default() -> anyhow::Result<()> {
     let result = timeout(Duration::from_secs(3), notifications.next()).await;
 
     // Either timeout or stream ended is acceptable
+    #[allow(clippy::match_same_arms)]
     match result {
         Err(_) => {
             // Timeout is expected - stream is not reconnecting

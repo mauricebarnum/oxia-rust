@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use mauricebarnum_oxia_client::{Client, Result, config};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::config::Config;
@@ -43,7 +43,7 @@ fn main() -> Result<()> {
             .max_parallel_requests(3)
             .session_timeout(Duration::from_millis(2001))
             .build();
-        let mut client = Client::new(config.clone());
+        let mut client = Client::new(Arc::clone(&config));
 
         client.connect().await?;
 

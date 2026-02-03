@@ -30,9 +30,9 @@ struct MockShards {
 }
 
 impl MockShards {
-    fn new(num_shards: usize) -> Self {
+    fn new(num_shards: i64) -> Self {
         Self {
-            data: (0..num_shards as i64).collect(),
+            data: (0..num_shards).collect(),
         }
     }
 
@@ -83,7 +83,7 @@ const CONCURRENT_TASKS: usize = 16;
 fn format_duration(d: Duration, iterations: u64) -> String {
     let nanos_per_op = d.as_nanos() as f64 / iterations as f64;
     if nanos_per_op < 1000.0 {
-        format!("{:.1} ns/op", nanos_per_op)
+        format!("{nanos_per_op:.1} ns/op")
     } else if nanos_per_op < 1_000_000.0 {
         format!("{:.2} µs/op", nanos_per_op / 1000.0)
     } else {
@@ -94,16 +94,16 @@ fn format_duration(d: Duration, iterations: u64) -> String {
 async fn bench_mutex_single(manager: &MutexManager, iterations: u64) -> Duration {
     let start = Instant::now();
     for i in 0..iterations {
-        let key = format!("key-{}", i);
+        let key = format!("key-{i}");
         std::hint::black_box(manager.get_client(&key).await);
     }
     start.elapsed()
 }
 
-async fn bench_arcswap_single(manager: &ArcSwapManager, iterations: u64) -> Duration {
+fn bench_arcswap_single(manager: &ArcSwapManager, iterations: u64) -> Duration {
     let start = Instant::now();
     for i in 0..iterations {
-        let key = format!("key-{}", i);
+        let key = format!("key-{i}");
         std::hint::black_box(manager.get_client(&key));
     }
     start.elapsed()
@@ -119,10 +119,10 @@ async fn bench_mutex_concurrent(
 
     let handles: Vec<_> = (0..tasks)
         .map(|t| {
-            let m = manager.clone();
+            let m = Arc::clone(&manager);
             tokio::spawn(async move {
                 for i in 0..per_task {
-                    let key = format!("key-{}-{}", t, i);
+                    let key = format!("key-{t}-{i}");
                     std::hint::black_box(m.get_client(&key).await);
                 }
             })
@@ -145,10 +145,10 @@ async fn bench_arcswap_concurrent(
 
     let handles: Vec<_> = (0..tasks)
         .map(|t| {
-            let m = manager.clone();
+            let m = Arc::clone(&manager);
             tokio::spawn(async move {
                 for i in 0..per_task {
-                    let key = format!("key-{}-{}", t, i);
+                    let key = format!("key-{t}-{i}");
                     std::hint::black_box(m.get_client(&key));
                 }
             })
@@ -167,7 +167,7 @@ async fn main() {
 
     println!("Shard Lookup Benchmark: Mutex vs ArcSwap");
     println!("=========================================");
-    println!("Iterations: {}", ITERATIONS);
+    println!("Iterations: {ITERATIONS}");
     println!();
 
     // Single-threaded benchmarks
@@ -184,7 +184,7 @@ async fn main() {
     }
 
     let mutex_time = bench_mutex_single(&mutex_mgr, ITERATIONS).await;
-    let arcswap_time = bench_arcswap_single(&arcswap_mgr, ITERATIONS).await;
+    let arcswap_time = bench_arcswap_single(&arcswap_mgr, ITERATIONS);
 
     println!(
         "  Mutex:   {} (total: {:?})",
@@ -203,10 +203,7 @@ async fn main() {
     println!();
 
     // Concurrent benchmarks
-    println!(
-        "Concurrent ({} tasks, {} total ops):",
-        CONCURRENT_TASKS, ITERATIONS
-    );
+    println!("Concurrent ({CONCURRENT_TASKS} tasks, {ITERATIONS} total ops):");
     println!("----------------------------------------------");
 
     let mutex_mgr = Arc::new(MutexManager::new(shards.clone()));
@@ -334,12 +331,12 @@ impl DynamicFormatClient {
 
     fn get_url(&self) -> Option<String> {
         let guard = self.leaders.load();
-        guard.get(&self.shard_id).map(|l| format!("http://{}", l))
+        guard.get(&self.shard_id).map(|l| format!("http://{l}"))
     }
 }
 
 /// Hypothetical approach: store pre-formatted URLs as String, clone on each lookup.
-/// Isolates allocation cost (String::clone) from refcount cost (Arc::clone).
+/// Isolates allocation cost (`String::clone`) from refcount cost (`Arc::clone`).
 struct DynamicStringCloneClient {
     shard_id: i64,
     leaders: Arc<ArcSwap<std::collections::HashMap<i64, String>>>,
@@ -373,11 +370,12 @@ impl DynamicPreformattedClient {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn bench_dynamic_leader_lookup() {
     println!("Dynamic Leader Lookup Benchmark");
     println!("================================");
     println!("Compares cached leader vs dynamic lookup (format vs String clone vs Arc<str>)");
-    println!("Iterations: {}", ITERATIONS);
+    println!("Iterations: {ITERATIONS}");
     println!();
 
     // Setup - old style (raw addresses)
@@ -403,9 +401,9 @@ async fn bench_dynamic_leader_lookup() {
     let pre_shards = Arc::new(ArcSwap::from_pointee(pre_leaders));
 
     let cached_client = CachedLeaderClient::new("localhost:6649");
-    let format_client = DynamicFormatClient::new(1, raw_shards.clone());
-    let string_clone_client = DynamicStringCloneClient::new(1, str_shards.clone());
-    let preformatted_client = DynamicPreformattedClient::new(1, pre_shards.clone());
+    let format_client = DynamicFormatClient::new(1, Arc::clone(&raw_shards));
+    let string_clone_client = DynamicStringCloneClient::new(1, Arc::clone(&str_shards));
+    let preformatted_client = DynamicPreformattedClient::new(1, Arc::clone(&pre_shards));
 
     // Warmup
     for _ in 0..1000 {
@@ -472,18 +470,9 @@ async fn bench_dynamic_leader_lookup() {
         (string_clone_time.as_nanos() as f64 - cached_time.as_nanos() as f64) / ITERATIONS as f64;
     let new_overhead_ns =
         (preformatted_time.as_nanos() as f64 - cached_time.as_nanos() as f64) / ITERATIONS as f64;
-    println!(
-        "  Old overhead (vs cached):        {:.1} ns",
-        old_overhead_ns
-    );
-    println!(
-        "  String clone overhead (vs cached): {:.1} ns",
-        str_clone_overhead_ns
-    );
-    println!(
-        "  Arc<str> overhead (vs cached):    {:.1} ns",
-        new_overhead_ns
-    );
+    println!("  Old overhead (vs cached):        {old_overhead_ns:.1} ns");
+    println!("  String clone overhead (vs cached): {str_clone_overhead_ns:.1} ns");
+    println!("  Arc<str> overhead (vs cached):    {new_overhead_ns:.1} ns");
     println!(
         "  Pre-formatted speedup vs format: {:.2}x",
         format_time.as_nanos() as f64 / preformatted_time.as_nanos() as f64
@@ -491,10 +480,7 @@ async fn bench_dynamic_leader_lookup() {
     println!();
 
     // Concurrent benchmark
-    println!(
-        "Concurrent ({} tasks, {} total ops):",
-        CONCURRENT_TASKS, ITERATIONS
-    );
+    println!("Concurrent ({CONCURRENT_TASKS} tasks, {ITERATIONS} total ops):");
     println!("----------------------------------------------");
 
     let cached_client = Arc::new(CachedLeaderClient::new("localhost:6649"));
@@ -508,7 +494,7 @@ async fn bench_dynamic_leader_lookup() {
     let start = Instant::now();
     let handles: Vec<_> = (0..CONCURRENT_TASKS)
         .map(|_| {
-            let c = cached_client.clone();
+            let c = Arc::clone(&cached_client);
             tokio::spawn(async move {
                 for _ in 0..per_task {
                     std::hint::black_box(c.get_url());
@@ -525,7 +511,7 @@ async fn bench_dynamic_leader_lookup() {
     let start = Instant::now();
     let handles: Vec<_> = (0..CONCURRENT_TASKS)
         .map(|_| {
-            let c = format_client.clone();
+            let c = Arc::clone(&format_client);
             tokio::spawn(async move {
                 for _ in 0..per_task {
                     std::hint::black_box(c.get_url());
@@ -542,7 +528,7 @@ async fn bench_dynamic_leader_lookup() {
     let start = Instant::now();
     let handles: Vec<_> = (0..CONCURRENT_TASKS)
         .map(|_| {
-            let c = string_clone_client.clone();
+            let c = Arc::clone(&string_clone_client);
             tokio::spawn(async move {
                 for _ in 0..per_task {
                     std::hint::black_box(c.get_url());
@@ -559,7 +545,7 @@ async fn bench_dynamic_leader_lookup() {
     let start = Instant::now();
     let handles: Vec<_> = (0..CONCURRENT_TASKS)
         .map(|_| {
-            let c = preformatted_client.clone();
+            let c = Arc::clone(&preformatted_client);
             tokio::spawn(async move {
                 for _ in 0..per_task {
                     std::hint::black_box(c.get_url());
@@ -598,18 +584,9 @@ async fn bench_dynamic_leader_lookup() {
         (string_clone_time.as_nanos() as f64 - cached_time.as_nanos() as f64) / ITERATIONS as f64;
     let new_overhead_ns =
         (preformatted_time.as_nanos() as f64 - cached_time.as_nanos() as f64) / ITERATIONS as f64;
-    println!(
-        "  Old overhead (vs cached):        {:.1} ns",
-        old_overhead_ns
-    );
-    println!(
-        "  String clone overhead (vs cached): {:.1} ns",
-        str_clone_overhead_ns
-    );
-    println!(
-        "  Arc<str> overhead (vs cached):    {:.1} ns",
-        new_overhead_ns
-    );
+    println!("  Old overhead (vs cached):        {old_overhead_ns:.1} ns");
+    println!("  String clone overhead (vs cached): {str_clone_overhead_ns:.1} ns");
+    println!("  Arc<str> overhead (vs cached):    {new_overhead_ns:.1} ns");
     println!(
         "  Pre-formatted speedup vs format: {:.2}x",
         format_time.as_nanos() as f64 / preformatted_time.as_nanos() as f64
@@ -619,7 +596,7 @@ async fn bench_dynamic_leader_lookup() {
 async fn bench_grpc_client_cache() {
     println!("gRPC Client Cache Benchmark: RwLock vs ArcSwapOption");
     println!("=====================================================");
-    println!("Iterations: {} (cache hit path only)", ITERATIONS);
+    println!("Iterations: {ITERATIONS} (cache hit path only)");
     println!();
 
     // Single-threaded benchmark
@@ -666,10 +643,7 @@ async fn bench_grpc_client_cache() {
     println!();
 
     // Concurrent benchmark
-    println!(
-        "Concurrent ({} tasks, {} total ops):",
-        CONCURRENT_TASKS, ITERATIONS
-    );
+    println!("Concurrent ({CONCURRENT_TASKS} tasks, {ITERATIONS} total ops):");
     println!("----------------------------------------------");
 
     let rwlock_cache = Arc::new(RwLockCache::new());
@@ -680,7 +654,7 @@ async fn bench_grpc_client_cache() {
     let start = Instant::now();
     let handles: Vec<_> = (0..CONCURRENT_TASKS)
         .map(|_| {
-            let cache = rwlock_cache.clone();
+            let cache = Arc::clone(&rwlock_cache);
             tokio::spawn(async move {
                 for _ in 0..per_task {
                     std::hint::black_box(cache.get_client().await);
@@ -697,7 +671,7 @@ async fn bench_grpc_client_cache() {
     let start = Instant::now();
     let handles: Vec<_> = (0..CONCURRENT_TASKS)
         .map(|_| {
-            let cache = arcswap_cache.clone();
+            let cache = Arc::clone(&arcswap_cache);
             tokio::spawn(async move {
                 for _ in 0..per_task {
                     std::hint::black_box(cache.get_client());

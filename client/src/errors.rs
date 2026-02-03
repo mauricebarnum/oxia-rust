@@ -154,23 +154,23 @@ pub struct ShardError {
 /// Error error type returned in the public API
 ///
 /// Arc-wrapping strategy:
-/// 1. Non-Clone types (tonic::Status, io::Error) → always Arc-wrapped
-/// 2. Large or nested types (ClientError, ServerError, Vec<ShardError>) → Arc-wrapped
+/// 1. Non-Clone types (`tonic::Status`, `io::Error`) → always Arc-wrapped
+/// 2. Large or nested types (`ClientError`, `ServerError`, Vec<ShardError>) → Arc-wrapped
 ///    to avoid expensive copies across async boundaries and through error propagation
-/// 3. Small Copy types (ShardId, i32) → stored inline
+/// 3. Small Copy types (`ShardId`, i32) → stored inline
 /// 4. Strings → stored inline (already heap-allocated, 24 bytes is reasonable to copy)
 #[derive(Debug, Clone, ThisError)]
 #[non_exhaustive]
 pub enum Error {
-    /// Arc-wrapped: tonic::Status is not Clone and is large
+    /// Arc-wrapped: `tonic::Status` is not Clone and is large
     #[error("gRPC error: {0}")]
     Grpc(#[source] Arc<tonic::Status>),
 
-    /// Arc-wrapped: tonic::transport::Error is not Clone
+    /// Arc-wrapped: `tonic::transport::Error` is not Clone
     #[error("gRPC transport error: {0}")]
     Transport(Arc<tonic::transport::Error>),
 
-    /// Arc-wrapped: io::Error is not Clone
+    /// Arc-wrapped: `io::Error` is not Clone
     #[error("I/O error: {0}")]
     Io(#[source] Arc<io::Error>),
 
@@ -234,6 +234,7 @@ fn format_shard_errors(errors: &[ShardError]) -> String {
 impl Error {
     /// Whether the error is likely transient and worth retrying
     pub fn is_retryable(&self) -> bool {
+        #[allow(clippy::match_same_arms)]
         match self {
             // Transport errors (connection refused, DNS failures, etc.) are retryable
             // as the server may come back online

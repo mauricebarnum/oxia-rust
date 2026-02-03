@@ -77,7 +77,7 @@ impl RequestBuilder {
         I: IntoIterator<Item = S>,
         S: Into<Arc<str>>,
     {
-        self.keys.extend(keys.into_iter().map(|k| k.into()));
+        self.keys.extend(keys.into_iter().map(Into::into));
         self
     }
 

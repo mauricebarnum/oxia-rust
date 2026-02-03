@@ -1,4 +1,4 @@
-// Copyright 2025 Maurice S. Barnum
+// Copyright 2025-2026 Maurice S. Barnum
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -198,9 +198,9 @@ mod tests {
         ];
         for f in funcs {
             let r = with_retry(retry, {
-                let count = count.clone();
+                let count = Arc::clone(&count);
                 move || {
-                    let count = count.clone();
+                    let count = Arc::clone(&count);
                     async move {
                         count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         f()

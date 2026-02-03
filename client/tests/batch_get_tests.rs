@@ -39,7 +39,7 @@ async fn test_batch_get_basic() -> anyhow::Result<()> {
         // Insert test data
         let keys = vec!["batch-key-1", "batch-key-2", "batch-key-3"];
         for key in &keys {
-            trace_err!(client.put(*key, format!("value-{}", key)).await)?;
+            trace_err!(client.put(*key, format!("value-{key}")).await)?;
         }
 
         // Build batch_get request
@@ -155,9 +155,9 @@ async fn test_batch_get_across_shards() -> anyhow::Result<()> {
         let client = trace_err!(server.connect().await)?;
 
         // Insert keys that will likely hash to different shards
-        let keys: Vec<String> = (0..20).map(|i| format!("shard-key-{}", i)).collect();
+        let keys: Vec<String> = (0..20).map(|i| format!("shard-key-{i}")).collect();
         for key in &keys {
-            trace_err!(client.put(key, format!("value-{}", key)).await)?;
+            trace_err!(client.put(key, format!("value-{key}")).await)?;
         }
 
         // Request all keys via batch_get
@@ -254,6 +254,8 @@ async fn test_batch_get_with_partition_keys() -> anyhow::Result<()> {
 #[test_log::test(tokio::test)]
 async fn test_batch_get_large_batch() -> anyhow::Result<()> {
     timeout(Duration::from_secs(TEST_TIMEOUT_SECS), async {
+        const N: usize = 100;
+
         let server = trace_err!(common::TestServer::start_nshards(non_zero(4)))?;
         let builder = config::Config::builder()
             .max_parallel_requests(10)
@@ -261,11 +263,10 @@ async fn test_batch_get_large_batch() -> anyhow::Result<()> {
         let client = trace_err!(server.connect_with(builder).await)?;
 
         // Insert many keys
-        const N: usize = 100;
-        let keys: Vec<String> = (0..N).map(|i| format!("large-batch-{:04}", i)).collect();
+        let keys: Vec<String> = (0..N).map(|i| format!("large-batch-{i:04}")).collect();
 
         for key in &keys {
-            trace_err!(client.put(key, format!("value-{}", key)).await)?;
+            trace_err!(client.put(key, format!("value-{key}")).await)?;
         }
 
         // Batch get all keys

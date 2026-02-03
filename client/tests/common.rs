@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(clippy::missing_panics_doc)]
+
 use mauricebarnum_oxia_client::errors::Error as ClientError;
 use mauricebarnum_oxia_client::{Client, config};
 use std::net::TcpStream;
