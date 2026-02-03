@@ -110,13 +110,6 @@ impl From<ShardId> for i64 {
     }
 }
 
-impl From<ShardId> for usize {
-    #[inline]
-    fn from(my: ShardId) -> Self {
-        my.0 as usize
-    }
-}
-
 impl fmt::Display for ShardId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
@@ -193,8 +186,9 @@ impl<T> ShardIdMap<T> {
     // Check if ID is small enough for the direct array
     #[inline]
     fn direct_index(id: ShardId) -> Option<usize> {
-        let idx: usize = id.into();
-        (idx < DIRECT_ID_MAX).then_some(idx)
+        #[allow(clippy::cast_sign_loss)]
+        let u = id.0 as usize;
+        (u < DIRECT_ID_MAX).then_some(u)
     }
 
     pub fn insert(&mut self, id: ShardId, value: T) -> bool {
@@ -244,12 +238,17 @@ impl<T> ShardIdMap<T> {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (ShardId, &T)> + '_ {
+        fn idx_as_id(idx: usize) -> ShardId {
+            assert!(idx < DIRECT_ID_MAX);
+            #[allow(clippy::cast_possible_wrap)]
+            ShardId(idx as i64)
+        }
+
         let direct_iter = self
             .direct
             .iter()
             .enumerate()
-            .filter_map(|(idx, opt_val)| opt_val.as_ref().map(|val| (ShardId(idx as i64), val)))
-            .fuse(); // Keep .fuse() for correctness
+            .filter_map(|(idx, opt_val)| opt_val.as_ref().map(|val| (idx_as_id(idx), val)));
 
         // The order of chaining these is important to ensure the order is preserved among the
         // buckets.  `invalid` comes first, if it exists, as those are the negative ids.  Next is
