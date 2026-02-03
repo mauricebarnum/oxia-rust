@@ -120,13 +120,13 @@ impl ResponseItem {
 
 /// Split `req` and construct per-shard requests.  Return futures so that the caller
 /// can drive the network requests.
-pub(super) async fn prepare_requests(
+pub(super) fn prepare_requests(
     client_req: Request,
-    shard_manager: Arc<shard::Manager>,
-) -> Result<(
-    Vec<impl Future<Output = BoxStream<'static, ResponseItem>>>,
+    shard_manager: &Arc<shard::Manager>,
+) -> (
+    Vec<impl Future<Output = BoxStream<'static, ResponseItem>> + use<>>,
     Vec<ResponseItem>,
-)> {
+) {
     let mut failures: Vec<ResponseItem> = Vec::new();
     let mut reqs: BTreeMap<ShardId, Request> = BTreeMap::new();
 
@@ -169,5 +169,5 @@ pub(super) async fn prepare_requests(
             }
         }
     }
-    Ok((batch_get_futures, failures))
+    (batch_get_futures, failures)
 }

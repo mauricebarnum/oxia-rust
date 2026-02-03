@@ -57,7 +57,7 @@ impl CommandRunnable for BatchGetCommand {
             .add_keys(self.keys)
             .build();
 
-        let mut gets = ctx.client().await?.batch_get(req).await?;
+        let mut gets = ctx.client().await?.batch_get(req)?;
         while let Some(item) = gets.next().await {
             println!("{item:?}");
         }

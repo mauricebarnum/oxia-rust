@@ -48,7 +48,7 @@ async fn test_batch_get_basic() -> anyhow::Result<()> {
             .build();
 
         // Execute batch_get
-        let mut stream = trace_err!(client.batch_get(req).await)?;
+        let mut stream = trace_err!(client.batch_get(req))?;
         let mut results = HashMap::new();
 
         while let Some(item) = stream.next().await {
@@ -85,7 +85,7 @@ async fn test_batch_get_missing_keys() -> anyhow::Result<()> {
             .add_keys(vec!["exists-1", "missing-2", "exists-3", "missing-4"])
             .build();
 
-        let mut stream = trace_err!(client.batch_get(req).await)?;
+        let mut stream = trace_err!(client.batch_get(req))?;
         let mut found = HashSet::new();
         let mut not_found = HashSet::new();
 
@@ -133,7 +133,7 @@ async fn test_batch_get_with_options() -> anyhow::Result<()> {
             .add_key("k2")
             .build();
 
-        let mut stream = trace_err!(client.batch_get(req).await)?;
+        let mut stream = trace_err!(client.batch_get(req))?;
 
         while let Some(item) = stream.next().await {
             let response = trace_err!(item.response)?;
@@ -165,7 +165,7 @@ async fn test_batch_get_across_shards() -> anyhow::Result<()> {
             .add_keys(keys.clone())
             .build();
 
-        let mut stream = trace_err!(client.batch_get(req).await)?;
+        let mut stream = trace_err!(client.batch_get(req))?;
         let mut count = 0;
 
         while let Some(item) = stream.next().await {
@@ -189,7 +189,7 @@ async fn test_batch_get_empty_request() -> anyhow::Result<()> {
 
         // Empty request
         let req = client::batch_get::Request::builder().build();
-        let stream = trace_err!(client.batch_get(req).await)?;
+        let stream = trace_err!(client.batch_get(req))?;
 
         // Should yield no items
         let count = stream.fold(0, |acc, _| async move { acc + 1 }).await;
@@ -235,7 +235,7 @@ async fn test_batch_get_with_partition_keys() -> anyhow::Result<()> {
             .add_keys(vec!["pk-key-1", "pk-key-2"])
             .build();
 
-        let mut stream = trace_err!(client.batch_get(req).await)?;
+        let mut stream = trace_err!(client.batch_get(req))?;
         let mut results = Vec::new();
 
         while let Some(item) = stream.next().await {
@@ -274,7 +274,7 @@ async fn test_batch_get_large_batch() -> anyhow::Result<()> {
             .add_keys(keys.clone())
             .build();
 
-        let mut stream = trace_err!(client.batch_get(req).await)?;
+        let mut stream = trace_err!(client.batch_get(req))?;
         let mut received_keys = HashSet::new();
 
         while let Some(item) = stream.next().await {
@@ -308,7 +308,7 @@ async fn test_batch_get_duplicate_keys() -> anyhow::Result<()> {
             .add_key("dup-key")
             .build();
 
-        let mut stream = trace_err!(client.batch_get(req).await)?;
+        let mut stream = trace_err!(client.batch_get(req))?;
         let mut count = 0;
 
         while let Some(item) = stream.next().await {
@@ -342,7 +342,7 @@ async fn test_batch_get_mixed_success_failure() -> anyhow::Result<()> {
             .add_keys(vec!["success-1", "missing-1", "success-2", "missing-2"])
             .build();
 
-        let mut stream = trace_err!(client.batch_get(req).await)?;
+        let mut stream = trace_err!(client.batch_get(req))?;
         let mut successes = 0;
         let mut not_found = 0;
 
@@ -380,7 +380,7 @@ async fn test_batch_get_version_tracking() -> anyhow::Result<()> {
             .add_key("versioned-key")
             .build();
 
-        let mut stream = trace_err!(client.batch_get(req).await)?;
+        let mut stream = trace_err!(client.batch_get(req))?;
 
         if let Some(item) = stream.next().await {
             let response = trace_err!(item.response)?.unwrap();

@@ -903,7 +903,7 @@ impl Client {
     /// of a network failure or timeout.  The order of returned keys is not specified.
     ///
     /// Only `KeyComparisonType::Equal` is accepted.
-    pub async fn batch_get(
+    pub fn batch_get(
         &self,
         req: batch_get::Request,
     ) -> Result<impl futures::stream::Stream<Item = batch_get::ResponseItem> + use<>> {
@@ -911,7 +911,7 @@ impl Client {
         use futures::future::Either::Right;
 
         let shard_manager = self.get_shard_manager()?;
-        let (batch_get_futures, failures) = batch_get::prepare_requests(req, shard_manager).await?;
+        let (batch_get_futures, failures) = batch_get::prepare_requests(req, &shard_manager);
 
         // Send the request to all of the shards in parallel.  This will block until the initial
         // backend calls return either a stream or an error.  A remote error will be demuxed into

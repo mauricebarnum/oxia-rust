@@ -1461,14 +1461,14 @@ impl ShardAssignmentTask {
         mb.build()
     }
 
-    async fn process_assignments(&self, ns: oxia_proto::NamespaceShardsAssignment) -> Result<()> {
+    fn process_assignments(&self, mut ns: oxia_proto::NamespaceShardsAssignment) -> Result<()> {
         // Create shard mappings and bail out if we find anything silly.
         let mapper = Self::make_mapper(&ns)?;
         let current = self.shards.load();
 
         // Build new leaders map from assignments
         let mut new_leaders = ShardIdMap::<Arc<str>>::default();
-        for a in &ns.assignments {
+        for a in &mut ns.assignments {
             new_leaders.insert(a.shard.into(), format_leader_url(a));
         }
         // Update leaders atomically - clients will see new leaders on next RPC
@@ -1512,7 +1512,7 @@ impl ShardAssignmentTask {
                         // We're throwing this map away, so grab the value contents rather
                         // than clone it
                         let a = std::mem::take(a);
-                        let pr = self.process_assignments(a).await;
+                        let pr = self.process_assignments(a);
                         let _ = self.changed.send(pr.map(|()| self.shards.load().epoch()));
                     }
                 }
