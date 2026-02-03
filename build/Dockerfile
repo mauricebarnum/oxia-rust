@@ -19,8 +19,9 @@ ARG RUSTUP_HOME
 # Versions
 ARG RUST_VERSION=1.93.0
 ARG GO_VERSION=go1.25.6
-ARG SCCACHE_VERSION=v0.12.0
-ARG NEXTEST_VERSION=0.9.122
+ARG SCCACHE_VERSION=v0.13.0
+ARG NEXTEST_VERSION=0.9.124
+ARG CARGO_CHECK_EXTERNAL_TYPES_VERSION=nightly
 
 ARG TARGETARCH
 ARG GO_ARCH=${TARGETARCH}
@@ -68,10 +69,11 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --defau
 # ===== Install miri =====
 RUN rustup toolchain install --profile minimal --allow-downgrade nightly --component miri
 
-# ===== Install cargo-check-external-types which requires a specific nightly, see =====
-# https://github.com/awslabs/cargo-check-external-types?tab=readme-ov-file#how-to-use
-RUN rustup toolchain install nightly-2025-10-18 --profile minimal && \
-    cargo +nightly-2025-10-18 install cargo-check-external-types
+# ===== Install cargo-check-external-types which requires a specific nightly, see
+# ===== https://github.com/awslabs/cargo-check-external-types?tab=readme-ov-file#how-to-use
+ARG CARGO_CHECK_EXTERNAL_TYPES_VERSION=nightly-2025-10-18
+RUN rustup toolchain install ${CARGO_CHECK_EXTERNAL_TYPES_VERSION} && \
+    cargo +${CARGO_CHECK_EXTERNAL_TYPES_VERSION} install cargo-check-external-types
 
 # ===== Install sccache =====
 RUN case "${TARGETARCH}" in \
