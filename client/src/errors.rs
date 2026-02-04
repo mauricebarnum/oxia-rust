@@ -238,12 +238,12 @@ impl Error {
         match self {
             // Transport errors (connection refused, DNS failures, etc.) are retryable
             // as the server may come back online
-            Error::Transport(_) => true,
-            Error::Grpc(status) => matches!(
+            Self::Transport(_) => true,
+            Self::Grpc(status) => matches!(
                 status.code(),
                 tonic::Code::Unavailable | tonic::Code::Unknown | tonic::Code::Internal
             ),
-            Error::Io(err) => matches!(
+            Self::Io(err) => matches!(
                 err.kind(),
                 io::ErrorKind::ConnectionReset
                     | io::ErrorKind::BrokenPipe
@@ -251,9 +251,9 @@ impl Error {
                     | io::ErrorKind::NotConnected
                     | io::ErrorKind::WouldBlock
             ),
-            Error::MultipleShardError(errs) => errs.iter().any(|e| e.err.is_retryable()),
-            Error::ShardError(e) => e.err.is_retryable(),
-            Error::RequestTimeout => false,
+            Self::MultipleShardError(errs) => errs.iter().any(|e| e.err.is_retryable()),
+            Self::ShardError(e) => e.err.is_retryable(),
+            Self::RequestTimeout => false,
             _ => false,
         }
     }
@@ -262,38 +262,38 @@ impl Error {
     /// This is used to trigger channel reconnection on the next request.
     pub fn is_connection_error(&self) -> bool {
         match self {
-            Error::Transport(_) => true,
-            Error::Grpc(status) => status.code() == tonic::Code::Unavailable,
-            Error::Io(err) => matches!(
+            Self::Transport(_) => true,
+            Self::Grpc(status) => status.code() == tonic::Code::Unavailable,
+            Self::Io(err) => matches!(
                 err.kind(),
                 io::ErrorKind::ConnectionReset
                     | io::ErrorKind::BrokenPipe
                     | io::ErrorKind::ConnectionAborted
                     | io::ErrorKind::NotConnected
             ),
-            Error::MultipleShardError(errs) => errs.iter().any(|e| e.err.is_connection_error()),
-            Error::ShardError(e) => e.err.is_connection_error(),
+            Self::MultipleShardError(errs) => errs.iter().any(|e| e.err.is_connection_error()),
+            Self::ShardError(e) => e.err.is_connection_error(),
             _ => false,
         }
     }
 
     pub fn custom(msg: impl Into<String>) -> Self {
-        Error::Custom(msg.into())
+        Self::Custom(msg.into())
     }
 
-    pub fn shard_error(shard: ShardId, err: Error) -> Self {
-        Error::ShardError(ShardError {
+    pub fn shard_error(shard: ShardId, err: Self) -> Self {
+        Self::ShardError(ShardError {
             shard,
             err: err.into(),
         })
     }
 
     pub fn multiple_shard_errors(errors: Vec<ShardError>) -> Self {
-        Error::MultipleShardError(errors.into())
+        Self::MultipleShardError(errors.into())
     }
 
     pub fn other(err: impl std::error::Error + Send + Sync + 'static) -> Self {
-        Error::Other(Arc::new(err))
+        Self::Other(Arc::new(err))
     }
 
     /// Whether the error indicates a shard is no longer available or has been reassigned.
@@ -303,17 +303,17 @@ impl Error {
     pub fn is_shard_unavailable(&self) -> bool {
         match self {
             // Shard mapping errors indicate the shard is no longer valid
-            Error::NoShardMapping(_) | Error::NoShardMappingForKey(_) => true,
+            Self::NoShardMapping(_) | Self::NoShardMappingForKey(_) => true,
             // gRPC NotFound typically indicates the shard/resource doesn't exist
-            Error::Grpc(status) => status.code() == tonic::Code::NotFound,
+            Self::Grpc(status) => status.code() == tonic::Code::NotFound,
             // Server configuration errors
-            Error::Server(err) => matches!(
+            Self::Server(err) => matches!(
                 err.as_ref(),
                 ServerError::NoShardsConfigured | ServerError::DuplicateShardId(_)
             ),
             // Check nested errors
-            Error::ShardError(e) => e.err.is_shard_unavailable(),
-            Error::MultipleShardError(errs) => errs.iter().all(|e| e.err.is_shard_unavailable()),
+            Self::ShardError(e) => e.err.is_shard_unavailable(),
+            Self::MultipleShardError(errs) => errs.iter().all(|e| e.err.is_shard_unavailable()),
             _ => false,
         }
     }
@@ -321,9 +321,9 @@ impl Error {
     /// Whether the error indicates the request was sent to the wrong leader.
     pub fn is_wrong_leader(&self) -> bool {
         match self {
-            Error::Oxia(oxia_err) => oxia_err.is_wrong_leader(),
-            Error::ShardError(e) => e.err.is_wrong_leader(),
-            Error::MultipleShardError(errs) => errs.iter().any(|e| e.err.is_wrong_leader()),
+            Self::Oxia(oxia_err) => oxia_err.is_wrong_leader(),
+            Self::ShardError(e) => e.err.is_wrong_leader(),
+            Self::MultipleShardError(errs) => errs.iter().any(|e| e.err.is_wrong_leader()),
             _ => false,
         }
     }
@@ -336,40 +336,40 @@ impl From<tonic::Status> for Error {
             || (code == tonic::Code::Cancelled && status.message() == "Timeout expired");
 
         if is_timeout {
-            Error::RequestTimeout
+            Self::RequestTimeout
         } else if code == tonic::Code::Cancelled {
-            Error::Cancelled
+            Self::Cancelled
         } else {
-            Error::Grpc(Arc::new(status))
+            Self::Grpc(Arc::new(status))
         }
     }
 }
 
 impl From<tonic::transport::Error> for Error {
     fn from(err: tonic::transport::Error) -> Self {
-        Error::Transport(Arc::new(err))
+        Self::Transport(Arc::new(err))
     }
 }
 
 impl From<io::Error> for Error {
     fn from(err: io::Error) -> Self {
         if err.kind() == io::ErrorKind::TimedOut {
-            Error::RequestTimeout
+            Self::RequestTimeout
         } else {
-            Error::Io(Arc::new(err))
+            Self::Io(Arc::new(err))
         }
     }
 }
 
 impl From<ClientError> for Error {
     fn from(err: ClientError) -> Self {
-        Error::Client(Arc::new(err))
+        Self::Client(Arc::new(err))
     }
 }
 
 impl From<ServerError> for Error {
     fn from(err: ServerError) -> Self {
-        Error::Server(Arc::new(err))
+        Self::Server(Arc::new(err))
     }
 }
 

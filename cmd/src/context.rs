@@ -52,9 +52,12 @@ impl Context {
         Ok(state.client.clone())
     }
 
-    pub async fn make_subcontext(&self) -> Context {
-        let state = self.state.lock().await;
-        let client = Client::new(Arc::clone(state.client.config()));
+    pub async fn make_subcontext(&self) -> Self {
+        let config = {
+            let state = self.state.lock().await;
+            Arc::clone(state.client.config())
+        };
+        let client = Client::new(config);
         Self {
             state: Arc::new(Mutex::new(State { client })),
         }

@@ -8,11 +8,14 @@ edition = "2024"
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
 cast_possible_truncation = "allow"
 cast_precision_loss = "allow"
 clone_on_ref_ptr = "deny"
 missing_errors_doc = "allow"
 must_use_candidate = "allow"
+option_if_let_else = "allow"
+
 
 [workspace.lints.rust]
 private_interfaces = "deny"

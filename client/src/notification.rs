@@ -103,7 +103,7 @@ struct WaitingReadyState {
 #[allow(clippy::large_enum_variant)]
 enum State {
     Streaming(StreamingState),
-    Configuring(BoxFuture<'static, State>),
+    Configuring(BoxFuture<'static, Self>),
     WaitingReady(Box<WaitingReadyState>),
 }
 
@@ -121,11 +121,11 @@ impl fmt::Debug for State {
 pub struct ConfigEpoch(usize);
 
 impl ConfigEpoch {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self(0)
     }
 
-    pub fn next(&mut self) {
+    pub const fn next(&mut self) {
         self.0 += 1;
     }
 }
@@ -159,7 +159,7 @@ impl NotificationsStream {
     ) -> Self {
         let (config_tx, config_rx) = mpsc::channel::<Cmd>(1);
         let watcher_handle = tokio::spawn({
-            let mut watcher = shard_manager.recv_changed().clone();
+            let mut watcher = shard_manager.recv_changed();
             async move {
                 loop {
                     if let Err(e) = watcher.changed().await {

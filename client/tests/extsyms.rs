@@ -1,4 +1,4 @@
-// Copyright 2025 Maurice S. Barnum
+// Copyright 2025-2026 Maurice S. Barnum
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,6 +26,6 @@ fn test_allowed_symbols() {
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
-        .expect("failed to run {cmd} {args:?}");
+        .unwrap();
     assert!(status.success());
 }

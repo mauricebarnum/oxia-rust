@@ -1,4 +1,4 @@
-// Copyright 2025 Maurice S. Barnum
+// Copyright 2025-2026 Maurice S. Barnum
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -80,16 +80,16 @@ pub enum Commands {
 impl CommandRunnable for Commands {
     async fn run(self, ctx: crate::Context) -> anyhow::Result<()> {
         match self {
-            Commands::BatchGet(cmd) => cmd.run(ctx).await,
-            Commands::Completions(cmd) => cmd.run(ctx).await,
-            Commands::Delete(cmd) => cmd.run(ctx).await,
-            Commands::DeleteRange(cmd) => cmd.run(ctx).await,
-            Commands::Get(cmd) => cmd.run(ctx).await,
-            Commands::List(cmd) => cmd.run(ctx).await,
-            Commands::Notifications(cmd) => cmd.run(ctx).await,
-            Commands::Put(cmd) => cmd.run(ctx).await,
-            Commands::RangeScan(cmd) => cmd.run(ctx).await,
-            Commands::Shell(cmd) => cmd.run(ctx).await,
+            Self::BatchGet(cmd) => cmd.run(ctx).await,
+            Self::Completions(cmd) => cmd.run(ctx).await,
+            Self::Delete(cmd) => cmd.run(ctx).await,
+            Self::DeleteRange(cmd) => cmd.run(ctx).await,
+            Self::Get(cmd) => cmd.run(ctx).await,
+            Self::List(cmd) => cmd.run(ctx).await,
+            Self::Notifications(cmd) => cmd.run(ctx).await,
+            Self::Put(cmd) => cmd.run(ctx).await,
+            Self::RangeScan(cmd) => cmd.run(ctx).await,
+            Self::Shell(cmd) => cmd.run(ctx).await,
         }
     }
 }
