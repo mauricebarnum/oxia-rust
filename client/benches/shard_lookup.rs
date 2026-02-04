@@ -325,7 +325,10 @@ struct DynamicFormatClient {
 }
 
 impl DynamicFormatClient {
-    fn new(shard_id: i64, leaders: Arc<ArcSwap<std::collections::HashMap<i64, String>>>) -> Self {
+    const fn new(
+        shard_id: i64,
+        leaders: Arc<ArcSwap<std::collections::HashMap<i64, String>>>,
+    ) -> Self {
         Self { shard_id, leaders }
     }
 
@@ -343,7 +346,10 @@ struct DynamicStringCloneClient {
 }
 
 impl DynamicStringCloneClient {
-    fn new(shard_id: i64, leaders: Arc<ArcSwap<std::collections::HashMap<i64, String>>>) -> Self {
+    const fn new(
+        shard_id: i64,
+        leaders: Arc<ArcSwap<std::collections::HashMap<i64, String>>>,
+    ) -> Self {
         Self { shard_id, leaders }
     }
 
@@ -360,7 +366,10 @@ struct DynamicPreformattedClient {
 }
 
 impl DynamicPreformattedClient {
-    fn new(shard_id: i64, leaders: Arc<ArcSwap<std::collections::HashMap<i64, Arc<str>>>>) -> Self {
+    const fn new(
+        shard_id: i64,
+        leaders: Arc<ArcSwap<std::collections::HashMap<i64, Arc<str>>>>,
+    ) -> Self {
         Self { shard_id, leaders }
     }
 

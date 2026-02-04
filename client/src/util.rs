@@ -23,7 +23,7 @@ use crate::Error;
 use crate::Result;
 use crate::config;
 
-pub(crate) async fn with_timeout<T, Fut>(timeout: Option<Duration>, fut: Fut) -> Result<T>
+pub async fn with_timeout<T, Fut>(timeout: Option<Duration>, fut: Fut) -> Result<T>
 where
     Fut: Future<Output = Result<T>>,
 {
@@ -35,10 +35,7 @@ where
     }
 }
 
-pub(crate) async fn with_retry<T, F, Fut>(
-    retry_config: Option<config::RetryConfig>,
-    mut f: F,
-) -> Result<T>
+pub async fn with_retry<T, F, Fut>(retry_config: Option<config::RetryConfig>, mut f: F) -> Result<T>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T>>,
@@ -59,7 +56,7 @@ where
     }
 }
 
-pub(crate) fn compare_with_slash(xa: impl AsRef<str>, ya: impl AsRef<str>) -> Ordering {
+pub fn compare_with_slash(xa: impl AsRef<str>, ya: impl AsRef<str>) -> Ordering {
     let mut x = xa.as_ref();
     let mut y = ya.as_ref();
 
@@ -110,7 +107,7 @@ use crate::{GetResponse, KeyComparisonType};
 // TODO: consider at least looking at the record version, but I don't beleive the Go implementation
 // does this, and that's our reference. See https://github.com/streamnative/oxia/blob/main/oxia/async_client_impl.go
 #[inline]
-pub(crate) fn select_response(
+pub fn select_response(
     prev: Option<GetResponse>,
     candidate: GetResponse,
     ct: KeyComparisonType,

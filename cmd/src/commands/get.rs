@@ -33,11 +33,11 @@ enum KeyCompareArg {
 impl From<KeyCompareArg> for KeyComparisonType {
     fn from(value: KeyCompareArg) -> Self {
         match value {
-            KeyCompareArg::Equal => KeyComparisonType::Equal,
-            KeyCompareArg::Floor => KeyComparisonType::Floor,
-            KeyCompareArg::Ceiling => KeyComparisonType::Ceiling,
-            KeyCompareArg::Lower => KeyComparisonType::Lower,
-            KeyCompareArg::Higher => KeyComparisonType::Higher,
+            KeyCompareArg::Equal => Self::Equal,
+            KeyCompareArg::Floor => Self::Floor,
+            KeyCompareArg::Ceiling => Self::Ceiling,
+            KeyCompareArg::Lower => Self::Lower,
+            KeyCompareArg::Higher => Self::Higher,
         }
     }
 }

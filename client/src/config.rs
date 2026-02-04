@@ -25,7 +25,7 @@ pub struct RetryConfig {
 }
 
 impl RetryConfig {
-    pub fn new(attempts: usize, initial_delay: Duration) -> Self {
+    pub const fn new(attempts: usize, initial_delay: Duration) -> Self {
         Self {
             attempts,
             initial_delay,
@@ -34,7 +34,7 @@ impl RetryConfig {
     }
 
     #[must_use]
-    pub fn max(mut self, x: Duration) -> Self {
+    pub const fn max(mut self, x: Duration) -> Self {
         self.max_delay = x;
         self
     }
@@ -70,19 +70,19 @@ impl Config {
     pub fn identity(&self) -> &str {
         &self.identity
     }
-    pub fn session_timeout(&self) -> Duration {
+    pub const fn session_timeout(&self) -> Duration {
         self.session_timeout
     }
-    pub fn max_parallel_requests(&self) -> usize {
+    pub const fn max_parallel_requests(&self) -> usize {
         self.max_parallel_requests
     }
-    pub fn request_timeout(&self) -> Option<Duration> {
+    pub const fn request_timeout(&self) -> Option<Duration> {
         self.request_timeout
     }
-    pub fn retry(&self) -> Option<RetryConfig> {
+    pub const fn retry(&self) -> Option<RetryConfig> {
         self.retry
     }
-    pub fn retry_on_stale_shard_map(&self) -> bool {
+    pub const fn retry_on_stale_shard_map(&self) -> bool {
         self.retry_on_stale_shard_map
     }
 }

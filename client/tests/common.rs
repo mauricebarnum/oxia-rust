@@ -27,7 +27,7 @@ use tempfile::TempDir;
 
 #[inline]
 #[allow(dead_code)]
-pub fn non_zero(x: u32) -> NonZeroU32 {
+pub const fn non_zero(x: u32) -> NonZeroU32 {
     NonZeroU32::new(x).unwrap()
 }
 
@@ -163,7 +163,7 @@ impl TestServer {
             nshards,
         };
         let process = trace_err!(args.start())?;
-        Ok(TestServer {
+        Ok(Self {
             data_dir,
             args,
             process,

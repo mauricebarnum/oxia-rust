@@ -128,12 +128,10 @@ async fn test_secondary_indexes() -> Result<()> {
     let (_server, client) = create_test_client().await?;
 
     // Create records with secondary indexes
-    let mut secondary_indexes = Vec::new();
     for i in 0..10 {
         let primary_key = format!("{}", char::from(b'a' + i));
         let value = format!("{i}");
         let secondary_index = SecondaryIndex::new("val-idx", &value);
-        secondary_indexes.push(secondary_index.clone());
 
         client
             .put_with_options(

@@ -65,7 +65,7 @@ impl SecondaryIndex {
 
     // --- crate-only helpers; do not leak oxia_proto in public API ---
     #[inline]
-    pub(crate) fn take_inner(&mut self) -> oxia_proto::SecondaryIndex {
+    pub(crate) const fn take_inner(&mut self) -> oxia_proto::SecondaryIndex {
         // Cheap dummy: String::new() does not allocate.
         std::mem::replace(
             &mut self.0,
@@ -81,9 +81,7 @@ impl SecondaryIndex {
         self.0.clone()
     }
 
-    pub(crate) fn to_proto(
-        mut si: Option<Arc<[SecondaryIndex]>>,
-    ) -> Vec<oxia_proto::SecondaryIndex> {
+    pub(crate) fn to_proto(mut si: Option<Arc<[Self]>>) -> Vec<oxia_proto::SecondaryIndex> {
         match &mut si {
             None => Vec::new(),
             Some(arc) => {
@@ -95,7 +93,7 @@ impl SecondaryIndex {
                     }
                     out
                 } else {
-                    arc.iter().map(SecondaryIndex::clone_inner).collect()
+                    arc.iter().map(Self::clone_inner).collect()
                 }
             }
         }
@@ -135,7 +133,7 @@ pub struct PutResponse {
 
 impl PutResponse {
     fn from_proto(x: oxia_proto::PutResponse) -> Self {
-        PutResponse {
+        Self {
             version: RecordVersion::from_proto(x.version),
             key: x.key,
         }
@@ -158,20 +156,20 @@ pub enum KeyComparisonType {
 }
 
 impl KeyComparisonType {
-    fn to_proto(self) -> oxia_proto::KeyComparisonType {
+    const fn to_proto(self) -> oxia_proto::KeyComparisonType {
         match self {
-            KeyComparisonType::Equal => oxia_proto::KeyComparisonType::Equal,
-            KeyComparisonType::Floor => oxia_proto::KeyComparisonType::Floor,
-            KeyComparisonType::Ceiling => oxia_proto::KeyComparisonType::Ceiling,
-            KeyComparisonType::Lower => oxia_proto::KeyComparisonType::Lower,
-            KeyComparisonType::Higher => oxia_proto::KeyComparisonType::Higher,
+            Self::Equal => oxia_proto::KeyComparisonType::Equal,
+            Self::Floor => oxia_proto::KeyComparisonType::Floor,
+            Self::Ceiling => oxia_proto::KeyComparisonType::Ceiling,
+            Self::Lower => oxia_proto::KeyComparisonType::Lower,
+            Self::Higher => oxia_proto::KeyComparisonType::Higher,
         }
     }
 }
 
 impl From<KeyComparisonType> for i32 {
-    fn from(k: KeyComparisonType) -> i32 {
-        k as i32
+    fn from(k: KeyComparisonType) -> Self {
+        k as Self
     }
 }
 
@@ -226,7 +224,7 @@ pub struct RecordVersion {
 impl RecordVersion {
     fn from_proto(value: Option<oxia_proto::Version>) -> Self {
         if let Some(v) = value {
-            RecordVersion {
+            Self {
                 version_id: v.version_id,
                 modifications_count: v.modifications_count,
                 created_timestamp: v.created_timestamp,
@@ -235,11 +233,11 @@ impl RecordVersion {
                 client_identity: v.client_identity,
             }
         } else {
-            RecordVersion::default()
+            Self::default()
         }
     }
 
-    pub fn is_ephemeral(&self) -> bool {
+    pub const fn is_ephemeral(&self) -> bool {
         self.session_id.is_some()
     }
 }
@@ -276,7 +274,7 @@ pub struct GetResponse {
 
 impl GetResponse {
     fn from_proto(x: oxia_proto::GetResponse) -> Self {
-        GetResponse {
+        Self {
             value: x.value,
             version: RecordVersion::from_proto(x.version),
             key: x.key,
@@ -371,7 +369,7 @@ impl ListResponse {
         }
     }
 
-    fn merge(&mut self, x: ListResponse) {
+    fn merge(&mut self, x: Self) {
         self.keys.extend(x.keys);
         self.sorted = false;
         if x.partial {
@@ -440,7 +438,7 @@ impl RangeScanResponse {
         }
     }
 
-    fn merge(&mut self, x: RangeScanResponse) {
+    fn merge(&mut self, x: Self) {
         self.records.extend(x.records);
         self.sorted = false;
         if x.partial {
@@ -535,15 +533,13 @@ pub enum NotificationType {
 }
 
 impl NotificationType {
-    fn try_to_proto(self) -> Option<oxia_proto::NotificationType> {
+    const fn try_to_proto(self) -> Option<oxia_proto::NotificationType> {
         match self {
-            NotificationType::KeyCreated => Some(oxia_proto::NotificationType::KeyCreated),
-            NotificationType::KeyModified => Some(oxia_proto::NotificationType::KeyModified),
-            NotificationType::KeyDeleted => Some(oxia_proto::NotificationType::KeyDeleted),
-            NotificationType::KeyRangeDeleted => {
-                Some(oxia_proto::NotificationType::KeyRangeDeleted)
-            }
-            NotificationType::Unknown(_) => None,
+            Self::KeyCreated => Some(oxia_proto::NotificationType::KeyCreated),
+            Self::KeyModified => Some(oxia_proto::NotificationType::KeyModified),
+            Self::KeyDeleted => Some(oxia_proto::NotificationType::KeyDeleted),
+            Self::KeyRangeDeleted => Some(oxia_proto::NotificationType::KeyRangeDeleted),
+            Self::Unknown(_) => None,
         }
     }
 }
@@ -552,18 +548,18 @@ impl From<i32> for NotificationType {
     fn from(x: i32) -> Self {
         use oxia_proto::NotificationType as p;
         match x {
-            x if x == p::KeyCreated as i32 => NotificationType::KeyCreated,
-            x if x == p::KeyModified as i32 => NotificationType::KeyModified,
-            x if x == p::KeyDeleted as i32 => NotificationType::KeyDeleted,
-            x if x == p::KeyRangeDeleted as i32 => NotificationType::KeyRangeDeleted,
-            other => NotificationType::Unknown(other),
+            x if x == p::KeyCreated as i32 => Self::KeyCreated,
+            x if x == p::KeyModified as i32 => Self::KeyModified,
+            x if x == p::KeyDeleted as i32 => Self::KeyDeleted,
+            x if x == p::KeyRangeDeleted as i32 => Self::KeyRangeDeleted,
+            other => Self::Unknown(other),
         }
     }
 }
 
 impl Display for NotificationType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let NotificationType::Unknown(x) = *self {
+        if let Self::Unknown(x) = *self {
             write!(f, "Uknownn({x}")
         } else {
             write!(f, "{}", self.try_to_proto().unwrap().as_str_name())
@@ -588,7 +584,7 @@ impl Notification {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotificationBatch {
     pub shard: ShardId,
     pub offset: i64,
@@ -629,14 +625,15 @@ pub(crate) async fn create_grpc_client(
     Ok(GrpcClient::new(channel))
 }
 
-pub(crate) async fn execute_with_retry<Fut, R>(
+pub(crate) async fn execute_with_retry<F, Fut, R>(
     config: &Arc<config::Config>,
     shard_manager: Option<&Arc<shard::Manager>>,
-    op: impl Fn() -> Fut,
+    op: F,
 ) -> Result<R>
 where
     Fut: std::future::Future<Output = Result<R>> + Send,
     R: Send,
+    F: Fn() -> Fut + Send + Sync,
 {
     let timeout = config.request_timeout();
     let retry_config = config.retry();
@@ -690,16 +687,17 @@ where
 ///
 /// Each iteration: capture epoch → trigger refresh → wait for update → retry op.
 /// Bounded by retry attempts (or 1 if no retry config) and the overall request timeout.
-async fn stale_shard_map_retry<Fut, R>(
+async fn stale_shard_map_retry<F, Fut, R>(
     config: &Arc<config::Config>,
     shard_manager: &Arc<shard::Manager>,
     remaining: Option<Duration>,
     start: Option<Instant>,
-    op: &impl Fn() -> Fut,
+    op: F,
 ) -> Result<R>
 where
     Fut: std::future::Future<Output = Result<R>> + Send,
     R: Send,
+    F: Fn() -> Fut + Send + Sync,
 {
     let max_attempts = config.retry().map_or(1, |r| r.attempts);
     let request_timeout = config.request_timeout();
@@ -754,19 +752,19 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(config: Arc<config::Config>) -> Self {
+    pub const fn new(config: Arc<config::Config>) -> Self {
         Self {
             shard_manager: None,
             config,
         }
     }
 
-    pub fn config(&self) -> &Arc<config::Config> {
+    pub const fn config(&self) -> &Arc<config::Config> {
         &self.config
     }
 
     #[inline]
-    pub fn is_connected(&self) -> bool {
+    pub const fn is_connected(&self) -> bool {
         self.shard_manager.is_some()
     }
 

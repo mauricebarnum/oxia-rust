@@ -72,12 +72,12 @@ impl ShardMapEpoch {
         Self::default()
     }
 
-    fn next(self) -> Self {
+    const fn next(self) -> Self {
         Self(self.0 + 1)
     }
 }
 
-pub(crate) type ShardMapUpdateResult = std::result::Result<ShardMapEpoch, Error>;
+pub type ShardMapUpdateResult = std::result::Result<ShardMapEpoch, Error>;
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
@@ -85,13 +85,13 @@ pub struct ShardId(i64);
 
 impl ShardId {
     pub const fn new(val: i64) -> Self {
-        ShardId(val)
+        Self(val)
     }
 
     // A canonical invalid value
-    pub const INVALID: ShardId = ShardId(-1);
+    pub const INVALID: Self = Self(-1);
 
-    pub fn is_invalid(self) -> bool {
+    pub const fn is_invalid(self) -> bool {
         self.0 < 0
     }
 }
@@ -99,7 +99,7 @@ impl ShardId {
 impl From<i64> for ShardId {
     #[inline]
     fn from(val: i64) -> Self {
-        ShardId(val)
+        Self(val)
     }
 }
 
@@ -125,7 +125,7 @@ fn get_response_as_result(r: oxia_proto::GetResponse) -> Result<Option<GetRespon
     }
 }
 
-const DIRECT_ID_MAX: usize = 20;
+const DIRECT_ID_SLOTS: u64 = 20;
 
 // ShardIdMap<T> we map shard ids to things in seveal "hot" places.  This map should be suitable
 // for all, or most, of those uses.
@@ -136,30 +136,19 @@ const DIRECT_ID_MAX: usize = 20;
 // have a small set of contigous ids and they are directly mapped to values.
 pub struct ShardIdMap<T> {
     // Array for O(1) direct lookup (Small, dense IDs)
-    direct: [Option<T>; DIRECT_ID_MAX],
+    direct: [Option<T>; DIRECT_ID_SLOTS as usize],
     // BTreeMap for O(log N) lookup (Larger, sparse IDs)
     spilled: BTreeMap<ShardId, T>,
-    #[cfg(accept_invalid_shard_ids)]
-    // BTreeMap for invalid IDs
-    invalid: BTreeMap<ShardId, T>,
+    count: usize,
 }
 
 impl<T: fmt::Debug> fmt::Debug for ShardIdMap<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        #[cfg(not(accept_invalid_shard_ids))]
-        return f
-            .debug_struct("ShardIdMap")
+        f.debug_struct("ShardIdMap")
             .field("direct", &self.direct)
             .field("spilled", &self.spilled)
-            .finish();
-
-        #[cfg(accept_invalid_shard_ids)]
-        return f
-            .debug_struct("ShardIdMap")
-            .field("direct", &self.direct)
-            .field("spilled", &self.spilled)
-            .field("invalid", &self.invalid)
-            .finish();
+            .field("count", &self.count)
+            .finish()
     }
 }
 
@@ -168,102 +157,79 @@ impl<T> Default for ShardIdMap<T> {
         Self {
             direct: std::array::from_fn(|_| None),
             spilled: BTreeMap::new(),
-            #[cfg(accept_invalid_shard_ids)]
-            invalid: BTreeMap::new(),
+            count: 0,
         }
     }
 }
 
 impl<T> ShardIdMap<T> {
-    fn len(&self) -> usize {
-        let result = self.direct.iter().filter(|x| x.is_some()).count() + self.spilled.len();
-        #[cfg(accept_invalid_shard_ids)]
-        return result + self.invalid.len();
-        #[cfg(not(accept_invalid_shard_ids))]
-        return result;
+    const fn len(&self) -> usize {
+        self.count
     }
 
     // Check if ID is small enough for the direct array
     #[inline]
     fn direct_index(id: ShardId) -> Option<usize> {
         #[allow(clippy::cast_sign_loss)]
-        let u = id.0 as usize;
-        (u < DIRECT_ID_MAX).then_some(u)
+        // let u = id.0 as usize;
+        // (u < DIRECT_ID_SLOTS).then_some(u)
+        let u = id.0 as u64;
+        (u < DIRECT_ID_SLOTS).then_some(u as usize)
     }
 
-    pub fn insert(&mut self, id: ShardId, value: T) -> bool {
+    /// insert `id` with `value` unless `id` is invalid
+    pub fn insert(&mut self, id: ShardId, value: T) -> Option<T> {
         if id.is_invalid() {
-            #[cfg(accept_invalid_shard_ids)]
-            {
-                self.invalid.insert(id, value);
-                return true;
-            }
-            #[cfg(not(accept_invalid_shard_ids))]
-            return false;
+            return None;
         }
-        if let Some(i) = Self::direct_index(id) {
-            self.direct[i] = Some(value);
+
+        let old = if let Some(idx) = Self::direct_index(id) {
+            self.direct[idx].replace(value)
         } else {
-            self.spilled.insert(id, value);
+            self.spilled.insert(id, value)
+        };
+
+        if old.is_none() {
+            self.count += 1;
         }
-        true
+        old
     }
 
     pub fn get(&self, id: ShardId) -> Option<&T> {
-        if let Some(i) = Self::direct_index(id) {
-            self.direct[i].as_ref()
-        } else {
-            #[cfg(accept_invalid_shard_ids)]
-            if id.is_invalid() {
-                let v = self.invalid.get(&id);
-                if v.is_some() {
-                    return v;
-                }
-            }
-            self.spilled.get(&id)
+        if let Some(idx) = Self::direct_index(id) {
+            return self.direct[idx].as_ref();
         }
+        self.spilled.get(&id)
     }
 
-    pub fn remove(&mut self, id: ShardId) {
-        if let Some(i) = Self::direct_index(id) {
-            self.direct[i] = None;
+    pub fn remove(&mut self, id: ShardId) -> Option<T> {
+        let old = if let Some(idx) = Self::direct_index(id) {
+            self.direct[idx].take()
         } else {
-            #[cfg(accept_invalid_shard_ids)]
-            if id.is_invalid() {
-                self.invalid.remove(&id);
-                return;
-            }
-            self.spilled.remove(&id);
+            self.spilled.remove(&id)
+        };
+
+        if old.is_some() {
+            self.count -= 1;
         }
+
+        old
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (ShardId, &T)> + '_ {
         fn idx_as_id(idx: usize) -> ShardId {
-            assert!(idx < DIRECT_ID_MAX);
+            debug_assert!(idx < DIRECT_ID_SLOTS as usize);
             #[allow(clippy::cast_possible_wrap)]
             ShardId(idx as i64)
         }
 
-        let direct_iter = self
-            .direct
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, opt_val)| opt_val.as_ref().map(|val| (idx_as_id(idx), val)));
-
-        // The order of chaining these is important to ensure the order is preserved among the
-        // buckets.  `invalid` comes first, if it exists, as those are the negative ids.  Next is
-        // are the directly mapped ids, and finally the spilled arena.
+        let direct_iter = self.direct.iter().enumerate().filter_map(|(idx, slot)| {
+            let val = slot.as_ref()?;
+            Some((idx_as_id(idx), val))
+        });
 
         let spilled_iter = self.spilled.iter().map(|(&id, val)| (id, val));
-        let chained_iter = direct_iter.chain(spilled_iter);
-
-        #[cfg(accept_invalid_shard_ids)]
-        let chained_iter = {
-            let invalid_iter = self.invalid.iter().map(|(&id, val)| (id, val));
-            invalid_iter.chain(chained_iter)
-        };
-
-        chained_iter
+        direct_iter.chain(spilled_iter)
     }
 }
 
@@ -287,7 +253,7 @@ impl Drop for Session {
 ///
 /// URLs are formatted once during assignment processing, eliminating per-RPC
 /// `format!("http://...")` allocations.
-pub(crate) type LeaderDirectory = Arc<ArcSwap<ShardIdMap<Arc<str>>>>;
+pub type LeaderDirectory = Arc<ArcSwap<ShardIdMap<Arc<str>>>>;
 
 fn format_leader_url(a: &oxia_proto::ShardAssignment) -> Arc<str> {
     Arc::from(format!("http://{}", a.leader))
@@ -309,7 +275,7 @@ struct ClientData {
 }
 
 impl ClientData {
-    fn new(
+    const fn new(
         config: Arc<config::Config>,
         channel_pool: ChannelPool,
         shard_id: ShardId,
@@ -540,7 +506,7 @@ impl Client {
                 .map_err(|e| Error::Custom(format!("Invalid metadata value: {e}")))?,
         );
 
-        Ok(Client {
+        Ok(Self {
             data: Arc::new(ClientData::new(
                 config,
                 channel_pool,
@@ -1112,7 +1078,7 @@ mod int32_hash_range {
     }
 
     #[derive(Debug, Default)]
-    pub(crate) struct Mapper {
+    pub struct Mapper {
         ranges: Vec<Range>,
     }
 
@@ -1158,7 +1124,7 @@ mod int32_hash_range {
     }
 
     #[derive(Debug)]
-    pub(crate) struct Builder {
+    pub struct Builder {
         ranges: Vec<Range>,
     }
 
@@ -1330,7 +1296,7 @@ mod searchable {
     use super::{Client, Error, Result, ShardId, ShardIdMap, ShardMapper, int32_hash_range};
 
     #[derive(Debug, Default)]
-    pub(crate) struct Shards {
+    pub struct Shards {
         #[allow(clippy::struct_field_names)]
         shards: ShardIdMap<Client>,
         mapper: int32_hash_range::Mapper,
@@ -1338,7 +1304,7 @@ mod searchable {
     }
 
     impl Shards {
-        pub(super) fn new(
+        pub(super) const fn new(
             shards: ShardIdMap<Client>,
             mapper: int32_hash_range::Mapper,
             epoch: ShardMapEpoch,
@@ -1350,7 +1316,7 @@ mod searchable {
             }
         }
 
-        pub(super) fn epoch(&self) -> ShardMapEpoch {
+        pub(super) const fn epoch(&self) -> ShardMapEpoch {
             self.epoch
         }
 
@@ -1376,7 +1342,7 @@ mod searchable {
             self.shards.iter()
         }
 
-        pub(super) fn len(&self) -> usize {
+        pub(super) const fn len(&self) -> usize {
             self.shards.len()
         }
 
@@ -1387,12 +1353,12 @@ mod searchable {
 }
 
 #[derive(Debug)]
-pub(crate) struct NotificationsStream {
+pub struct NotificationsStream {
     inner: tonic::Streaming<oxia_proto::NotificationBatch>,
 }
 
 impl NotificationsStream {
-    fn from_proto(inner: tonic::Streaming<oxia_proto::NotificationBatch>) -> Self {
+    const fn from_proto(inner: tonic::Streaming<oxia_proto::NotificationBatch>) -> Self {
         Self { inner }
     }
 }
@@ -1502,7 +1468,7 @@ impl ShardAssignmentTask {
         Ok(())
     }
 
-    async fn process_assignments_stream(&mut self, mut s: Streaming<oxia_proto::ShardAssignments>) {
+    async fn process_assignments_stream(&self, mut s: Streaming<oxia_proto::ShardAssignments>) {
         let namespace = self.config.namespace();
         while let Some(r) = s.next().await {
             debug!(?r, "assignment");
@@ -1562,7 +1528,7 @@ impl ShardAssignmentTask {
 }
 
 #[derive(Debug)]
-pub(crate) struct Manager {
+pub struct Manager {
     shards: Arc<ArcSwap<searchable::Shards>>,
     #[allow(dead_code)]
     leaders: LeaderDirectory,
@@ -1589,7 +1555,7 @@ impl Manager {
             &refresh_signal,
         )
         .await?;
-        Ok(Manager {
+        Ok(Self {
             shards,
             leaders,
             cancel_token,
@@ -1729,8 +1695,9 @@ impl Drop for Manager {
 mod tests {
     use super::*;
 
-    fn make_shard_id(x: usize) -> ShardId {
-        i64::try_from(x).unwrap().into()
+    fn make_shard_id(x: u64) -> ShardId {
+        #[allow(clippy::cast_possible_wrap)]
+        (x as i64).into()
     }
 
     #[test]
@@ -1740,17 +1707,8 @@ mod tests {
 
         let id_negative: ShardId = (-3_i64).into();
         assert!(offsets.get(id_negative).is_none());
-        let r = offsets.insert(id_negative, 42);
-        #[cfg(accept_invalid_shard_ids)]
-        {
-            assert!(r);
-            assert_eq!(*offsets.get(id_negative).unwrap(), 42);
-        }
-        #[cfg(not(accept_invalid_shard_ids))]
-        assert!(!r);
-
-        offsets.remove(id_negative);
-        assert!(offsets.get(id_negative).is_none());
+        assert!(offsets.insert(id_negative, 42).is_none());
+        assert!(offsets.remove(id_negative).is_none());
 
         let id_zero: ShardId = 0.into();
         assert!(offsets.get(id_zero).is_none());
@@ -1759,14 +1717,14 @@ mod tests {
         offsets.remove(id_zero);
         assert!(offsets.get(id_zero).is_none());
 
-        let id_direct = make_shard_id(DIRECT_ID_MAX - 2);
+        let id_direct = make_shard_id(DIRECT_ID_SLOTS - 2);
         assert!(offsets.get(id_direct).is_none());
         offsets.insert(id_direct, 42);
         assert_eq!(*offsets.get(id_direct).unwrap(), 42);
         offsets.remove(id_direct);
         assert!(offsets.get(id_direct).is_none());
 
-        let id_spilled = make_shard_id(DIRECT_ID_MAX + 13);
+        let id_spilled = make_shard_id(DIRECT_ID_SLOTS + 13);
         assert!(offsets.get(id_spilled).is_none());
         offsets.insert(id_spilled, 42);
         assert_eq!(*offsets.get(id_spilled).unwrap(), 42);
