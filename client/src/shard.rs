@@ -1063,11 +1063,16 @@ trait ShardMapperBuilder {
 }
 
 mod int32_hash_range {
-    use crate::{OverlappingRanges, ServerError, ShardId};
+    use crate::OverlappingRanges;
+    use crate::ServerError;
+    use crate::ShardId;
 
-    use super::{Result, ShardMapper, ShardMapperBuilder};
+    use super::Result;
+    use super::ShardMapper;
+    use super::ShardMapperBuilder;
     use mauricebarnum_oxia_common::proto as oxia_proto;
-    use std::{cmp::Ordering, collections::HashSet};
+    use std::cmp::Ordering;
+    use std::collections::HashSet;
     use xxhash_rust::xxh3::xxh3_64;
 
     #[derive(Debug)]
@@ -1293,7 +1298,13 @@ mod int32_hash_range {
 mod searchable {
     use crate::shard::ShardMapEpoch;
 
-    use super::{Client, Error, Result, ShardId, ShardIdMap, ShardMapper, int32_hash_range};
+    use super::Client;
+    use super::Error;
+    use super::Result;
+    use super::ShardId;
+    use super::ShardIdMap;
+    use super::ShardMapper;
+    use super::int32_hash_range;
 
     #[derive(Debug, Default)]
     pub struct Shards {
@@ -1763,7 +1774,8 @@ mod tests {
 
     mod client_tests {
         use super::*;
-        use crate::{config::Config, pool::ChannelPool};
+        use crate::config::Config;
+        use crate::pool::ChannelPool;
 
         fn make_test_config() -> Arc<config::Config> {
             Config::builder().service_addr("localhost:1234").build()
@@ -1789,6 +1801,7 @@ mod tests {
             .unwrap()
         }
 
+        #[cfg(not(miri))] // Miri doesn't support network operations (getaddrinfo)
         #[test_log::test(tokio::test)]
         async fn test_client_get_leader() {
             let config = make_test_config();
@@ -1812,6 +1825,7 @@ mod tests {
             assert!(result.is_err());
         }
 
+        #[cfg(not(miri))] // Miri doesn't support network operations (getaddrinfo)
         #[test_log::test(tokio::test)]
         async fn test_client_invalidate_on_empty_pool() {
             let config = make_test_config();
