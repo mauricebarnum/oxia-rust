@@ -51,7 +51,7 @@ CI uses `--release --frozen`. Local: omit.
 
 ## Coding Style
 
-- Clippy: All lints (exceptions documented).
+- Clippy: Settings are in workspace Cargo.toml
 - **Imports**: Prefer unmerged `use` statements (one item per line). No `use std::{foo, bar};` merging.
 - Docs: Terse; Rust API guidelines; `const fn`.
 - Github: Draft PRs; `--force-with-lease`; tests/clippy pre-push. Ignore local `main`. [file:43]
