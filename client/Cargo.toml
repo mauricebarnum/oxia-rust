@@ -23,6 +23,10 @@ backon = "1.6.0"
 arc-swap = "1.8"
 tokio-util = "0.7.18"
 bon = { version = "3.8.2", features = ["implied-bounds"] }
+dashmap = { version = "6", optional = true }
+
+[features]
+bench-dashmap = ["dep:dashmap"]
 
 [dev-dependencies]
 tokio = { version = "1.49.0", features = ["rt-multi-thread", "macros"] }
@@ -38,6 +42,10 @@ criterion = "0.8"
 
 [[bench]]
 name = "shard_lookup"
+harness = false
+
+[[bench]]
+name = "channel_pool"
 harness = false
 
 [lints]
