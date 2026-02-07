@@ -14,15 +14,26 @@
 
 #![allow(clippy::missing_panics_doc)]
 
-use mauricebarnum_oxia_client::errors::Error as ClientError;
-use mauricebarnum_oxia_client::{Client, config};
+use std::env;
+use std::fs;
+use std::io;
+use std::io::Write;
 use std::net::TcpStream;
 use std::num::NonZeroU32;
+use std::path;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::path::PathBuf;
+use std::process::Child;
+use std::process::Command;
+use std::process::Stdio;
+use std::sync::Arc;
 use std::thread::sleep;
-use std::time::{Duration, Instant};
-use std::{io, path};
+use std::time::Duration;
+use std::time::Instant;
+
+use mauricebarnum_oxia_client::Client;
+use mauricebarnum_oxia_client::config;
+use mauricebarnum_oxia_client::errors::Error as ClientError;
 use tempfile::TempDir;
 
 #[inline]
@@ -71,6 +82,20 @@ pub fn oxia_cli_path() -> &'static Path {
     p
 }
 
+/// Create a test temp directory. Auto-cleaned on drop unless
+/// `OXIA_KEEP_TEST_DATA=1` is set.
+fn test_tempdir() -> io::Result<TempDir> {
+    let keep = env::var("OXIA_KEEP_TEST_DATA")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("oxia-test-");
+    if keep {
+        builder.disable_cleanup(true);
+    }
+    trace_err!(builder.tempdir())
+}
+
 // Attempt to find `n` unallocated ports.  This function is racy:
 // by the time it returns, the ports may be re-allocated.
 pub fn find_free_ports(n: usize) -> io::Result<Vec<u16>> {
@@ -114,6 +139,42 @@ pub fn wait_for_ready(addr: &str, timeout_secs: u64) -> io::Result<()> {
     ))
 }
 
+/// Wait for the gRPC health service on `addr` to report SERVING.
+///
+/// This polls `oxia health` until it succeeds or `timeout_secs` elapses.
+/// The `oxia-readiness` service transitions to SERVING only after the server
+/// receives its first shard assignment from the coordinator.
+pub fn wait_for_health(addr: &str, service: &str, timeout_secs: u64) -> io::Result<()> {
+    let (host, port) = addr
+        .rsplit_once(':')
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, format!("bad addr: {addr}")))?;
+    let start = Instant::now();
+    while start.elapsed().as_secs() < timeout_secs {
+        let status = Command::new(oxia_cli_path())
+            .arg("health")
+            .arg("--host")
+            .arg(host)
+            .arg("--port")
+            .arg(port)
+            .arg("--service")
+            .arg(service)
+            .arg("--timeout")
+            .arg("2s")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        match status {
+            Ok(s) if s.success() => return Ok(()),
+            _ => sleep(Duration::from_millis(200)),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!("health check for {addr} ({service}) did not pass within {timeout_secs}s"),
+    ))
+}
+
 struct TestServerArgs {
     service_addr: String,
     metrics_addr: String,
@@ -154,7 +215,7 @@ pub struct TestServer {
 impl TestServer {
     pub fn start_nshards(nshards: NonZeroU32) -> io::Result<Self> {
         let [service_port, metrics_port] = trace_err!(find_free_ports(2))?.try_into().unwrap();
-        let data_dir = trace_err!(tempfile::Builder::new().disable_cleanup(true).tempdir())?;
+        let data_dir = trace_err!(test_tempdir())?;
         let args = TestServerArgs {
             service_addr: format!("127.0.0.1:{service_port}"),
             metrics_addr: format!("127.0.0.1:{metrics_port}"),
@@ -175,7 +236,9 @@ impl TestServer {
     }
 
     pub fn shutdown(&mut self) -> io::Result<()> {
-        self.process.kill()
+        self.process.kill()?;
+        self.process.wait()?;
+        Ok(())
     }
 
     pub fn restart(&mut self) -> io::Result<()> {
@@ -208,4 +271,450 @@ impl Drop for TestServer {
     fn drop(&mut self) {
         let _ = self.shutdown();
     }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-server cluster test infrastructure
+// ---------------------------------------------------------------------------
+
+#[allow(dead_code)]
+struct ServerNode {
+    public_addr: String,
+    internal_addr: String,
+    metrics_addr: String,
+    data_dir: PathBuf,
+    wal_dir: PathBuf,
+    process: Option<Child>,
+}
+
+#[allow(dead_code)]
+struct CoordinatorNode {
+    internal_addr: String,
+    metrics_addr: String,
+    admin_addr: String,
+    process: Child,
+}
+
+#[allow(dead_code)]
+pub struct TestCluster {
+    pub data_dir: TempDir,
+    servers: Vec<ServerNode>,
+    coordinator: CoordinatorNode,
+    /// The public address of the first server (used for client connections).
+    service_addr: String,
+}
+
+#[allow(dead_code)]
+impl TestCluster {
+    /// Start a cluster with `num_servers` data nodes and one coordinator.
+    ///
+    /// `replication_factor` and `initial_shard_count` configure the namespace.
+    #[allow(clippy::too_many_lines)]
+    pub fn start(
+        num_servers: usize,
+        replication_factor: u32,
+        initial_shard_count: u32,
+    ) -> io::Result<Self> {
+        assert!(num_servers >= 2, "cluster needs at least 2 servers");
+        // 3 ports per server (public, internal, metrics) + 3 for coordinator
+        let total_ports = num_servers * 3 + 3;
+        let ports = trace_err!(find_free_ports(total_ports))?;
+
+        let data_dir = trace_err!(test_tempdir())?;
+
+        // Partition ports: servers first, then coordinator
+        let server_ports = &ports[..num_servers * 3];
+        let coord_ports = &ports[num_servers * 3..];
+
+        // Build server metadata for YAML config
+        #[allow(clippy::items_after_statements)]
+        struct ServerAddr {
+            public: String,
+            internal: String,
+            metrics: String,
+        }
+
+        let server_addrs: Vec<ServerAddr> = (0..num_servers)
+            .map(|i| {
+                let base = i * 3;
+                ServerAddr {
+                    public: format!("127.0.0.1:{}", server_ports[base]),
+                    internal: format!("127.0.0.1:{}", server_ports[base + 1]),
+                    metrics: format!("127.0.0.1:{}", server_ports[base + 2]),
+                }
+            })
+            .collect();
+
+        let coord_internal = format!("127.0.0.1:{}", coord_ports[0]);
+        let coord_metrics = format!("127.0.0.1:{}", coord_ports[1]);
+        let coord_admin = format!("127.0.0.1:{}", coord_ports[2]);
+
+        // Write cluster-config.yaml
+        let config_path = data_dir.path().join("cluster-config.yaml");
+        {
+            let mut f = trace_err!(fs::File::create(&config_path))?;
+            trace_err!(writeln!(f, "namespaces:"))?;
+            trace_err!(writeln!(f, "  - name: \"default\""))?;
+            trace_err!(writeln!(f, "    replicationFactor: {replication_factor}"))?;
+            trace_err!(writeln!(f, "    initialShardCount: {initial_shard_count}"))?;
+            trace_err!(writeln!(f, "servers:"))?;
+            for sa in &server_addrs {
+                trace_err!(writeln!(f, "  - public: \"{}\"", sa.public))?;
+                trace_err!(writeln!(f, "    internal: \"{}\"", sa.internal))?;
+            }
+        }
+
+        // Start data servers
+        let mut servers = Vec::with_capacity(num_servers);
+        for (i, sa) in server_addrs.iter().enumerate() {
+            let srv_data = data_dir.path().join(format!("server-{i}"));
+            let srv_db = srv_data.join("db");
+            let srv_wal = srv_data.join("wal");
+
+            let child = trace_err!(
+                Command::new(oxia_cli_path())
+                    .arg("server")
+                    .arg("-p")
+                    .arg(&sa.public)
+                    .arg("-i")
+                    .arg(&sa.internal)
+                    .arg("-m")
+                    .arg(&sa.metrics)
+                    .arg("--data-dir")
+                    .arg(&srv_db)
+                    .arg("--wal-dir")
+                    .arg(&srv_wal)
+                    .stdin(Stdio::null())
+                    .spawn()
+            )?;
+
+            servers.push(ServerNode {
+                public_addr: sa.public.clone(),
+                internal_addr: sa.internal.clone(),
+                metrics_addr: sa.metrics.clone(),
+                data_dir: srv_db,
+                wal_dir: srv_wal,
+                process: Some(child),
+            });
+        }
+
+        // Wait for each server's public port to be reachable
+        for srv in &servers {
+            trace_err!(wait_for_ready(&srv.public_addr, 30))?;
+        }
+
+        // Start coordinator
+        let coord_process = trace_err!(
+            Command::new(oxia_cli_path())
+                .arg("coordinator")
+                .arg("-f")
+                .arg(&config_path)
+                .arg("--metadata")
+                .arg("memory")
+                .arg("-i")
+                .arg(&coord_internal)
+                .arg("-m")
+                .arg(&coord_metrics)
+                .arg("-a")
+                .arg(&coord_admin)
+                .stdin(Stdio::null())
+                .spawn()
+        )?;
+
+        let coordinator = CoordinatorNode {
+            internal_addr: coord_internal,
+            metrics_addr: coord_metrics,
+            admin_addr: coord_admin,
+            process: coord_process,
+        };
+
+        // Wait for coordinator's internal port
+        trace_err!(wait_for_ready(&coordinator.internal_addr, 30))?;
+
+        // Wait for each server to receive shard assignments from the
+        // coordinator.  The `oxia-readiness` gRPC health service transitions
+        // to SERVING only after the first shard assignment arrives.
+        for srv in &servers {
+            trace_err!(wait_for_health(&srv.internal_addr, "oxia-readiness", 30))?;
+        }
+
+        // Brief pause for shard leader elections to settle after assignment
+        // propagation.
+        sleep(Duration::from_secs(2));
+
+        let service_addr = servers[0].public_addr.clone();
+
+        Ok(Self {
+            data_dir,
+            servers,
+            coordinator,
+            service_addr,
+        })
+    }
+
+    pub fn shutdown(&mut self) {
+        let _ = self.coordinator.process.kill();
+        let _ = self.coordinator.process.wait();
+        for srv in &mut self.servers {
+            if let Some(ref mut p) = srv.process {
+                let _ = p.kill();
+                let _ = p.wait();
+            }
+        }
+    }
+
+    /// Number of server nodes (running or stopped).
+    pub const fn server_count(&self) -> usize {
+        self.servers.len()
+    }
+
+    /// SIGKILL a server (immediate death -> connection errors).
+    ///
+    /// Index 0 is protected because the shard assignment stream connects
+    /// to server 0.
+    pub fn kill_server(&mut self, index: usize) -> io::Result<()> {
+        assert!(index > 0, "cannot kill server 0 (assignment stream)");
+        let srv = &mut self.servers[index];
+        let mut p = srv
+            .process
+            .take()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "server already stopped"))?;
+        p.kill()?;
+        p.wait()?;
+        Ok(())
+    }
+
+    /// SIGTERM a server (graceful shutdown -> may produce wrong-leader
+    /// errors).
+    ///
+    /// Index 0 is protected because the shard assignment stream connects
+    /// to server 0.
+    pub fn stop_server(&mut self, index: usize) -> io::Result<()> {
+        assert!(index > 0, "cannot stop server 0 (assignment stream)");
+        let srv = &mut self.servers[index];
+        let mut p = srv
+            .process
+            .take()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "server already stopped"))?;
+        let pid = nix::unistd::Pid::from_raw(i32::try_from(p.id()).expect("pid does not fit i32"));
+        nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM).map_err(io::Error::other)?;
+        p.wait()?;
+        Ok(())
+    }
+
+    /// Restart a previously stopped server on the same ports and data
+    /// directory.
+    pub fn restart_server(&mut self, index: usize) -> io::Result<()> {
+        let srv = &mut self.servers[index];
+        assert!(srv.process.is_none(), "server {index} is still running");
+        let child = trace_err!(
+            Command::new(oxia_cli_path())
+                .arg("server")
+                .arg("-p")
+                .arg(&srv.public_addr)
+                .arg("-i")
+                .arg(&srv.internal_addr)
+                .arg("-m")
+                .arg(&srv.metrics_addr)
+                .arg("--data-dir")
+                .arg(&srv.data_dir)
+                .arg("--wal-dir")
+                .arg(&srv.wal_dir)
+                .stdin(Stdio::null())
+                .spawn()
+        )?;
+        srv.process = Some(child);
+        trace_err!(wait_for_ready(&srv.public_addr, 30))?;
+        trace_err!(wait_for_health(&srv.internal_addr, "oxia-readiness", 30))?;
+        sleep(Duration::from_secs(2));
+        Ok(())
+    }
+
+    /// Connect a client to the cluster, retrying to handle asynchronous shard
+    /// assignment propagation.
+    pub async fn connect(&self) -> Result<Client, ClientError> {
+        self.connect_with(config::Config::builder()).await
+    }
+
+    pub async fn connect_with<S>(
+        &self,
+        opts: config::ConfigBuilder<S>,
+    ) -> Result<Client, ClientError>
+    where
+        S: config::config_builder::State,
+        S::ServiceAddr: config::config_builder::IsUnset,
+    {
+        let cfg = opts.service_addr(self.service_addr.clone()).build();
+
+        let mut last_err = None;
+        for attempt in 0..10 {
+            let mut client = Client::new(Arc::clone(&cfg));
+            match client.connect().await {
+                Ok(()) => return Ok(client),
+                Err(e) => {
+                    tracing::warn!(attempt, ?e, "cluster connect attempt failed, retrying");
+                    last_err = Some(e);
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                }
+            }
+        }
+        Err(last_err.unwrap())
+    }
+}
+
+impl Drop for TestCluster {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TestEnv trait + parameterized test infrastructure
+// ---------------------------------------------------------------------------
+
+#[allow(dead_code)]
+pub trait TestEnv: Send + Sync {
+    fn service_addr(&self) -> &str;
+    fn needs_connect_retry(&self) -> bool;
+    fn test_timeout(&self) -> Duration;
+}
+
+impl TestEnv for TestServer {
+    fn service_addr(&self) -> &str {
+        &self.args.service_addr
+    }
+
+    fn needs_connect_retry(&self) -> bool {
+        false
+    }
+
+    fn test_timeout(&self) -> Duration {
+        Duration::from_secs(10)
+    }
+}
+
+impl TestEnv for TestCluster {
+    fn service_addr(&self) -> &str {
+        &self.service_addr
+    }
+
+    fn needs_connect_retry(&self) -> bool {
+        true
+    }
+
+    fn test_timeout(&self) -> Duration {
+        Duration::from_secs(60)
+    }
+}
+
+#[allow(dead_code)]
+pub async fn connect_env(env: &(impl TestEnv + ?Sized)) -> Result<Client, ClientError> {
+    connect_env_with(env, config::Config::builder()).await
+}
+
+#[allow(dead_code)]
+pub async fn connect_env_with<S>(
+    env: &(impl TestEnv + ?Sized),
+    opts: config::ConfigBuilder<S>,
+) -> Result<Client, ClientError>
+where
+    S: config::config_builder::State,
+    S::ServiceAddr: config::config_builder::IsUnset,
+{
+    let cfg = opts.service_addr(env.service_addr().to_owned()).build();
+
+    if env.needs_connect_retry() {
+        let mut last_err = None;
+        for attempt in 0..10 {
+            let mut client = Client::new(Arc::clone(&cfg));
+            match client.connect().await {
+                Ok(()) => return Ok(client),
+                Err(e) => {
+                    tracing::warn!(attempt, ?e, "connect attempt failed, retrying");
+                    last_err = Some(e);
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                }
+            }
+        }
+        Err(last_err.unwrap())
+    } else {
+        let mut client = Client::new(cfg);
+        client.connect().await?;
+        Ok(client)
+    }
+}
+
+#[allow(dead_code)]
+pub enum TestConfig {
+    Standalone {
+        shards: NonZeroU32,
+    },
+    Cluster {
+        servers: usize,
+        rf: u32,
+        shards: u32,
+    },
+}
+
+#[allow(dead_code)]
+impl TestConfig {
+    pub const fn standalone(shards: u32) -> Self {
+        Self::Standalone {
+            shards: NonZeroU32::new(shards).unwrap(),
+        }
+    }
+
+    pub const fn cluster(servers: usize, rf: u32, shards: u32) -> Self {
+        Self::Cluster {
+            servers,
+            rf,
+            shards,
+        }
+    }
+
+    pub fn start(&self) -> io::Result<Box<dyn TestEnv>> {
+        match *self {
+            Self::Standalone { shards } => {
+                let server = TestServer::start_nshards(shards)?;
+                Ok(Box::new(server))
+            }
+            Self::Cluster {
+                servers,
+                rf,
+                shards,
+            } => {
+                let cluster = TestCluster::start(servers, rf, shards)?;
+                Ok(Box::new(cluster))
+            }
+        }
+    }
+}
+
+#[macro_export]
+macro_rules! parameterized_test {
+    ($test_fn:ident, [ $( $name:ident : $config:expr ),+ $(,)? ]) => {
+        mod $test_fn {
+            use super::*;
+            $(
+                #[test_log::test(tokio::test)]
+                async fn $name() -> anyhow::Result<()> {
+                    let env = $config.start()?;
+                    let timeout = env.test_timeout();
+                    tokio::time::timeout(timeout, super::$test_fn(env.as_ref())).await?
+                }
+            )+
+        }
+    };
+}
+
+/// Invoke `parameterized_test!` with the standard 3-config matrix.
+#[macro_export]
+macro_rules! parameterized_test_standard {
+    ($test_fn:ident) => {
+        parameterized_test!($test_fn, [
+            standalone_1s:  common::TestConfig::standalone(1),
+            standalone_4s:  common::TestConfig::standalone(4),
+            cluster_3n_6s:  common::TestConfig::cluster(3, 2, 6),
+        ]);
+    };
 }

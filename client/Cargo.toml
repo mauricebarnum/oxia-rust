@@ -39,6 +39,7 @@ tempfile = "3.24.0"
 anyhow = "1.0.101"
 itertools = "0.14.0"
 criterion = "0.8"
+nix = { version = "0.30", default-features = false, features = ["signal"] }
 
 [[bench]]
 name = "shard_lookup"

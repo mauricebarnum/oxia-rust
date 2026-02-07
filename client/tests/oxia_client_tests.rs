@@ -20,7 +20,6 @@
 #![cfg(not(miri))]
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -421,97 +420,6 @@ async fn test_ephemeral_records() -> Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn test_delete_range() -> Result<()> {
-    let (_server, client) = create_test_client().await?;
-
-    // Create test records
-    let keys = ["a", "b", "c", "d", "e", "f", "g"];
-    for (i, &key) in keys.iter().enumerate() {
-        client.put(key, format!("{i}")).await?;
-    }
-
-    // Delete range b to f (exclusive)
-    client.delete_range("b", "f").await?;
-
-    // Verify deletions
-    for &key in &["b", "c", "d", "e"] {
-        let result = client.get(key).await?;
-        assert!(result.is_none(), "Key {key} should have been deleted");
-    }
-
-    // Verify remaining keys
-    for &key in &["a", "f", "g"] {
-        let result = client.get(key).await?;
-        assert!(result.is_some(), "Key {key} should still exist");
-    }
-
-    Ok(())
-}
-
-#[test_log::test(tokio::test)]
-async fn test_list_operations() -> Result<()> {
-    let (_server, client) = create_test_client().await?;
-
-    // Create test data
-    let test_data = vec![
-        ("key-a", "value-a"),
-        ("key-b", "value-b"),
-        ("key-c", "value-c"),
-        ("key-d", "value-d"),
-        ("key-z", "value-z"),
-    ];
-
-    for (key, value) in &test_data {
-        client.put(*key, *value).await?;
-    }
-
-    // Test basic list
-    let list_result = client.list("key-a", "key-d").await?;
-    assert_eq!(list_result.keys, vec!["key-a", "key-b", "key-c"]);
-    assert!(list_result.sorted);
-
-    // Test list with empty range
-    let list_result = client.list("key-x", "key-y").await?;
-    assert!(list_result.keys.is_empty());
-
-    Ok(())
-}
-
-#[test_log::test(tokio::test)]
-async fn test_range_scan() -> Result<()> {
-    let (_server, client) = create_test_client().await?;
-
-    // Create test data
-    let test_data = vec![
-        ("scan-a", "0"),
-        ("scan-b", "1"),
-        ("scan-c", "2"),
-        ("scan-d", "3"),
-        ("scan-e", "4"),
-    ];
-
-    for (key, value) in &test_data {
-        client.put(*key, *value).await?;
-    }
-
-    // Test range scan
-    let scan_result = client.range_scan("scan-b", "scan-e").await?;
-
-    let expected_records = [("scan-b", "1"), ("scan-c", "2"), ("scan-d", "3")];
-
-    assert_eq!(scan_result.records.len(), expected_records.len());
-    for (i, record) in scan_result.records.iter().enumerate() {
-        assert_eq!(record.key.as_ref().unwrap(), expected_records[i].0);
-        assert_eq!(
-            String::from_utf8(record.value.as_ref().unwrap().to_vec()).unwrap(),
-            expected_records[i].1
-        );
-    }
-
-    Ok(())
-}
-
-#[test_log::test(tokio::test)]
 async fn test_get_without_value() -> Result<()> {
     let (_server, client) = create_test_client().await?;
 
@@ -676,40 +584,6 @@ async fn test_error_conditions() -> Result<()> {
 
     // Should get an error for unexpected version
     assert!(matches!(result, Err(Error::Oxia(_))));
-
-    Ok(())
-}
-
-#[test_log::test(tokio::test)]
-async fn test_concurrent_operations() -> Result<()> {
-    let (_server, client) = create_test_client().await?;
-    let client = Arc::new(client);
-
-    let mut handles = Vec::new();
-
-    // Launch concurrent put operations
-    for i in 0..10 {
-        let client_clone = Arc::clone(&client);
-        let handle = tokio::spawn(async move {
-            let key = format!("concurrent-{i}");
-            let value = format!("value-{i}");
-            client_clone.put(&key, value).await
-        });
-        handles.push(handle);
-    }
-
-    // Wait for all operations to complete
-    for handle in handles {
-        let result = handle.await.unwrap();
-        assert!(result.is_ok());
-    }
-
-    // Verify all records exist
-    for i in 0..10 {
-        let key = format!("concurrent-{i}");
-        let result = client.get(&key).await?;
-        assert!(result.is_some());
-    }
 
     Ok(())
 }

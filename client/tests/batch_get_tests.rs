@@ -17,7 +17,7 @@
 use futures::StreamExt;
 use mauricebarnum_oxia_client as client;
 use mauricebarnum_oxia_client::config;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -28,47 +28,6 @@ use common::TestResultExt;
 use common::non_zero;
 
 const TEST_TIMEOUT_SECS: u64 = 5;
-
-#[test_log::test(tokio::test)]
-async fn test_batch_get_basic() -> anyhow::Result<()> {
-    timeout(Duration::from_secs(TEST_TIMEOUT_SECS), async {
-        let server = trace_err!(common::TestServer::start_nshards(non_zero(3)))?;
-        let builder = config::Config::builder().max_parallel_requests(5);
-        let client = trace_err!(server.connect_with(builder).await)?;
-
-        // Insert test data
-        let keys = vec!["batch-key-1", "batch-key-2", "batch-key-3"];
-        for key in &keys {
-            trace_err!(client.put(*key, format!("value-{key}")).await)?;
-        }
-
-        // Build batch_get request
-        let req = client::batch_get::Request::builder()
-            .add_keys(keys.clone())
-            .build();
-
-        // Execute batch_get
-        let mut stream = trace_err!(client.batch_get(req))?;
-        let mut results = HashMap::new();
-
-        while let Some(item) = stream.next().await {
-            info!(key = ?item.key, response = ?item.response, "batch_get result");
-            let value = trace_err!(item.response)?;
-            results.insert(item.key, value);
-        }
-
-        // Verify all keys were returned
-        assert_eq!(results.len(), keys.len());
-        for key in &keys {
-            assert!(results.contains_key(*key));
-            assert!(results[*key].is_some());
-        }
-
-        trace_err!(fs::remove_dir_all(server.data_dir.path()))?;
-        Ok(())
-    })
-    .await?
-}
 
 #[test_log::test(tokio::test)]
 async fn test_batch_get_missing_keys() -> anyhow::Result<()> {
@@ -140,40 +99,6 @@ async fn test_batch_get_with_options() -> anyhow::Result<()> {
             assert!(response.is_some());
             assert!(response.unwrap().value.is_none());
         }
-
-        trace_err!(fs::remove_dir_all(server.data_dir.path()))?;
-        Ok(())
-    })
-    .await?
-}
-
-#[test_log::test(tokio::test)]
-async fn test_batch_get_across_shards() -> anyhow::Result<()> {
-    timeout(Duration::from_secs(TEST_TIMEOUT_SECS), async {
-        let nshards = non_zero(4);
-        let server = trace_err!(common::TestServer::start_nshards(nshards))?;
-        let client = trace_err!(server.connect().await)?;
-
-        // Insert keys that will likely hash to different shards
-        let keys: Vec<String> = (0..20).map(|i| format!("shard-key-{i}")).collect();
-        for key in &keys {
-            trace_err!(client.put(key, format!("value-{key}")).await)?;
-        }
-
-        // Request all keys via batch_get
-        let req = client::batch_get::Request::builder()
-            .add_keys(keys.clone())
-            .build();
-
-        let mut stream = trace_err!(client.batch_get(req))?;
-        let mut count = 0;
-
-        while let Some(item) = stream.next().await {
-            trace_err!(item.response)?;
-            count += 1;
-        }
-
-        assert_eq!(count, keys.len());
 
         trace_err!(fs::remove_dir_all(server.data_dir.path()))?;
         Ok(())

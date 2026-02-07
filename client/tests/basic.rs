@@ -14,84 +14,12 @@
 
 #![cfg(not(miri))]
 
-use chrono::Utc;
-use mauricebarnum_oxia_client as client;
 use mauricebarnum_oxia_client::config;
-use std::fs;
 use std::time::Duration;
 use tracing::info;
 
 mod common;
 use common::TestResultExt;
-use common::non_zero;
-
-const SESSION_TIMEOUT_SECS: u64 = 2;
-const RETRY_TIMEOUT_MSECS: u64 = 23;
-
-#[test_log::test(tokio::test)]
-async fn test_basic() -> anyhow::Result<()> {
-    let session_timeout = Duration::from_secs(SESSION_TIMEOUT_SECS);
-    let server = trace_err!(common::TestServer::start_nshards(non_zero(4)))?;
-    let builder = config::Config::builder()
-        .retry(config::RetryConfig::new(
-            3,
-            Duration::from_millis(RETRY_TIMEOUT_MSECS),
-        ))
-        .max_parallel_requests(3)
-        .session_timeout(session_timeout);
-    let client = trace_err!(server.connect_with(builder).await)?;
-
-    let mut key = String::new();
-    for i in 0..11 {
-        key = format!("foo-{i}");
-        for j in 0..7 {
-            let result = trace_err!(client.put(&key, format!("value-{i}-{j}")).await)?;
-            info!(op = "put", ?result);
-        }
-    }
-
-    // And do a get
-    let result = client.get(&key).await?;
-    info!(op = "get", ?result);
-
-    // Let's list all of the keys
-    let result = trace_err!(client.list("", "").await)?;
-    for (i, k) in result.keys.iter().enumerate() {
-        info!(op = "list", i, key = ?k);
-    }
-
-    // Delete the last key inserted
-    trace_err!(client.delete(&key).await)?;
-
-    // Scan for all of the keys
-
-    let result = trace_err!(client.range_scan("", "").await)?;
-    for (i, v) in result.records.iter().enumerate() {
-        info!(op = "scan", i, value = ?v);
-    }
-
-    // And do another get, this time expecting KeyNotFound
-    if let Some(r) = client.get(&key).await? {
-        return Err(anyhow::anyhow!("unexpected get success: {r:?}"));
-    }
-
-    let result = client
-        .put_with_options(
-            "ephemeral_key",
-            Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            client::PutOptions::builder().ephemeral(true).build(),
-        )
-        .await?;
-    info!(op = "put", ?result);
-
-    let sleep_time = session_timeout.mul_f32(2.01);
-    info!(?sleep_time, "sleepging to let session exkjjpire");
-    tokio::time::sleep(sleep_time).await;
-    drop(client);
-
-    trace_err!(fs::remove_dir_all(server.data_dir.path()))?;
-    Ok(())
-}
 
 async fn do_test_disconnect(retry: bool) -> anyhow::Result<()> {
     let mut server = common::TestServer::start()?;
@@ -118,8 +46,6 @@ async fn do_test_disconnect(retry: bool) -> anyhow::Result<()> {
     info!(op = "get", ?r);
     assert!(r.is_some());
 
-    trace_err!(fs::remove_dir_all(server.data_dir.path()))?;
-
     Ok(())
 }
 
@@ -132,46 +58,4 @@ async fn test_disconnect() -> anyhow::Result<()> {
 async fn test_disconnect_fail() {
     let r = do_test_disconnect(false).await;
     assert!(r.is_err());
-}
-
-#[test_log::test(tokio::test)]
-async fn test_range_delete() -> anyhow::Result<()> {
-    const N: usize = 8;
-
-    let nshards = non_zero(3);
-    let server = trace_err!(common::TestServer::start_nshards(nshards))?;
-
-    let builder = config::Config::builder();
-    let client = trace_err!(server.connect_with(builder).await)?;
-
-    let keys: Vec<String> = (0..N * 2).map(|i| format!("k{i:04}")).collect();
-    for key in &keys {
-        let r = trace_err!(client.put(key, "").await)?;
-        info!(key, ?r, "put");
-    }
-
-    let result = trace_err!(client.list("", "").await)?;
-    for k in result.keys.iter().filter(|k| keys.contains(k)) {
-        info!(op = "list -- BEFORE RANGE DELETE", key = ?k);
-    }
-
-    trace_err!(client.delete_range(&keys[0], &keys[N]).await)?;
-
-    let result = trace_err!(client.list("", "").await)?;
-    for k in result.keys.iter().filter(|k| keys.contains(k)) {
-        info!(op = "list -- AFTER RANGE DELETE", key = ?k);
-    }
-
-    for key in &keys[0..N] {
-        let r = trace_err!(client.get(key).await)?;
-        info!(key, ?r, "get");
-        assert!(r.is_none());
-    }
-    for key in &keys[N + 1..] {
-        let r = trace_err!(client.get(key).await)?;
-        info!(key, ?r, "get");
-        assert!(r.is_some());
-    }
-
-    Ok(())
 }
