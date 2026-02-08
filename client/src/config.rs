@@ -17,6 +17,9 @@ use std::time::Duration;
 
 use bon::Builder;
 
+use crate::discovery::IntoServiceDiscovery;
+use crate::discovery::ServiceDiscovery;
+
 #[derive(Clone, Copy, Debug)]
 pub struct RetryConfig {
     pub(crate) attempts: usize,
@@ -45,7 +48,8 @@ impl RetryConfig {
 #[builder(on(String, into))]
 #[builder(state_mod(vis = "pub"))]
 pub struct Config {
-    service_addr: String,
+    #[builder(with = |p: impl IntoServiceDiscovery| p.into_arc())]
+    service_discovery: Arc<dyn ServiceDiscovery>,
     #[builder(default = "default")]
     namespace: String,
     #[builder(default)]
@@ -61,9 +65,10 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn service_addr(&self) -> &str {
-        &self.service_addr
+    pub fn service_discovery(&self) -> Arc<dyn ServiceDiscovery> {
+        Arc::clone(&self.service_discovery)
     }
+
     pub fn namespace(&self) -> &str {
         &self.namespace
     }
@@ -88,6 +93,18 @@ impl Config {
 }
 
 impl<S: config_builder::State> ConfigBuilder<S> {
+    /// Convenience for the simple case
+    pub fn service_addr(
+        self,
+        service_addr: impl Into<String>,
+    ) -> ConfigBuilder<config_builder::SetServiceDiscovery<S>>
+    where
+        S::ServiceDiscovery: config_builder::IsUnset,
+    {
+        use crate::discovery::StaticServiceDiscovery;
+        self.service_discovery(StaticServiceDiscovery::single(service_addr))
+    }
+
     pub fn build(self) -> Arc<Config>
     where
         S: config_builder::IsComplete,

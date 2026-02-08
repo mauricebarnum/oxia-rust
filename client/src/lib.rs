@@ -34,6 +34,7 @@ use crate::shard::ShardMapEpoch;
 
 pub mod batch_get;
 pub mod config;
+pub mod discovery;
 pub mod errors;
 mod notification;
 mod pool;

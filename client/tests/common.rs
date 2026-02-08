@@ -259,10 +259,9 @@ impl TestServer {
     ) -> Result<Client, ClientError>
     where
         S: config::config_builder::State,
-        S::ServiceAddr: config::config_builder::IsUnset,
+        S::ServiceDiscovery: config::config_builder::IsUnset,
     {
-        let service_addr = self.args.service_addr.clone();
-        let config = opts.service_addr(service_addr).build();
+        let config = opts.service_addr(self.args.service_addr.clone()).build();
         let mut client = Client::new(config);
         trace_err!(client.connect().await)?;
         Ok(client)
@@ -458,6 +457,10 @@ impl TestCluster {
         })
     }
 
+    pub fn coordinator_admin_addr(&self) -> &str {
+        &self.coordinator.admin_addr
+    }
+
     pub fn shutdown(&mut self) {
         let _ = self.coordinator.process.kill();
         let _ = self.coordinator.process.wait();
@@ -472,6 +475,11 @@ impl TestCluster {
     /// Number of server nodes (running or stopped).
     pub const fn server_count(&self) -> usize {
         self.servers.len()
+    }
+
+    /// Returns the public addresses of all servers.
+    pub fn server_addrs(&self) -> Vec<String> {
+        self.servers.iter().map(|s| s.public_addr.clone()).collect()
     }
 
     /// SIGKILL a server (immediate death -> connection errors).
@@ -540,7 +548,7 @@ impl TestCluster {
     ) -> Result<Client, ClientError>
     where
         S: config::config_builder::State,
-        S::ServiceAddr: config::config_builder::IsUnset,
+        S::ServiceDiscovery: config::config_builder::IsUnset,
     {
         let cfg = opts.service_addr(self.service_addr.clone()).build();
 
@@ -617,7 +625,7 @@ pub async fn connect_env_with<S>(
 ) -> Result<Client, ClientError>
 where
     S: config::config_builder::State,
-    S::ServiceAddr: config::config_builder::IsUnset,
+    S::ServiceDiscovery: config::config_builder::IsUnset,
 {
     let cfg = opts.service_addr(env.service_addr().to_owned()).build();
 
