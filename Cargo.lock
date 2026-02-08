@@ -1133,6 +1133,7 @@ dependencies = [
  "chrono",
  "criterion",
  "dashmap",
+ "fastrand",
  "futures",
  "getrandom 0.4.1",
  "itertools 0.14.0",
