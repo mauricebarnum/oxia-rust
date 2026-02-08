@@ -31,7 +31,6 @@ use tokio::sync::Notify;
 use tokio::sync::OnceCell;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tokio::time::Instant;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tonic::Streaming;
@@ -1298,6 +1297,8 @@ mod int32_hash_range {
 } // mod int32_hash_range
 
 mod searchable {
+    use std::time::Instant;
+
     use crate::shard::ShardMapEpoch;
 
     use super::Client;
@@ -1314,10 +1315,11 @@ mod searchable {
         shards: ShardIdMap<Client>,
         mapper: int32_hash_range::Mapper,
         epoch: ShardMapEpoch,
+        created: Option<Instant>,
     }
 
     impl Shards {
-        pub(super) const fn new(
+        pub(super) fn new(
             shards: ShardIdMap<Client>,
             mapper: int32_hash_range::Mapper,
             epoch: ShardMapEpoch,
@@ -1326,11 +1328,16 @@ mod searchable {
                 shards,
                 mapper,
                 epoch,
+                created: Some(Instant::now()),
             }
         }
 
         pub(super) const fn epoch(&self) -> ShardMapEpoch {
             self.epoch
+        }
+
+        pub(super) const fn created(&self) -> Option<Instant> {
+            self.created
         }
 
         pub(crate) fn find_by_id(&self, id: ShardId) -> Result<Client> {
@@ -1407,11 +1414,10 @@ struct ShardAssignmentTask {
     token: CancellationToken,
     changed: watch::Sender<ShardMapUpdateResult>,
     refresh_signal: Arc<Notify>,
-    last_refresh: Instant,
 }
 
 impl ShardAssignmentTask {
-    fn new(
+    const fn new(
         config: Arc<config::Config>,
         channel_pool: ChannelPool,
         shards: Arc<ArcSwap<searchable::Shards>>,
@@ -1428,7 +1434,6 @@ impl ShardAssignmentTask {
             token,
             changed,
             refresh_signal,
-            last_refresh: Instant::now(),
         }
     }
 
@@ -1453,7 +1458,7 @@ impl ShardAssignmentTask {
         // Update leaders atomically - clients will see new leaders on next RPC
         self.leaders.store(Arc::new(new_leaders));
 
-        let mut shards = ShardIdMap::<Client>::default();
+        let mut new_map = ShardIdMap::<Client>::default();
 
         for a in &ns.assignments {
             info!(?a, "processing assignments");
@@ -1471,12 +1476,13 @@ impl ShardAssignmentTask {
                     Arc::clone(&self.leaders),
                 )?
             };
-            shards.insert(a.shard.into(), client);
+            new_map.insert(a.shard.into(), client);
         }
 
         let new_epoch = current.epoch().next();
-        self.shards
-            .store(Arc::new(searchable::Shards::new(shards, mapper, new_epoch)));
+        let new_shards = Arc::new(searchable::Shards::new(new_map, mapper, new_epoch));
+        trace!(?new_shards);
+        self.shards.store(new_shards);
 
         Ok(())
     }
@@ -1502,41 +1508,86 @@ impl ShardAssignmentTask {
         }
     }
 
-    async fn run(&mut self, mut cluster: GrpcClient) {
-        const MIN_REFRESH_INTERVAL: Duration = Duration::from_millis(50);
+    async fn get_stream_from(&self, addr: &str) -> Result<Streaming<oxia_proto::ShardAssignments>> {
+        debug!(addr, "attempting shard assignment stream connection");
 
-        #[derive(Debug)]
-        enum ExitReason {
-            Cancelled,
-        }
-
-        let mut interval = tokio::time::interval(Duration::from_millis(600));
-        let reason = loop {
-            tokio::select! {
-            () = self.token.cancelled() => {
-                    break ExitReason::Cancelled;
-                }
-                    () = self.refresh_signal.notified() => {
-                    if self.last_refresh.elapsed() < MIN_REFRESH_INTERVAL {
-                        continue; // Rate limit
-                    }
-                }
-                _ = interval.tick() => {}
+        let mut client = match create_grpc_client(addr, &self.channel_pool).await {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(addr, ?e, "failed to create gRPC client");
+                return Err(e);
             }
-            let req = oxia_proto::ShardAssignmentsRequest {
-                namespace: self.config.namespace().into(),
-            };
-            match cluster.get_shard_assignments(req).await {
-                Ok(rsp) => self.process_assignments_stream(rsp.into_inner()).await,
-                Err(err) => {
-                    warn!(?err, "get_shard_assignments");
-                    let _ = self.changed.send(Err(err.into()));
-                }
-            }
-            self.last_refresh = Instant::now();
-            trace!(?self.shards);
         };
-        info!(?reason, "ShardAssignmentTask exiting");
+
+        let req = oxia_proto::ShardAssignmentsRequest {
+            namespace: self.config.namespace().into(),
+        };
+
+        client
+            .get_shard_assignments(req)
+            .await
+            .map(tonic::Response::into_inner)
+            .map_err(Into::into)
+    }
+
+    async fn get_addrs(&self) -> Vec<String> {
+        let provider = self.config.service_discovery();
+        let mut addrs = provider.addresses().await;
+        if addrs.len() > 1 {
+            fastrand::shuffle(&mut addrs);
+        }
+        addrs
+    }
+
+    async fn get_stream(&self) -> Option<Streaming<oxia_proto::ShardAssignments>> {
+        use backon::BackoffBuilder;
+
+        // TODO: these should come from config.   We'll likely want different values than for the client API.
+        const MIN_BACKOFF: Duration = Duration::from_millis(100);
+        const MAX_BACKOFF: Duration = Duration::from_secs(5);
+
+        let mut backoff = backon::ExponentialBuilder::default()
+            .with_min_delay(MIN_BACKOFF)
+            .with_max_delay(MAX_BACKOFF)
+            .with_max_times(usize::MAX)
+            .build();
+
+        loop {
+            for addr in self.get_addrs().await {
+                trace!(?addr, "trying to get shard assignment stream");
+                match self.get_stream_from(&addr).await {
+                    Ok(s) => return Some(s),
+                    Err(e) => warn!(?addr, ?e, "unable to get shard assignment stream"),
+                }
+            }
+
+            let delay = backoff.next().unwrap_or(MIN_BACKOFF);
+            warn!(
+                "unable to get shard assignments stream, trying again after {} ms",
+                delay.as_millis()
+            );
+            tokio::time::sleep(delay).await;
+        }
+    }
+
+    async fn run(&self) {
+        // TODO: these should come from config
+        const MIN_REFRESH_INTERVAL: Duration = Duration::from_millis(50);
+        const PERIODIC_REFRESH_INTERVAL: Duration = Duration::from_millis(1100);
+
+        let mut interval = tokio::time::interval(PERIODIC_REFRESH_INTERVAL);
+        while !self.token.is_cancelled() {
+            if let Some(stream) = self.get_stream().await {
+                self.process_assignments_stream(stream).await;
+            }
+            tokio::select! {
+                () = self.refresh_signal.notified(), if {
+                    self.shards.load().created().is_some_and(|last | last.elapsed() > MIN_REFRESH_INTERVAL)
+                } => (),
+                _ = interval.tick() => ()
+            };
+        }
+        info!("ShardAssignmentTask exiting");
     }
 }
 
@@ -1681,8 +1732,7 @@ impl Manager {
         // Consume the initial value
         rx.borrow_and_update();
 
-        let cluster = create_grpc_client(config.service_addr(), channel_pool).await?;
-        let mut task = ShardAssignmentTask::new(
+        let task = ShardAssignmentTask::new(
             Arc::clone(config),
             channel_pool.clone(),
             Arc::clone(shards),
@@ -1692,7 +1742,10 @@ impl Manager {
             Arc::clone(refresh_signal),
         );
         let handle = tokio::spawn(async move {
-            task.run(cluster).await;
+            tokio::select! {
+                () = task.run() => (),
+                () = task.token.cancelled() => (),
+            }
         });
 
         // Wait for the notification that the task has started up
