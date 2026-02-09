@@ -15,29 +15,32 @@
 package server
 
 import (
+	"context"
+	"fmt"
 	"io"
+	"log/slog"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 
-	"github.com/oxia-db/oxia/common/security"
+	"github.com/oxia-db/oxia/common/codec"
+
+	"github.com/oxia-db/oxia/common/constant"
+	oxiadcommonoption "github.com/oxia-db/oxia/oxiad/common/option"
+	"github.com/oxia-db/oxia/oxiad/dataserver/option"
+
 	"github.com/oxia-db/oxia/oxiad/dataserver/database/kvstore"
 
 	"github.com/oxia-db/oxia/common/process"
 	"github.com/oxia-db/oxia/oxiad/dataserver"
-	dataserverconf "github.com/oxia-db/oxia/oxiad/dataserver/conf"
-
-	"github.com/oxia-db/oxia/cmd/flag"
 )
 
 var (
-	config = dataserverconf.Config{}
-
-	peerTLS           = security.TLSOption{}
-	serverTLS         = security.TLSOption{}
-	internalServerTLS = security.TLSOption{}
-
-	Cmd = &cobra.Command{
+	sconfFile         string
+	dataServerOptions = option.NewDefaultOptions()
+	Cmd               = &cobra.Command{
 		Use:   "server",
 		Short: "Start a server",
 		Long:  `Long description`,
@@ -47,74 +50,102 @@ var (
 
 func init() {
 	Cmd.Flags().SortFlags = false
+	Cmd.Flags().StringVar(&sconfFile, "sconfig", "", "server config file path")
 
-	flag.PublicAddr(Cmd, &config.PublicServiceAddr)
-	flag.InternalAddr(Cmd, &config.InternalServiceAddr)
-	flag.MetricsAddr(Cmd, &config.MetricsServiceAddr)
-	Cmd.Flags().StringVar(&config.DataDir, "data-dir", "./data/db", "Directory where to store data")
-	Cmd.Flags().StringVar(&config.WalDir, "wal-dir", "./data/wal", "Directory for write-ahead-logs")
-	Cmd.Flags().DurationVar(&config.WalRetentionTime, "wal-retention-time", 1*time.Hour, "Retention time for the entries in the write-ahead-log")
-	Cmd.Flags().DurationVar(&config.NotificationsRetentionTime, "notifications-retention-time", 1*time.Hour, "Retention time for the db notifications to clients")
+	Cmd.Flags().StringVarP(&dataServerOptions.Server.Public.BindAddress, "public-addr", "p", fmt.Sprintf("0.0.0.0:%d", constant.DefaultPublicPort), "Public service bind address")
+	Cmd.Flags().StringVarP(&dataServerOptions.Server.Internal.BindAddress, "internal-addr", "i", fmt.Sprintf("0.0.0.0:%d", constant.DefaultInternalPort), "Internal service bind address")
+	observability := &dataServerOptions.Observability
+	Cmd.Flags().StringVarP(&observability.Metric.BindAddress, "metrics-addr", "m", fmt.Sprintf("0.0.0.0:%d", oxiadcommonoption.DefaultMetricsPort), "Metrics service bind address")
 
-	Cmd.Flags().BoolVar(&config.WalSyncData, "wal-sync-data", true, "Whether to sync data in write-ahead-log")
-	Cmd.Flags().Int64Var(&config.DbBlockCacheMB, "db-cache-size-mb", kvstore.DefaultFactoryOptions.CacheSizeMB,
+	storageWal := &dataServerOptions.Storage.WAL
+	storageWal.Sync = &constant.FlagTrue
+
+	var walRetention = 1 * time.Hour
+	var notificationRetention = 1 * time.Hour
+
+	Cmd.Flags().StringVar(&storageWal.Dir, "wal-dir", "./data/wal", "Directory for write-ahead-logs")
+	Cmd.Flags().BoolVar(storageWal.Sync, "wal-sync-data", true, "Whether to sync data in write-ahead-log")
+	Cmd.Flags().DurationVar(&walRetention, "wal-retention-time", 1*time.Hour, "Retention time for the entries in the write-ahead-log")
+
+	Cmd.Flags().DurationVar(&notificationRetention, "notifications-retention-time", 1*time.Hour, "Retention time for the db notifications to clients")
+
+	storageDatabase := &dataServerOptions.Storage.Database
+	Cmd.Flags().StringVar(&storageDatabase.Dir, "data-dir", "./data/db", "Directory where to store data")
+	Cmd.Flags().Int64Var(&storageDatabase.ReadCacheSizeMB, "db-cache-size-mb", kvstore.DefaultFactoryOptions.CacheSizeMB,
 		"Max size of the shared DB cache")
-	Cmd.Flags().StringVar(&config.AuthOptions.ProviderName, "auth-provider-name", "", "Authentication provider name. supported: oidc")
-	Cmd.Flags().StringVar(&config.AuthOptions.ProviderParams, "auth-provider-params", "", "Authentication provider params. \n oidc: "+"{\"allowedIssueURLs\":\"required1,required2\",\"allowedAudiences\":\"required1,required2\",\"userNameClaim\":\"optional(default:sub)\"}")
 
-	// server TLS section
-	Cmd.Flags().StringVar(&serverTLS.CertFile, "tls-cert-file", "", "Tls certificate file")
-	Cmd.Flags().StringVar(&serverTLS.KeyFile, "tls-key-file", "", "Tls key file")
-	Cmd.Flags().Uint16Var(&serverTLS.MinVersion, "tls-min-version", 0, "Tls minimum version")
-	Cmd.Flags().Uint16Var(&serverTLS.MaxVersion, "tls-max-version", 0, "Tls maximum version")
-	Cmd.Flags().StringVar(&serverTLS.TrustedCaFile, "tls-trusted-ca-file", "", "Tls trusted ca file")
-	Cmd.Flags().BoolVar(&serverTLS.InsecureSkipVerify, "tls-insecure-skip-verify", false, "Tls insecure skip verify")
-	Cmd.Flags().BoolVar(&serverTLS.ClientAuth, "tls-client-auth", false, "Tls client auth")
+	publicAuth := &dataServerOptions.Server.Public.Auth
+	Cmd.Flags().StringVar(&publicAuth.Provider, "auth-provider-name", "", "Authentication provider name. supported: oidc")
+	Cmd.Flags().StringVar(&publicAuth.ProviderParams, "auth-provider-params", "", "Authentication provider params.\n"+
+		"Legacy format (deprecated): {\"allowedIssueURLs\":\"url1,url2\",\"allowedAudiences\":\"aud1,aud2\",\"userNameClaim\":\"optional(default:sub)\"}\n"+
+		"New format: {\"issuers\":{\"https://issuer1.com\":{\"allowedAudiences\":\"aud1,aud2\",\"userNameClaim\":\"sub\",\"staticKeyFile\":\"/path/to/key.pem\"},\"https://issuer2.com\":{\"allowedAudiences\":\"aud3\",\"userNameClaim\":\"email\"}}}")
 
-	// internal server TLS section
-	Cmd.Flags().StringVar(&internalServerTLS.CertFile, "internal-tls-cert-file", "", "Internal server tls certificate file")
-	Cmd.Flags().StringVar(&internalServerTLS.KeyFile, "internal-tls-key-file", "", "Internal server tls key file")
-	Cmd.Flags().Uint16Var(&internalServerTLS.MinVersion, "internal-tls-min-version", 0, "Internal server tls minimum version")
-	Cmd.Flags().Uint16Var(&internalServerTLS.MaxVersion, "internal-tls-max-version", 0, "Internal server tls maximum version")
-	Cmd.Flags().StringVar(&internalServerTLS.TrustedCaFile, "internal-tls-trusted-ca-file", "", "Internal server tls trusted ca file")
-	Cmd.Flags().BoolVar(&internalServerTLS.InsecureSkipVerify, "internal-tls-insecure-skip-verify", false, "Internal server tls insecure skip verify")
-	Cmd.Flags().BoolVar(&internalServerTLS.ClientAuth, "internal-tls-client-auth", false, "Internal server tls client auth")
+	publicTLS := &dataServerOptions.Server.Public.TLS
+	Cmd.Flags().StringVar(&publicTLS.CertFile, "tls-cert-file", "", "Tls certificate file")
+	Cmd.Flags().StringVar(&publicTLS.KeyFile, "tls-key-file", "", "Tls key file")
+	Cmd.Flags().Uint16Var(&publicTLS.MinVersion, "tls-min-version", 0, "Tls minimum version")
+	Cmd.Flags().Uint16Var(&publicTLS.MaxVersion, "tls-max-version", 0, "Tls maximum version")
+	Cmd.Flags().StringVar(&publicTLS.TrustedCaFile, "tls-trusted-ca-file", "", "Tls trusted ca file")
+	Cmd.Flags().BoolVar(&publicTLS.InsecureSkipVerify, "tls-insecure-skip-verify", false, "Tls insecure skip verify")
+	Cmd.Flags().BoolVar(&publicTLS.ClientAuth, "tls-client-auth", false, "Tls client auth")
 
-	// peer client TLS section
-	Cmd.Flags().StringVar(&peerTLS.CertFile, "peer-tls-cert-file", "", "Peer tls certificate file")
-	Cmd.Flags().StringVar(&peerTLS.KeyFile, "peer-tls-key-file", "", "Peer tls key file")
-	Cmd.Flags().Uint16Var(&peerTLS.MinVersion, "peer-tls-min-version", 0, "Peer tls minimum version")
-	Cmd.Flags().Uint16Var(&peerTLS.MaxVersion, "peer-tls-max-version", 0, "Peer tls maximum version")
-	Cmd.Flags().StringVar(&peerTLS.TrustedCaFile, "peer-tls-trusted-ca-file", "", "Peer tls trusted ca file")
-	Cmd.Flags().BoolVar(&peerTLS.InsecureSkipVerify, "peer-tls-insecure-skip-verify", false, "Peer tls insecure skip verify")
-	Cmd.Flags().StringVar(&peerTLS.ServerName, "peer-tls-server-name", "", "Peer tls server name")
+	internalTLS := &dataServerOptions.Server.Internal.TLS
+	Cmd.Flags().StringVar(&internalTLS.CertFile, "internal-tls-cert-file", "", "Internal server tls certificate file")
+	Cmd.Flags().StringVar(&internalTLS.KeyFile, "internal-tls-key-file", "", "Internal server tls key file")
+	Cmd.Flags().Uint16Var(&internalTLS.MinVersion, "internal-tls-min-version", 0, "Internal server tls minimum version")
+	Cmd.Flags().Uint16Var(&internalTLS.MaxVersion, "internal-tls-max-version", 0, "Internal server tls maximum version")
+	Cmd.Flags().StringVar(&internalTLS.TrustedCaFile, "internal-tls-trusted-ca-file", "", "Internal server tls trusted ca file")
+	Cmd.Flags().BoolVar(&internalTLS.InsecureSkipVerify, "internal-tls-insecure-skip-verify", false, "Internal server tls insecure skip verify")
+	Cmd.Flags().BoolVar(&internalTLS.ClientAuth, "internal-tls-client-auth", false, "Internal server tls client auth")
+
+	replicationTLS := &dataServerOptions.Replication.TLS
+	Cmd.Flags().StringVar(&replicationTLS.CertFile, "peer-tls-cert-file", "", "Peer tls certificate file")
+	Cmd.Flags().StringVar(&replicationTLS.KeyFile, "peer-tls-key-file", "", "Peer tls key file")
+	Cmd.Flags().Uint16Var(&replicationTLS.MinVersion, "peer-tls-min-version", 0, "Peer tls minimum version")
+	Cmd.Flags().Uint16Var(&replicationTLS.MaxVersion, "peer-tls-max-version", 0, "Peer tls maximum version")
+	Cmd.Flags().StringVar(&replicationTLS.TrustedCaFile, "peer-tls-trusted-ca-file", "", "Peer tls trusted ca file")
+	Cmd.Flags().BoolVar(&replicationTLS.InsecureSkipVerify, "peer-tls-insecure-skip-verify", false, "Peer tls insecure skip verify")
+	Cmd.Flags().StringVar(&replicationTLS.ServerName, "peer-tls-server-name", "", "Peer tls server name")
+
+	// Convert time.Duration to option.Duration after flag parsing
+	Cmd.PreRun = func(*cobra.Command, []string) {
+		storageWal.Retention = oxiadcommonoption.Duration(walRetention)
+		dataServerOptions.Storage.Notification.Retention = oxiadcommonoption.Duration(notificationRetention)
+	}
 }
 
-func exec(*cobra.Command, []string) {
+func exec(cmd *cobra.Command, _ []string) {
 	process.RunProcess(func() (io.Closer, error) {
-		if err := configureTLS(); err != nil {
-			return nil, err
+		watchableOptions := oxiadcommonoption.NewWatch(dataServerOptions)
+		switch {
+		case cmd.Flags().Changed("sconfig"):
+			// init options
+			if err := codec.TryReadAndInitConf(sconfFile, dataServerOptions); err != nil {
+				return nil, err
+			}
+			// start listener
+			v := viper.New()
+			v.SetConfigFile(sconfFile)
+			v.OnConfigChange(func(fsnotify.Event) {
+				temporaryOptions := option.NewDefaultOptions()
+				if err := codec.TryReadAndInitConf(sconfFile, temporaryOptions); err != nil {
+					slog.Warn("parse updated configuration file failed", slog.Any("err", err))
+					return
+				}
+				previous, _ := watchableOptions.Load()
+				slog.Info("configuration file has changed.",
+					slog.Any("previous", previous),
+					slog.Any("current", temporaryOptions))
+				watchableOptions.Notify(temporaryOptions)
+			})
+			v.WatchConfig()
+		default:
+			dataServerOptions.WithDefault()
+			if err := dataServerOptions.Validate(); err != nil {
+				return nil, err
+			}
 		}
-		return dataserver.New(config)
-	})
-}
 
-func configureTLS() error {
-	var err error
-	if serverTLS.IsConfigured() {
-		if config.ServerTLS, err = serverTLS.MakeServerTLSConf(); err != nil {
-			return err
-		}
-	}
-	if peerTLS.IsConfigured() {
-		if config.PeerTLS, err = peerTLS.MakeClientTLSConf(); err != nil {
-			return err
-		}
-	}
-	if internalServerTLS.IsConfigured() {
-		if config.InternalServerTLS, err = internalServerTLS.MakeServerTLSConf(); err != nil {
-			return err
-		}
-	}
-	return nil
+		return dataserver.New(context.Background(), watchableOptions)
+	})
 }

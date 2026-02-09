@@ -593,6 +593,8 @@ impl Client {
                     .as_ref()
                     .map_or_else(Vec::new, |x| (*x).to_vec()),
                 secondary_indexes: SecondaryIndex::to_proto(opts.secondary_indexes.clone()),
+                override_version_id: opts.override_version_id,
+                override_modifications_count: opts.override_modifications_count,
             }],
             deletes: vec![],
             delete_ranges: vec![],
