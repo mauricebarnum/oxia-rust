@@ -29,12 +29,25 @@ const (
 var Disabled = Options{}
 
 type Options struct {
-	ProviderName   string
-	ProviderParams string
+	Enabled        *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty" jsonschema:"description=Enable authentication,default=false"`
+	Provider       string `yaml:"provider,omitempty" json:"provider,omitempty" jsonschema:"description=Authentication provider type,example=oidc"`
+	ProviderParams string `yaml:"providerParams,omitempty" json:"providerParams,omitempty" jsonschema:"description=Provider-specific parameters in JSON format"`
 }
 
+func (*Options) WithDefault() {
+}
+
+func (*Options) Validate() error {
+	return nil
+}
 func (op *Options) IsEnabled() bool {
-	return op != nil && op.ProviderName != ""
+	if op.Provider != "" {
+		return true
+	}
+	if op.Enabled == nil {
+		return false
+	}
+	return *op.Enabled
 }
 
 var (
@@ -51,7 +64,7 @@ type AuthenticationProvider interface {
 }
 
 func NewAuthenticationProvider(ctx context.Context, options Options) (AuthenticationProvider, error) {
-	switch options.ProviderName {
+	switch options.Provider {
 	case ProviderOIDC:
 		return NewOIDCProvider(ctx, options.ProviderParams)
 	default:

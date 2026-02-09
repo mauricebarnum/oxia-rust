@@ -111,6 +111,8 @@ pub struct PutOptions {
     secondary_indexes: Option<Arc<[SecondaryIndex]>>,
     #[builder(default = false)]
     ephemeral: bool,
+    override_version_id: Option<i64>,
+    override_modifications_count: Option<i64>,
 }
 
 impl PutOptions {

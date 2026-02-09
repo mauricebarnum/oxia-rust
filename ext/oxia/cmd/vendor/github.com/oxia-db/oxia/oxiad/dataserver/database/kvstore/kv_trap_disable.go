@@ -12,31 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package conf
+//go:build disable_trap
 
-import (
-	"crypto/tls"
-	"time"
+package kvstore
 
-	"github.com/oxia-db/oxia/oxiad/common/rpc/auth"
-)
+type KvTrap struct{}
 
-type Config struct {
-	PublicServiceAddr   string
-	InternalServiceAddr string
-	PeerTLS             *tls.Config
-	ServerTLS           *tls.Config
-	InternalServerTLS   *tls.Config
-	MetricsServiceAddr  string
-
-	AuthOptions auth.Options
-
-	DataDir string
-	WalDir  string
-
-	WalRetentionTime           time.Duration
-	WalSyncData                bool
-	NotificationsRetentionTime time.Duration
-
-	DbBlockCacheMB int64
+func (trap *KvTrap) Trigger(string) error {
+	return nil
 }
