@@ -185,9 +185,6 @@ pub enum Error {
     #[error(transparent)]
     Server(Arc<ServerError>),
 
-    #[error("No service addresses configured")]
-    NoServiceAddress,
-
     #[error("No shard mapping for shard {0}")]
     NoShardMapping(ShardId),
 
@@ -401,7 +398,6 @@ mod tests {
         let errs = [
             Error::custom("not retriable"),
             Error::NoShardMapping(ShardId::INVALID),
-            Error::NoServiceAddress,
             Error::from(ClientError::Internal("client error".into())),
             Error::multiple_shard_errors(vec![]),
             Error::RequestTimeout,
@@ -444,7 +440,6 @@ mod tests {
             // Other error types
             Error::custom("not a connection error"),
             Error::NoShardMapping(ShardId::INVALID),
-            Error::NoServiceAddress,
             Error::from(ClientError::Internal("client error".into())),
             Error::multiple_shard_errors(vec![]),
             Error::RequestTimeout,
