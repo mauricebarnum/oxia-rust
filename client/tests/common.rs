@@ -90,7 +90,7 @@ pub fn oxia_cli_path() -> &'static Path {
 /// `OXIA_KEEP_TEST_DATA=1` is set.
 fn test_tempdir() -> anyhow::Result<TempDir> {
     let keep = env::var("OXIA_KEEP_TEST_DATA")
-        .map(|v| v == "1")
+        .map(|v| matches!(v.as_str(), "" | "1" | "true" | "yes" | "on"))
         .unwrap_or(false);
     let mut builder = tempfile::Builder::new();
     builder.prefix("oxia-test-");
