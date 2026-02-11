@@ -18,6 +18,8 @@ use std::env;
 use std::fs;
 use std::io;
 use std::io::Write;
+use std::net::Ipv4Addr;
+use std::net::SocketAddrV4;
 use std::net::TcpStream;
 use std::num::NonZeroU32;
 use std::path;
@@ -31,6 +33,7 @@ use std::thread::sleep;
 use std::time::Duration;
 use std::time::Instant;
 
+use anyhow::Context as _;
 use anyhow::anyhow;
 use mauricebarnum_oxia_client::Client;
 use mauricebarnum_oxia_client::config;
@@ -99,25 +102,31 @@ fn test_tempdir() -> anyhow::Result<TempDir> {
 
 // Attempt to find `n` unallocated ports.  This function is racy:
 // by the time it returns, the ports may be re-allocated.
-pub fn find_free_ports(n: usize) -> io::Result<Vec<u16>> {
-    use socket2::{Domain, SockAddr, Socket, Type};
-    use std::net::{Ipv4Addr, SocketAddrV4};
-    let mut sockets: Vec<Socket> = Vec::with_capacity(n);
-    for _ in 0..n {
-        let s = trace_err!(Socket::new(Domain::IPV4, Type::STREAM, None))?;
-        trace_err!(s.set_reuse_address(true))?;
-        trace_err!(s.bind(&SockAddr::from(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))))?;
-        sockets.push(s);
-    }
+pub fn find_free_ports(n: usize) -> anyhow::Result<Vec<u16>> {
+    let sockets: Vec<socket2::Socket> = (0..n)
+        .map(|_| -> anyhow::Result<socket2::Socket> {
+            let s = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)?;
+            s.set_reuse_address(true)?;
+            s.bind(&socket2::SockAddr::from(SocketAddrV4::new(
+                Ipv4Addr::LOCALHOST,
+                0,
+            )))?;
+            Ok(s)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()
+        .context("Failed to bind test sockets")?;
 
-    let mut ports: Vec<u16> = Vec::with_capacity(n);
-    for s in &sockets {
-        let port = trace_err!(s.local_addr())?
-            .as_socket_ipv4()
-            .expect("Not IPv4 address")
-            .port();
-        ports.push(port);
-    }
+    let ports = sockets
+        .iter()
+        .map(|s| {
+            s.local_addr()
+                .context("Failed to get local address")?
+                .as_socket_ipv4()
+                .context("Not an IPv4 address")
+                .map(|addr| addr.port())
+        })
+        .collect::<anyhow::Result<Vec<u16>>>()?;
+
     Ok(ports)
 }
 
