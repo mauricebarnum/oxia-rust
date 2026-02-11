@@ -35,9 +35,10 @@ use mauricebarnum_oxia_client::NotificationsOptions;
 use mauricebarnum_oxia_client::OxiaError;
 use mauricebarnum_oxia_client::PutOptions;
 use mauricebarnum_oxia_client::RangeScanOptions;
-use mauricebarnum_oxia_client::Result;
 use mauricebarnum_oxia_client::SecondaryIndex;
 use mauricebarnum_oxia_client::config;
+
+use anyhow::Result;
 
 mod common;
 use common::TestResultExt;
