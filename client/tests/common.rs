@@ -31,6 +31,7 @@ use std::thread::sleep;
 use std::time::Duration;
 use std::time::Instant;
 
+use anyhow::anyhow;
 use mauricebarnum_oxia_client::Client;
 use mauricebarnum_oxia_client::config;
 use mauricebarnum_oxia_client::errors::Error as ClientError;
@@ -84,7 +85,7 @@ pub fn oxia_cli_path() -> &'static Path {
 
 /// Create a test temp directory. Auto-cleaned on drop unless
 /// `OXIA_KEEP_TEST_DATA=1` is set.
-fn test_tempdir() -> io::Result<TempDir> {
+fn test_tempdir() -> anyhow::Result<TempDir> {
     let keep = env::var("OXIA_KEEP_TEST_DATA")
         .map(|v| v == "1")
         .unwrap_or(false);
@@ -93,7 +94,7 @@ fn test_tempdir() -> io::Result<TempDir> {
     if keep {
         builder.disable_cleanup(true);
     }
-    trace_err!(builder.tempdir())
+    trace_err!(builder.tempdir().map_err(Into::into))
 }
 
 // Attempt to find `n` unallocated ports.  This function is racy:
@@ -122,7 +123,7 @@ pub fn find_free_ports(n: usize) -> io::Result<Vec<u16>> {
 
 /// Wait for the server to be ready by checking TCP connectivity, then adding
 /// a short delay for gRPC initialization.
-pub fn wait_for_ready(addr: &str, timeout_secs: u64) -> io::Result<()> {
+pub fn wait_for_ready(addr: &str, timeout_secs: u64) -> anyhow::Result<()> {
     let start = Instant::now();
     while start.elapsed().as_secs() < timeout_secs {
         if TcpStream::connect(addr).is_ok() {
@@ -133,10 +134,7 @@ pub fn wait_for_ready(addr: &str, timeout_secs: u64) -> io::Result<()> {
         }
         sleep(Duration::from_millis(100));
     }
-    Err(io::Error::new(
-        io::ErrorKind::TimedOut,
-        "Port did not open in time",
-    ))
+    Err(anyhow!("Port did not open in time"))
 }
 
 /// Wait for the gRPC health service on `addr` to report SERVING.
@@ -144,7 +142,7 @@ pub fn wait_for_ready(addr: &str, timeout_secs: u64) -> io::Result<()> {
 /// This polls `oxia health` until it succeeds or `timeout_secs` elapses.
 /// The `oxia-readiness` service transitions to SERVING only after the server
 /// receives its first shard assignment from the coordinator.
-pub fn wait_for_health(addr: &str, service: &str, timeout_secs: u64) -> io::Result<()> {
+pub fn wait_for_health(addr: &str, service: &str, timeout_secs: u64) -> anyhow::Result<()> {
     let (host, port) = addr
         .rsplit_once(':')
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, format!("bad addr: {addr}")))?;
@@ -169,9 +167,8 @@ pub fn wait_for_health(addr: &str, service: &str, timeout_secs: u64) -> io::Resu
             _ => sleep(Duration::from_millis(200)),
         }
     }
-    Err(io::Error::new(
-        io::ErrorKind::TimedOut,
-        format!("health check for {addr} ({service}) did not pass within {timeout_secs}s"),
+    Err(anyhow!(
+        "health check for {addr} ({service}) did not pass within {timeout_secs}s"
     ))
 }
 
@@ -184,7 +181,7 @@ struct TestServerArgs {
 }
 
 impl TestServerArgs {
-    fn start(&self) -> io::Result<Child> {
+    fn start(&self) -> anyhow::Result<Child> {
         let mut cmd = Command::new(oxia_cli_path());
         cmd.arg("standalone")
             .arg("--data-dir")
@@ -213,7 +210,7 @@ pub struct TestServer {
 
 #[allow(dead_code)]
 impl TestServer {
-    pub fn start_nshards(nshards: NonZeroU32) -> io::Result<Self> {
+    pub fn start_nshards(nshards: NonZeroU32) -> anyhow::Result<Self> {
         let [service_port, metrics_port] = trace_err!(find_free_ports(2))?.try_into().unwrap();
         let data_dir = trace_err!(test_tempdir())?;
         let args = TestServerArgs {
@@ -231,17 +228,17 @@ impl TestServer {
         })
     }
 
-    pub fn start() -> io::Result<Self> {
+    pub fn start() -> anyhow::Result<Self> {
         Self::start_nshards(NonZeroU32::new(1).unwrap())
     }
 
-    pub fn shutdown(&mut self) -> io::Result<()> {
+    pub fn shutdown(&mut self) -> anyhow::Result<()> {
         self.process.kill()?;
         self.process.wait()?;
         Ok(())
     }
 
-    pub fn restart(&mut self) -> io::Result<()> {
+    pub fn restart(&mut self) -> anyhow::Result<()> {
         trace_err!(self.shutdown())?;
         self.process = trace_err!(self.args.start())?;
         Ok(())
@@ -314,7 +311,7 @@ impl TestCluster {
         num_servers: usize,
         replication_factor: u32,
         initial_shard_count: u32,
-    ) -> io::Result<Self> {
+    ) -> anyhow::Result<Self> {
         assert!(num_servers >= 2, "cluster needs at least 2 servers");
         // 3 ports per server (public, internal, metrics) + 3 for coordinator
         let total_ports = num_servers * 3 + 3;
@@ -469,11 +466,7 @@ impl TestCluster {
     }
 
     /// SIGKILL a server (immediate death -> connection errors).
-    ///
-    /// Index 0 is protected because the shard assignment stream connects
-    /// to server 0.
-    pub fn kill_server(&mut self, index: usize) -> io::Result<()> {
-        assert!(index > 0, "cannot kill server 0 (assignment stream)");
+    pub fn kill_server(&mut self, index: usize) -> anyhow::Result<()> {
         let srv = &mut self.servers[index];
         let mut p = srv
             .process
@@ -486,11 +479,7 @@ impl TestCluster {
 
     /// SIGTERM a server (graceful shutdown -> may produce wrong-leader
     /// errors).
-    ///
-    /// Index 0 is protected because the shard assignment stream connects
-    /// to server 0.
-    pub fn stop_server(&mut self, index: usize) -> io::Result<()> {
-        assert!(index > 0, "cannot stop server 0 (assignment stream)");
+    pub fn stop_server(&mut self, index: usize) -> anyhow::Result<()> {
         let srv = &mut self.servers[index];
         let mut p = srv
             .process
@@ -504,7 +493,7 @@ impl TestCluster {
 
     /// Restart a previously stopped server on the same ports and data
     /// directory.
-    pub fn restart_server(&mut self, index: usize) -> io::Result<()> {
+    pub fn restart_server(&mut self, index: usize) -> anyhow::Result<()> {
         let srv = &mut self.servers[index];
         assert!(srv.process.is_none(), "server {index} is still running");
         let child = trace_err!(
@@ -672,7 +661,7 @@ impl TestConfig {
         }
     }
 
-    pub fn start(&self) -> io::Result<Box<dyn TestEnv>> {
+    pub fn start(&self) -> anyhow::Result<Box<dyn TestEnv>> {
         match *self {
             Self::Standalone { shards } => {
                 let server = TestServer::start_nshards(shards)?;
