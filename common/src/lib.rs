@@ -1,4 +1,4 @@
-// Copyright 2025 Maurice S. Barnum
+// Copyright 2025-2026 Maurice S. Barnum
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,5 +14,6 @@
 
 pub mod proto {
     tonic::include_proto!("io.oxia.proto.v1");
+    pub use oxia_admin_client::OxiaAdminClient;
     pub use oxia_client_client::OxiaClientClient;
 }

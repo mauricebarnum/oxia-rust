@@ -16,7 +16,7 @@ use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     const PROTO_DIR: &str = "../ext/oxia/common/proto";
-    const PROTO_FILES: &[&str] = &["client.proto"];
+    const PROTO_FILES: &[&str] = &["client.proto", "admin.proto"];
 
     // Configure tonic to use Bytes for all protobuf bytes fields
     tonic_prost_build::configure()

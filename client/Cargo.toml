@@ -24,6 +24,7 @@ arc-swap = "1.8"
 tokio-util = "0.7.18"
 bon = { version = "3.8.2", features = ["implied-bounds"] }
 dashmap = { version = "6", optional = true }
+fastrand = "2.3.0"
 
 [features]
 bench-dashmap = ["dep:dashmap"]
@@ -57,6 +58,7 @@ allowed_external_types = [
     "bytes::bytes::Bytes",
     "tonic::status::Status",
     "tonic::transport::error::Error",
+    "futures_core::future::BoxFuture",
     "futures_core::stream::Stream",
     "bon::builder_state::IsSet",
     "bon::builder_state::IsUnset",
