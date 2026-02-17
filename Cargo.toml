@@ -27,7 +27,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 opt-level = 3
 debug = true
 split-debuginfo = "packed"
-strip = "none"
+strip = "debuginfo"
 debug-assertions = false
 overflow-checks = false
 lto = true
