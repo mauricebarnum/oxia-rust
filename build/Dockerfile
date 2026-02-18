@@ -14,12 +14,15 @@ ARG GO_VERSION=1.26.0
 FROM rust:${RUST_VERSION}-bookworm AS rust-official
 FROM golang:${GO_VERSION}-bookworm AS go-official
 
+# ===== Chef: shared base for planner and cook — guarantees same cargo-chef version =====
+FROM rust:${RUST_VERSION}-bookworm AS chef
+RUN curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash && \
+    cargo binstall -y cargo-chef
+
 # ===== Planner: generate cargo-chef recipe =====
 # Copies only manifests so this layer (and the cook layer) are only invalidated
 # when dependencies change, not when source files change.
-FROM rust:${RUST_VERSION}-bookworm AS planner
-RUN curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash && \
-    cargo binstall -y cargo-chef
+FROM chef AS planner
 WORKDIR /recipe
 COPY Cargo.toml Cargo.lock ./
 COPY common/Cargo.toml common/
@@ -87,7 +90,7 @@ ENV \
 RUN rustup component add clippy
 RUN rustup toolchain install --profile minimal --allow-downgrade nightly --component miri
 
-COPY build/cargo-config.toml ${CARGO_HOME}/config.toml
+COPY Cargo.toml ${CARGO_HOME}/config.toml
 
 # ===== Install cargo-check-external-types which requires a specific nightly, see
 # ===== https://github.com/awslabs/cargo-check-external-types?tab=readme-ov-file#how-to-use
@@ -95,9 +98,11 @@ ARG CARGO_CHECK_EXTERNAL_TYPES_VERSION=nightly-2025-10-18
 RUN rustup toolchain install ${CARGO_CHECK_EXTERNAL_TYPES_VERSION} --profile minimal && \
     cargo +${CARGO_CHECK_EXTERNAL_TYPES_VERSION} install cargo-check-external-types
 
+# Copy cargo-chef from the shared chef stage (same version used by planner)
+COPY --from=chef --chown=${USER}:${USER} /usr/local/cargo/bin/cargo-chef ${CARGO_HOME}/bin/cargo-chef
+
 RUN curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash && \
     cargo binstall -y \
-    cargo-chef \
     cargo-deny \
     cargo-nextest \
     sccache
