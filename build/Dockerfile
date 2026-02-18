@@ -86,33 +86,11 @@ ARG CARGO_CHECK_EXTERNAL_TYPES_VERSION=nightly-2025-10-18
 RUN rustup toolchain install ${CARGO_CHECK_EXTERNAL_TYPES_VERSION} --profile minimal && \
     cargo +${CARGO_CHECK_EXTERNAL_TYPES_VERSION} install cargo-check-external-types
 
-# ===== Install sccache =====
-RUN case "${TARGETARCH}" in \
-    "amd64") SCCACHE_ARCH="x86_64-unknown-linux-musl" ;; \
-    "arm64") SCCACHE_ARCH="aarch64-unknown-linux-musl" ;; \
-    *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
-    esac && \
-    curl -fsSL "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}.tar.gz" \
-    | tar -xz -C /tmp && \
-    mv "/tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}/sccache" "${CARGO_HOME}/bin/sccache" && \
-    rm -rf /tmp/sccache-*
-
-# ===== Install cargo-nextest =====
-RUN case "${TARGETARCH}" in \
-    "amd64") NEXTEST_ARCH="x86_64-unknown-linux-gnu" ;; \
-    "arm64") NEXTEST_ARCH="aarch64-unknown-linux-gnu" ;; \
-    *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
-    esac && \
-    curl -fsSL "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-${NEXTEST_VERSION}/cargo-nextest-${NEXTEST_VERSION}-${NEXTEST_ARCH}.tar.gz" \
-    | tar -xz -C /tmp && \
-    mv "/tmp/cargo-nextest" "${CARGO_HOME}/bin/cargo-nextest" && \
-    rm -rf /tmp/cargo-nextest*
-
-# ===== Install cargo-deny =====
-RUN cargo install cargo-deny
-
-# ===== Install Go =====
-RUN curl -fsSL "https://go.dev/dl/${GO_VERSION}.linux-${GO_ARCH}.tar.gz" | tar -C ${HOME} -xzf -
+RUN curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash && \
+    cargo binstall -y \
+    cargo-deny \
+    cargo-nextest \
+    sccache
 
 # ====== Fetch current dependencies =====
 RUN --mount=type=bind,dst=/src cargo fetch --locked --manifest-path=/src/Cargo.toml
