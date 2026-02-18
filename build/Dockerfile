@@ -8,7 +8,7 @@ ARG RUSTUP_HOME=${HOME}/.rustup
 
 # Versions
 ARG RUST_VERSION=1.93.1
-ARG GO_VERSION=1.25.7
+ARG GO_VERSION=1.26.0
 
 # ===== Pull Official Images =====
 FROM rust:${RUST_VERSION}-bookworm AS rust-official
