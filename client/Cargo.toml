@@ -8,21 +8,21 @@ license = "Apache-2.0"
 mauricebarnum-oxia-common = { path = "../common" }
 tokio = { version = "1.49.0", features = ["sync", "rt", "time"] }
 tokio-stream = "0.1.18"
-tonic = { version = "0.14.3", features = ["gzip", "channel", "zstd"] }
+tonic = { version = "0.14.4", features = ["gzip", "channel", "zstd"] }
 prost = "0.14.3" # If using Protobuf
 thiserror = "2.0.18"
 bytes = "1.11.1"
 tracing = "0.1.44"
-futures = "0.3.31"
+futures = "0.3.32"
 getrandom = "0.4.1"
-rand = "0.9.2"
+rand = "0.10.0"
 xxhash-rust = { version = "0.8.15", default-features = false, features = [
     "xxh3",
 ] }
 backon = "1.6.0"
 arc-swap = "1.8"
 tokio-util = "0.7.18"
-bon = { version = "3.8.2", features = ["implied-bounds"] }
+bon = { version = "3.9.0", features = ["implied-bounds"] }
 dashmap = { version = "6", optional = true }
 fastrand = "2.3.0"
 
@@ -36,11 +36,11 @@ chrono = "0.4.43"
 socket2 = "0.6.2"
 test-log = { version = "0.2.19", features = ["trace", "color"] }
 oxia-bin-util = { path = "../oxia-bin-util" }
-tempfile = "3.24.0"
+tempfile = "3.25.0"
 anyhow = "1.0.101"
 itertools = "0.14.0"
 criterion = "0.8"
-nix = { version = "0.30", default-features = false, features = ["signal"] }
+nix = { version = "0.31", default-features = false, features = ["signal"] }
 
 [[bench]]
 name = "shard_lookup"
