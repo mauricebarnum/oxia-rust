@@ -90,7 +90,7 @@ ENV \
 RUN rustup component add clippy
 RUN rustup toolchain install --profile minimal --allow-downgrade nightly --component miri
 
-COPY Cargo.toml ${CARGO_HOME}/config.toml
+COPY build/cargo-config.toml ${CARGO_HOME}/config.toml
 
 # ===== Install cargo-check-external-types which requires a specific nightly, see
 # ===== https://github.com/awslabs/cargo-check-external-types?tab=readme-ov-file#how-to-use
@@ -110,13 +110,14 @@ RUN curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/ca
 # ====== Cook dependencies with cargo-chef =====
 # Pre-compile external dependencies into ${HOME}/deps/target so that CI runs
 # (which bind-mount source at /src) find them via CARGO_TARGET_DIR and only
-# need to compile workspace code.  The debug profile is used because it has no
-# workspace-level [profile.dev] override, so the fingerprints produced here
-# match those produced by CI debug builds.
+# need to compile workspace code.
+# Two profiles are cooked so both debug and optimised CI builds hit the cache.
+# Profile settings are read from ${CARGO_HOME}/config.toml (cargo-config.toml);
+# they must match the workspace Cargo.toml profiles — see that file for details.
 COPY --from=planner --chown=${USER}:${USER} /recipe/recipe.json ${HOME}/deps/recipe.json
 WORKDIR ${HOME}/deps
 RUN cargo chef cook --all-targets --recipe-path recipe.json && \
-    cargo chef cook --release --all-targets --recipe-path recipe.json
+    cargo chef cook --profile ci --all-targets --recipe-path recipe.json
 WORKDIR ${HOME}
 ENV CARGO_TARGET_DIR=${HOME}/deps/target
 

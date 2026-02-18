@@ -41,3 +41,20 @@ panic = "unwind"
 incremental = false
 codegen-units = 1
 rpath = false
+
+# CI build: exercises the optimiser at opt-level=3 without LTO, so that
+# cargo-chef pre-compiled dep artifacts have valid fingerprints. Fat LTO
+# forces the linker to reprocess all bitcode anyway, negating any caching.
+# Assertions are on to catch bugs the optimiser can expose.
+#
+# NOTE: [profile.ci] in build/cargo-config.toml must mirror these settings
+# exactly. cargo-chef cook runs outside the workspace and reads that file;
+# CI builds run inside the workspace and read this file. Fingerprints must
+# match or every CI build recompiles all dependencies.
+[profile.ci]
+inherits = "release"
+debug = "line-tables-only" # see build/cargo-config.toml — must match
+lto = false                # see build/cargo-config.toml — must match
+codegen-units = 16         # see build/cargo-config.toml — must match
+debug-assertions = true    # see build/cargo-config.toml — must match
+overflow-checks = true     # see build/cargo-config.toml — must match
