@@ -97,12 +97,6 @@ jobs:
           restore-keys: |
             sccache-${{ runner.os }}-
 
-      - name: enable-build-cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-          key: target-${{ runner.os }}-${{ github.ref_name }}
-
       - name: detect-vendored-build
         id: vendored
         run: |
