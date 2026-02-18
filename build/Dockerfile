@@ -6,7 +6,24 @@ ARG HOME=/home/${USER}
 ARG CARGO_HOME=${HOME}/.cargo
 ARG RUSTUP_HOME=${HOME}/.rustup
 
+# Versions
+ARG RUST_VERSION=1.93.0
+ARG GO_VERSION=1.25.7
+
+# ===== Pull Official Images =====
+FROM rust:${RUST_VERSION}-bookworm AS rust-official
+FROM golang:${GO_VERSION}-bookworm AS go-official
+
 FROM ubuntu:24.04 AS build
+
+# Re-declare ARGs needed in this stage
+ARG USER
+ARG HOME
+ARG CARGO_HOME
+ARG RUSTUP_HOME
+ARG TARGETARCH
+ARG SCCACHE_VERSION
+ARG NEXTEST_VERSION
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -16,15 +33,7 @@ ARG HOME
 ARG CARGO_HOME
 ARG RUSTUP_HOME
 
-# Versions
-ARG RUST_VERSION=1.93.0
-ARG GO_VERSION=go1.25.7
-ARG SCCACHE_VERSION=v0.13.0
-ARG NEXTEST_VERSION=0.9.126
-ARG CARGO_CHECK_EXTERNAL_TYPES_VERSION=nightly
-
 ARG TARGETARCH
-ARG GO_ARCH=${TARGETARCH}
 
 # ===== OS packages (long-lived layer), runs as root =====
 
@@ -56,7 +65,10 @@ ENV \
     RUSTUP_HOME=${RUSTUP_HOME} \
     PATH=${RUSTUP_HOME}/bin:${CARGO_HOME}/bin:/home/${USER}/go/bin:$PATH
 
-# ===== Install Rust =====
+# ===== Copy Rust from Official Image =====
+# We copy the entire toolchain and cargo home
+COPY --from=rust-official --chown=${USER}:${USER} /usr/local/cargo ${CARGO_HOME}
+COPY --from=rust-official --chown=${USER}:${USER} /usr/local/rustup ${RUSTUP_HOME}
 
 # build time env: also add to final image
 ENV \
@@ -64,9 +76,6 @@ ENV \
     RUSTUP_HOME=${RUSTUP_HOME} \
     PATH=${CARGO_HOME}/bin:${RUSTUP_HOME}/bin:$PATH
 
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain ${RUST_VERSION} --profile minimal --component clippy -y
-
-# ===== Install miri =====
 RUN rustup toolchain install --profile minimal --allow-downgrade nightly --component miri
 
 # ===== Install cargo-check-external-types which requires a specific nightly, see
@@ -117,6 +126,10 @@ RUN --mount=type=bind,dst=/src \
     (cargo check --frozen --all-targets 2>/dev/null || true) && \
     (cargo check --frozen --release --all-targets 2>/dev/null || true)
 
+# ===== Copy Go from Official Image =====
+COPY --from=go-official /usr/local/go /usr/local/go
+ENV PATH=/usr/local/go/bin:$PATH
+
 # ====== Install oxia ======
 # if this breaks, take a look at oxia-bin-util/build.rs
 RUN --mount=type=bind,dst=/src GOPROXY=off GOCACHE=/tmp/gocache go -C /src/ext/oxia/cmd build -mod=vendor -o $HOME/go/bin/oxia && rm -rf "$GOCACHE"
@@ -136,6 +149,6 @@ ARG RUSTUP_HOME
 ENV \
     CARGO_HOME=${CARGO_HOME} \
     RUSTUP_HOME=${RUSTUP_HOME} \
-    PATH=${CARGO_HOME}/bin:${RUSTUP_HOME}/bin:${HOME}/go/bin:$PATH
+    PATH=${CARGO_HOME}/bin:${RUSTUP_HOME}/bin:${HOME}/go/bin:/usr/local/go/bin:$PATH
 
 COPY --from=build / /
