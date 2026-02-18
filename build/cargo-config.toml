@@ -1,0 +1,32 @@
+# Goal: Fast compiles, but fast enough runtime to not be frustrated.
+[profile.dev]
+opt-level = 1       # Basic optimizations so async code isn't glacial
+debug = "full"      # Maximum debug info for IDEs and GDB/LLDB
+incremental = true  # Essential for fast "edit-compile-test" cycles
+codegen-units = 256
+
+# Optimize dependencies even in debug mode
+[profile.dev.package."*"]
+opt-level = 3 # Your code stays debuggable; tokio/hyper/serde run at 100% speed
+
+# Goal: High performance for tools and local testing without infinite compile times.
+[profile.release]
+opt-level = 3
+lto = "thin"       # Fast cross-crate optimization
+codegen-units = 16 # Parallel compilation for faster build times
+panic = "unwind"   # Standard behavior for safety/stack traces
+strip = "none"     # Keep symbols by default for local profiling/bloat checks
+debug = 1          # Line tables, not full symbols
+
+
+# cargo build --profile production
+# Goal: The "Nuclear Option". Smallest, fastest binary possible.
+[profile.production]
+inherits = "release" # Start with release defaults
+lto = "fat"          # Global, heavy optimization across all crates
+codegen-units = 1    # Max visibility for the compiler to inline/flatten
+# panic = "abort"          # Remove unwinding logic for smaller code & better speed
+incremental = false        # Best-effort clean optimization
+debug = true               # Generate debug info...
+split-debuginfo = "packed" # ...but put it in a separate .dwp/.dSYM file
+strip = "debuginfo"        # ...and keep it out of the production executable

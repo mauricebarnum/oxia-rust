@@ -78,6 +78,8 @@ ENV \
 
 RUN rustup toolchain install --profile minimal --allow-downgrade nightly --component miri
 
+COPY build/cargo-config.toml ${CARGO_HOME}/config.toml
+
 # ===== Install cargo-check-external-types which requires a specific nightly, see
 # ===== https://github.com/awslabs/cargo-check-external-types?tab=readme-ov-file#how-to-use
 ARG CARGO_CHECK_EXTERNAL_TYPES_VERSION=nightly-2025-10-18
