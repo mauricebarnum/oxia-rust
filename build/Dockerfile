@@ -83,7 +83,7 @@ COPY build/cargo-config.toml ${CARGO_HOME}/config.toml
 # ===== Install cargo-check-external-types which requires a specific nightly, see
 # ===== https://github.com/awslabs/cargo-check-external-types?tab=readme-ov-file#how-to-use
 ARG CARGO_CHECK_EXTERNAL_TYPES_VERSION=nightly-2025-10-18
-RUN rustup toolchain install ${CARGO_CHECK_EXTERNAL_TYPES_VERSION} && \
+RUN rustup toolchain install ${CARGO_CHECK_EXTERNAL_TYPES_VERSION} --profile minimal && \
     cargo +${CARGO_CHECK_EXTERNAL_TYPES_VERSION} install cargo-check-external-types
 
 # ===== Install sccache =====
