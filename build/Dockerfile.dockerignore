@@ -1,14 +1,9 @@
 # Ignore everything by default
 **
 
-# Allow Cargo manifests
+# Allow Cargo manifests (sufficient for cargo-chef prepare; no source stubs needed)
 !**/Cargo.toml
 !Cargo.lock
-
-# Include minimal sources to make cargo fetch happy
-!**/src/lib.rs
-!**/src/main.rs
-!client/benches/*.rs
 
 # Allow build files (Dockerfile and any supporting scripts in build/)
 !build/**

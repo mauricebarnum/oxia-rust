@@ -9,24 +9,18 @@ codegen-units = 256
 [profile.dev.package."*"]
 opt-level = 3 # Your code stays debuggable; tokio/hyper/serde run at 100% speed
 
-# Goal: High performance for tools and local testing without infinite compile times.
+# Goal: Maximum runtime performance.  Matches workspace [profile.release] so that
+# cargo-chef pre-compiles release deps with fingerprints valid for CI release builds.
 [profile.release]
 opt-level = 3
-lto = "thin"       # Fast cross-crate optimization
-codegen-units = 16 # Parallel compilation for faster build times
-panic = "unwind"   # Standard behavior for safety/stack traces
-strip = "none"     # Keep symbols by default for local profiling/bloat checks
-debug = 1          # Line tables, not full symbols
+lto = true              # fat LTO: full cross-crate optimization (slower build, faster binary)
+codegen-units = 1       # single unit: max inlining opportunity
+panic = "unwind"
+debug = true            # full debug info...
+split-debuginfo = "packed" # ...packed into a separate .dwp/.dSYM...
+strip = "debuginfo"        # ...and stripped from the binary itself
+debug-assertions = false
+overflow-checks = false
+incremental = false
+rpath = false
 
-
-# cargo build --profile production
-# Goal: The "Nuclear Option". Smallest, fastest binary possible.
-[profile.production]
-inherits = "release" # Start with release defaults
-lto = "fat"          # Global, heavy optimization across all crates
-codegen-units = 1    # Max visibility for the compiler to inline/flatten
-# panic = "abort"          # Remove unwinding logic for smaller code & better speed
-incremental = false        # Best-effort clean optimization
-debug = true               # Generate debug info...
-split-debuginfo = "packed" # ...but put it in a separate .dwp/.dSYM file
-strip = "debuginfo"        # ...and keep it out of the production executable
