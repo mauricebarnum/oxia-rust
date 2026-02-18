@@ -15,7 +15,7 @@ FROM rust:${RUST_VERSION}-bookworm AS rust-official
 FROM golang:${GO_VERSION}-bookworm AS go-official
 
 # ===== Chef: shared base for planner and cook — guarantees same cargo-chef version =====
-FROM rust:${RUST_VERSION}-bookworm AS chef
+FROM rust-official AS chef
 RUN curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash && \
     cargo binstall -y cargo-chef
 
