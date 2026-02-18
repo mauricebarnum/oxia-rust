@@ -70,14 +70,18 @@ jobs:
           BUILD_MODE="${{ github.event.inputs.build_mode || 'auto' }}"
           if [ "$BUILD_MODE" = "ci" ]; then
             echo "RELEASE_FLAG=--profile ci" >> $GITHUB_ENV
+            echo "NEXTEST_FLAG=--cargo-profile ci" >> $GITHUB_ENV
           elif [ "$BUILD_MODE" = "debug" ]; then
             echo "RELEASE_FLAG=" >> $GITHUB_ENV
+            echo "NEXTEST_FLAG=" >> $GITHUB_ENV
           elif [ "${{ github.event_name }}" = "pull_request" ]; then
             # Auto mode: debug for PRs
             echo "RELEASE_FLAG=" >> $GITHUB_ENV
+            echo "NEXTEST_FLAG=" >> $GITHUB_ENV
           else
             # Auto mode: ci profile for branch pushes (main or any other branch)
             echo "RELEASE_FLAG=--profile ci" >> $GITHUB_ENV
+            echo "NEXTEST_FLAG=--cargo-profile ci" >> $GITHUB_ENV
           fi
           echo "Build mode: $BUILD_MODE, Event: ${{ github.event_name }}, Release flag: $RELEASE_FLAG"
 
@@ -122,7 +126,7 @@ jobs:
 
       - name: test
         timeout-minutes: 10
-        run: cargo nextest run $RELEASE_FLAG --frozen --no-fail-fast --verbose
+        run: cargo nextest run $NEXTEST_FLAG --frozen --no-fail-fast --verbose
 
       - name: miri-client
         run: cargo +nightly miri nextest run --package mauricebarnum-oxia-client --frozen
