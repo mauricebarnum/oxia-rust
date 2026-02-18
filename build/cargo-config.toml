@@ -1,3 +1,17 @@
+# Cargo configuration installed into ${CARGO_HOME}/config.toml inside the
+# build image.  cargo-chef cook runs outside the workspace directory and
+# reads this file for profile settings; CI builds run inside the workspace
+# and read workspace Cargo.toml instead.  The two sources are merged by
+# Cargo with workspace Cargo.toml taking precedence.
+#
+# FINGERPRINT WARNING: For cargo-chef caching to survive into CI builds,
+# the effective compiler flags for each cooked profile must be identical in
+# both contexts.  Concretely:
+#   - [profile.ci] here must exactly match [profile.ci] in Cargo.toml.
+#   - [profile.release] here must exactly match [profile.release] in Cargo.toml
+#     (because [profile.ci] inherits from it).
+# Update both files together whenever you change a profile.
+
 # Goal: Fast compiles, but fast enough runtime to not be frustrated.
 [profile.dev]
 opt-level = 1       # Basic optimizations so async code isn't glacial
@@ -9,18 +23,25 @@ codegen-units = 256
 [profile.dev.package."*"]
 opt-level = 3 # Your code stays debuggable; tokio/hyper/serde run at 100% speed
 
-# Goal: Maximum runtime performance.  Matches workspace [profile.release] so that
-# cargo-chef pre-compiles release deps with fingerprints valid for CI release builds.
+# Must match workspace Cargo.toml [profile.release] — see fingerprint warning above.
 [profile.release]
 opt-level = 3
-lto = true              # fat LTO: full cross-crate optimization (slower build, faster binary)
-codegen-units = 1       # single unit: max inlining opportunity
-panic = "unwind"
-debug = true            # full debug info...
-split-debuginfo = "packed" # ...packed into a separate .dwp/.dSYM...
-strip = "debuginfo"        # ...and stripped from the binary itself
+debug = true
+split-debuginfo = "packed"
+strip = "debuginfo"
 debug-assertions = false
 overflow-checks = false
+lto = true
+panic = "unwind"
 incremental = false
+codegen-units = 1
 rpath = false
 
+# Must match workspace Cargo.toml [profile.ci] — see fingerprint warning above.
+[profile.ci]
+inherits = "release"
+debug = "line-tables-only" # see Cargo.toml — must match
+lto = false                # see Cargo.toml — must match
+codegen-units = 16         # see Cargo.toml — must match
+debug-assertions = true    # see Cargo.toml — must match
+overflow-checks = true     # see Cargo.toml — must match

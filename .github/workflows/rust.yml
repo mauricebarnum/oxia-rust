@@ -13,13 +13,13 @@ on:
   workflow_dispatch:
     inputs:
       build_mode:
-        description: "Build mode (auto = release for branches, debug for PRs)"
+        description: "Build mode (auto = ci for branches, debug for PRs)"
         required: false
         default: "auto"
         type: choice
         options:
           - auto
-          - release
+          - ci
           - debug
       extra_env:
         description: "Extra environment variables (e.g., FOO=bar BAZ=qux)"
@@ -65,19 +65,19 @@ jobs:
       - name: cargo-deny
         run: cargo deny check
 
-      - name: set-cargo-release-flag
+      - name: set-build-profile
         run: |
           BUILD_MODE="${{ github.event.inputs.build_mode || 'auto' }}"
-          if [ "$BUILD_MODE" = "release" ]; then
-            echo "RELEASE_FLAG=--release" >> $GITHUB_ENV
+          if [ "$BUILD_MODE" = "ci" ]; then
+            echo "RELEASE_FLAG=--profile ci" >> $GITHUB_ENV
           elif [ "$BUILD_MODE" = "debug" ]; then
             echo "RELEASE_FLAG=" >> $GITHUB_ENV
           elif [ "${{ github.event_name }}" = "pull_request" ]; then
             # Auto mode: debug for PRs
             echo "RELEASE_FLAG=" >> $GITHUB_ENV
           else
-            # Auto mode: release for branch pushes (main or any other branch)
-            echo "RELEASE_FLAG=--release" >> $GITHUB_ENV
+            # Auto mode: ci profile for branch pushes (main or any other branch)
+            echo "RELEASE_FLAG=--profile ci" >> $GITHUB_ENV
           fi
           echo "Build mode: $BUILD_MODE, Event: ${{ github.event_name }}, Release flag: $RELEASE_FLAG"
 
