@@ -14,6 +14,30 @@ ARG GO_VERSION=1.26.0
 FROM rust:${RUST_VERSION}-bookworm AS rust-official
 FROM golang:${GO_VERSION}-bookworm AS go-official
 
+# ===== Planner: generate cargo-chef recipe =====
+# Copies only manifests so this layer (and the cook layer) are only invalidated
+# when dependencies change, not when source files change.
+FROM rust:${RUST_VERSION}-bookworm AS planner
+RUN curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash && \
+    cargo binstall -y cargo-chef
+WORKDIR /recipe
+COPY Cargo.toml Cargo.lock ./
+COPY common/Cargo.toml common/
+COPY client/Cargo.toml client/
+COPY cmd/Cargo.toml cmd/
+COPY oxia-bin-util/Cargo.toml oxia-bin-util/
+# cargo chef prepare uses `cargo metadata` which requires source files to exist
+# for auto-discovered targets (anything without an explicit [lib]/[[bin]] section).
+# Create empty stubs; cargo only checks existence at metadata time, not content.
+RUN mkdir -p common/src client/src client/benches cmd/src oxia-bin-util/src \
+    && touch common/src/lib.rs \
+    client/src/lib.rs \
+    client/benches/shard_lookup.rs \
+    client/benches/channel_pool.rs \
+    cmd/src/lib.rs cmd/src/main.rs \
+    oxia-bin-util/src/lib.rs
+RUN cargo chef prepare --recipe-path recipe.json
+
 FROM ubuntu:24.04 AS build
 
 # Re-declare ARGs needed in this stage
@@ -22,18 +46,8 @@ ARG HOME
 ARG CARGO_HOME
 ARG RUSTUP_HOME
 ARG TARGETARCH
-ARG SCCACHE_VERSION
-ARG NEXTEST_VERSION
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-
-# Import defaults
-ARG USER
-ARG HOME
-ARG CARGO_HOME
-ARG RUSTUP_HOME
-
-ARG TARGETARCH
 
 # ===== OS packages (long-lived layer), runs as root =====
 
@@ -60,17 +74,11 @@ RUN useradd -ms /bin/bash ${USER}
 USER ${USER}
 WORKDIR /home/${USER}
 
-ENV \
-    CARGO_HOME=${CARGO_HOME} \
-    RUSTUP_HOME=${RUSTUP_HOME} \
-    PATH=${RUSTUP_HOME}/bin:${CARGO_HOME}/bin:/home/${USER}/go/bin:$PATH
-
 # ===== Copy Rust from Official Image =====
 # We copy the entire toolchain and cargo home
 COPY --from=rust-official --chown=${USER}:${USER} /usr/local/cargo ${CARGO_HOME}
 COPY --from=rust-official --chown=${USER}:${USER} /usr/local/rustup ${RUSTUP_HOME}
 
-# build time env: also add to final image
 ENV \
     CARGO_HOME=${CARGO_HOME} \
     RUSTUP_HOME=${RUSTUP_HOME} \
@@ -89,23 +97,23 @@ RUN rustup toolchain install ${CARGO_CHECK_EXTERNAL_TYPES_VERSION} --profile min
 
 RUN curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash && \
     cargo binstall -y \
+    cargo-chef \
     cargo-deny \
     cargo-nextest \
     sccache
 
-# ====== Fetch current dependencies =====
-RUN --mount=type=bind,dst=/src cargo fetch --locked --manifest-path=/src/Cargo.toml
-
-# ====== Prepopulate dependency caches =====
-# Fetch downloads .crate files to $CARGO_HOME/registry/cache
-# The build step extracts them to $CARGO_HOME/registry/src and clones git deps to $CARGO_HOME/git
-# We use || true because the build will fail without all project files, but caches are populated
-# Prepopulate both dev and release profiles since CI uses both
-RUN --mount=type=bind,dst=/src \
-    cd /src && \
-    cargo fetch --locked && \
-    (cargo check --frozen --all-targets 2>/dev/null || true) && \
-    (cargo check --frozen --release --all-targets 2>/dev/null || true)
+# ====== Cook dependencies with cargo-chef =====
+# Pre-compile external dependencies into ${HOME}/deps/target so that CI runs
+# (which bind-mount source at /src) find them via CARGO_TARGET_DIR and only
+# need to compile workspace code.  The debug profile is used because it has no
+# workspace-level [profile.dev] override, so the fingerprints produced here
+# match those produced by CI debug builds.
+COPY --from=planner --chown=${USER}:${USER} /recipe/recipe.json ${HOME}/deps/recipe.json
+WORKDIR ${HOME}/deps
+RUN cargo chef cook --all-targets --recipe-path recipe.json && \
+    cargo chef cook --release --all-targets --recipe-path recipe.json
+WORKDIR ${HOME}
+ENV CARGO_TARGET_DIR=${HOME}/deps/target
 
 # ===== Copy Go from Official Image =====
 COPY --from=go-official /usr/local/go /usr/local/go
@@ -130,6 +138,8 @@ ARG RUSTUP_HOME
 ENV \
     CARGO_HOME=${CARGO_HOME} \
     RUSTUP_HOME=${RUSTUP_HOME} \
+    CARGO_TARGET_DIR=${HOME}/deps/target \
+    CARGO_INCREMENTAL=0 \
     PATH=${CARGO_HOME}/bin:${RUSTUP_HOME}/bin:${HOME}/go/bin:/usr/local/go/bin:$PATH
 
 COPY --from=build / /

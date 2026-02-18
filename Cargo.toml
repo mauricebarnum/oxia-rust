@@ -23,6 +23,12 @@ unexpected_cfgs = { level = "warn", check-cfg = [
     "cfg(accept_invalid_shard_ids)",
 ] }
 
+[profile.dev]
+opt-level = 1       # Basic optimizations so async code isn't glacial
+debug = "full"      # Maximum debug info for IDEs and GDB/LLDB
+incremental = true  # Essential for fast "edit-compile-test" cycles
+codegen-units = 256
+
 [profile.release]
 opt-level = 3
 debug = true
