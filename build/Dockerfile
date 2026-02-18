@@ -76,6 +76,7 @@ ENV \
     RUSTUP_HOME=${RUSTUP_HOME} \
     PATH=${CARGO_HOME}/bin:${RUSTUP_HOME}/bin:$PATH
 
+RUN rustup component add clippy
 RUN rustup toolchain install --profile minimal --allow-downgrade nightly --component miri
 
 COPY build/cargo-config.toml ${CARGO_HOME}/config.toml
