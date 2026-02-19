@@ -51,6 +51,18 @@ rpath = false
 # exactly. cargo-chef cook runs outside the workspace and reads that file;
 # CI builds run inside the workspace and read this file. Fingerprints must
 # match or every CI build recompiles all dependencies.
+# PR CI builds: dev opt-levels for fast compile, line-tables-only for useful
+# stack traces without the cost of full debug info.
+# NOTE: [profile.ci-debug] in build/cargo-config.toml must mirror these settings
+# exactly — see the fingerprint warning in that file.
+[profile.ci-debug]
+inherits = "dev"
+debug = "line-tables-only" # see build/cargo-config.toml — must match
+incremental = false        # see build/cargo-config.toml — must match
+
+[profile.ci-debug.package."*"]
+opt-level = 3              # see build/cargo-config.toml — must match
+
 [profile.ci]
 inherits = "release"
 debug = "line-tables-only" # see build/cargo-config.toml — must match
