@@ -116,8 +116,11 @@ RUN curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/ca
 # they must match the workspace Cargo.toml profiles — see that file for details.
 COPY --from=planner --chown=${USER}:${USER} /recipe/recipe.json ${HOME}/deps/recipe.json
 WORKDIR ${HOME}/deps
-RUN cargo chef cook --all-targets --recipe-path recipe.json && \
-    cargo chef cook --profile ci --all-targets --recipe-path recipe.json
+# CARGO_INCREMENTAL=0 must match the final image ENV so that the metadata
+# hash embedded in artifact filenames is identical between cook and CI.
+# A mismatch causes cargo to ignore pre-built artifacts and recompile all deps.
+RUN CARGO_INCREMENTAL=0 cargo chef cook --all-targets --recipe-path recipe.json && \
+    CARGO_INCREMENTAL=0 cargo chef cook --profile ci --all-targets --recipe-path recipe.json
 WORKDIR ${HOME}
 ENV CARGO_TARGET_DIR=${HOME}/deps/target
 
