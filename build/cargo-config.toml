@@ -45,7 +45,7 @@ debug = "line-tables-only" # see Cargo.toml — must match
 incremental = false        # see Cargo.toml — must match
 
 [profile.ci-debug.package."*"]
-opt-level = 3              # see Cargo.toml — must match
+opt-level = 3 # see Cargo.toml — must match
 
 # Must match workspace Cargo.toml [profile.ci] — see fingerprint warning above.
 [profile.ci]
@@ -55,3 +55,4 @@ lto = false                # see Cargo.toml — must match
 codegen-units = 16         # see Cargo.toml — must match
 debug-assertions = true    # see Cargo.toml — must match
 overflow-checks = true     # see Cargo.toml — must match
+strip = "none"
