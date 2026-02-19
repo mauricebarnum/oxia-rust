@@ -112,11 +112,11 @@ jobs:
           cargo update --dry-run --verbose # update crate index
           cargo fetch --locked   # fetch dependencies: last network dependency
 
-      - name: clippy
-        run: cargo clippy $RELEASE_FLAG --no-deps --all-targets --frozen -- -D warnings
-
       - name: build
         run: cargo build $RELEASE_FLAG --frozen --all-targets
+
+      - name: clippy
+        run: cargo clippy $RELEASE_FLAG --no-deps --all-targets --frozen -- -D warnings
 
       - name: test
         timeout-minutes: 10
