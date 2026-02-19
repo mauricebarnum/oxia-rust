@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
     inputs:
       build_mode:
-        description: "Build mode (auto = ci for branches, debug for PRs)"
+        description: "Build mode (auto = ci for branches, ci-debug for PRs)"
         required: false
         default: "auto"
         type: choice
@@ -75,9 +75,9 @@ jobs:
             echo "RELEASE_FLAG=" >> $GITHUB_ENV
             echo "NEXTEST_FLAG=" >> $GITHUB_ENV
           elif [ "${{ github.event_name }}" = "pull_request" ]; then
-            # Auto mode: debug for PRs
-            echo "RELEASE_FLAG=" >> $GITHUB_ENV
-            echo "NEXTEST_FLAG=" >> $GITHUB_ENV
+            # Auto mode: ci-debug for PRs
+            echo "RELEASE_FLAG=--profile ci-debug" >> $GITHUB_ENV
+            echo "NEXTEST_FLAG=--cargo-profile ci-debug" >> $GITHUB_ENV
           else
             # Auto mode: ci profile for branch pushes (main or any other branch)
             echo "RELEASE_FLAG=--profile ci" >> $GITHUB_ENV

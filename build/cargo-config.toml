@@ -7,6 +7,7 @@
 # FINGERPRINT WARNING: For cargo-chef caching to survive into CI builds,
 # the effective compiler flags for each cooked profile must be identical in
 # both contexts.  Concretely:
+#   - [profile.ci-debug] here must exactly match [profile.ci-debug] in Cargo.toml.
 #   - [profile.ci] here must exactly match [profile.ci] in Cargo.toml.
 #   - [profile.release] here must exactly match [profile.release] in Cargo.toml
 #     (because [profile.ci] inherits from it).
@@ -36,6 +37,15 @@ panic = "unwind"
 incremental = false
 codegen-units = 1
 rpath = false
+
+# Must match workspace Cargo.toml [profile.ci-debug] — see fingerprint warning above.
+[profile.ci-debug]
+inherits = "dev"
+debug = "line-tables-only" # see Cargo.toml — must match
+incremental = false        # see Cargo.toml — must match
+
+[profile.ci-debug.package."*"]
+opt-level = 3              # see Cargo.toml — must match
 
 # Must match workspace Cargo.toml [profile.ci] — see fingerprint warning above.
 [profile.ci]

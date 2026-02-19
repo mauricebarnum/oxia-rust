@@ -111,15 +111,17 @@ RUN curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/ca
 # Pre-compile external dependencies into ${HOME}/deps/target so that CI runs
 # (which bind-mount source at /src) find them via CARGO_TARGET_DIR and only
 # need to compile workspace code.
-# Two profiles are cooked so both debug and optimised CI builds hit the cache.
+# Two profiles are cooked so both PR and branch CI builds hit the cache.
+#   ci-debug: PR builds — dev opt-levels, line-tables-only debug info
+#   ci:       branch builds — release opt-levels, optimised
 # Profile settings are read from ${CARGO_HOME}/config.toml (cargo-config.toml);
 # they must match the workspace Cargo.toml profiles — see that file for details.
-COPY --from=planner --chown=${USER}:${USER} /recipe/recipe.json ${HOME}/deps/recipe.json
-WORKDIR ${HOME}/deps
 # CARGO_INCREMENTAL=0 must match the final image ENV so that the metadata
 # hash embedded in artifact filenames is identical between cook and CI.
 # A mismatch causes cargo to ignore pre-built artifacts and recompile all deps.
-RUN CARGO_INCREMENTAL=0 cargo chef cook --all-targets --recipe-path recipe.json && \
+COPY --from=planner --chown=${USER}:${USER} /recipe/recipe.json ${HOME}/deps/recipe.json
+WORKDIR ${HOME}/deps
+RUN CARGO_INCREMENTAL=0 cargo chef cook --profile ci-debug --all-targets --recipe-path recipe.json && \
     CARGO_INCREMENTAL=0 cargo chef cook --profile ci --all-targets --recipe-path recipe.json
 WORKDIR ${HOME}
 ENV CARGO_TARGET_DIR=${HOME}/deps/target
