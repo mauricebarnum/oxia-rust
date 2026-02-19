@@ -8,7 +8,7 @@ license = "Apache-2.0"
 mauricebarnum-oxia-common = { path = "../common" }
 tokio = { version = "1.49.0", features = ["sync", "rt", "time"] }
 tokio-stream = "0.1.18"
-tonic = { version = "0.14.4", features = ["gzip", "channel", "zstd"] }
+tonic = { version = "0.14.5", features = ["gzip", "channel", "zstd"] }
 prost = "0.14.3" # If using Protobuf
 thiserror = "2.0.18"
 bytes = "1.11.1"
