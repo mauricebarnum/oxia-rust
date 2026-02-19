@@ -61,10 +61,11 @@ debug = "line-tables-only" # see build/cargo-config.toml — must match
 incremental = false        # see build/cargo-config.toml — must match
 
 [profile.ci-debug.package."*"]
-opt-level = 3              # see build/cargo-config.toml — must match
+opt-level = 3 # see build/cargo-config.toml — must match
 
 [profile.ci]
 inherits = "release"
+strip = "none"
 debug = "line-tables-only" # see build/cargo-config.toml — must match
 lto = false                # see build/cargo-config.toml — must match
 codegen-units = 16         # see build/cargo-config.toml — must match
