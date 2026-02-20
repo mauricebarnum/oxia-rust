@@ -37,7 +37,6 @@ env:
   SCCACHE_DIR: "/tmp/sccache"
   RUSTC_WRAPPER: "sccache"
   RUST_BACKTRACE: full
-  CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: true
 
 jobs:
   build:
