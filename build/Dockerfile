@@ -31,15 +31,21 @@ COPY cmd/Cargo.toml cmd/
 COPY oxia-bin-util/Cargo.toml oxia-bin-util/
 # cargo chef prepare uses `cargo metadata` which requires source files to exist
 # for auto-discovered targets (anything without an explicit [lib]/[[bin]] section).
-# Create empty stubs; cargo only checks existence at metadata time, not content.
-RUN mkdir -p common/src client/src client/benches cmd/src oxia-bin-util/src \
-    && touch common/src/lib.rs \
-    client/src/lib.rs \
-    client/benches/shard_lookup.rs \
-    client/benches/channel_pool.rs \
-    cmd/src/lib.rs cmd/src/main.rs \
-    oxia-bin-util/src/lib.rs
-RUN cargo chef prepare --recipe-path recipe.json
+# Seed the minimal conventional stubs, then let cargo metadata tell us what else
+# is missing — each iteration unblocks one file until metadata succeeds.
+# This is self-maintaining: adding new examples/tests/benches never requires
+# updating this Dockerfile.
+RUN for toml in */Cargo.toml; do \
+        dir="${toml%/Cargo.toml}"; \
+        mkdir -p "$dir/src"; \
+        touch "$dir/src/lib.rs" "$dir/src/main.rs"; \
+    done \
+    && while ! cargo metadata --no-deps --format-version 1 >/dev/null 2>/tmp/meta-err; do \
+           path=$(sed -n "s/.*failed to read \`\([^\`]*\)\`.*/\1/p" /tmp/meta-err | head -1); \
+           [ -n "$path" ] || { cat /tmp/meta-err >&2; exit 1; }; \
+           mkdir -p "$(dirname "$path")" && touch "$path"; \
+       done \
+    && cargo chef prepare --recipe-path recipe.json
 
 FROM ubuntu:24.04 AS build
 
@@ -88,10 +94,12 @@ COPY --from=rust-official --chown=${USER}:${USER} /usr/local/rustup ${RUSTUP_HOM
 ENV \
     CARGO_HOME=${CARGO_HOME} \
     RUSTUP_HOME=${RUSTUP_HOME} \
+    CARGO_TARGET_DIR=${HOME}/deps/target \
     PATH=${CARGO_HOME}/bin:${RUSTUP_HOME}/bin:$PATH
 
 RUN rustup component add clippy
-RUN rustup toolchain install --profile minimal --allow-downgrade nightly --component miri
+RUN rustup toolchain install --profile minimal --allow-downgrade nightly && \
+    rustup component add --toolchain nightly miri rust-src
 
 COPY build/cargo-config.toml ${CARGO_HOME}/config.toml
 
@@ -143,8 +151,6 @@ RUN GH_WORKSPACE="/__w/${REPO_NAME}/${REPO_NAME}" && \
     cd "${GH_WORKSPACE}" && \
     CARGO_INCREMENTAL=0 cargo chef cook --profile ci-debug --all-targets --recipe-path recipe.json && \
     CARGO_INCREMENTAL=0 cargo chef cook --profile ci --all-targets --recipe-path recipe.json
-WORKDIR ${HOME}
-ENV CARGO_TARGET_DIR=${HOME}/deps/target
 
 # ===== Copy Go from Official Image =====
 COPY --from=go-official /usr/local/go /usr/local/go

@@ -44,10 +44,12 @@ nix = { version = "0.31", default-features = false, features = ["signal"] }
 
 [[bench]]
 name = "shard_lookup"
+path = "benches/shard_lookup.rs"
 harness = false
 
 [[bench]]
 name = "channel_pool"
+path = "benches/channel_pool.rs"
 harness = false
 
 [lints]
