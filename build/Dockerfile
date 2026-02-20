@@ -73,7 +73,10 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # ===== Create non-root build user and switch =====
-RUN useradd -ms /bin/bash ${USER}
+# /__w is the GitHub Actions workspace root (bind-mounted at runtime as
+# -v /home/runner/work:/__w). Create it here so the cook step can populate
+# /__w/<repo>/<repo> with cargo-chef stubs; the real source overlays it at runtime.
+RUN useradd -ms /bin/bash ${USER} && mkdir -p /__w && chown ${USER}:${USER} /__w
 USER ${USER}
 WORKDIR /home/${USER}
 
@@ -109,8 +112,7 @@ RUN curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/ca
 
 # ====== Cook dependencies with cargo-chef =====
 # Pre-compile external dependencies into ${HOME}/deps/target so that CI runs
-# (which bind-mount source at /src) find them via CARGO_TARGET_DIR and only
-# need to compile workspace code.
+# find them via CARGO_TARGET_DIR and only need to compile workspace code.
 # Two profiles are cooked so both PR and branch CI builds hit the cache.
 #   ci-debug: PR builds — dev opt-levels, line-tables-only debug info
 #   ci:       branch builds — release opt-levels, optimised
@@ -119,9 +121,27 @@ RUN curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/ca
 # CARGO_INCREMENTAL=0 must match the final image ENV so that the metadata
 # hash embedded in artifact filenames is identical between cook and CI.
 # A mismatch causes cargo to ignore pre-built artifacts and recompile all deps.
-COPY --from=planner --chown=${USER}:${USER} /recipe/recipe.json ${HOME}/deps/recipe.json
-WORKDIR ${HOME}/deps
-RUN CARGO_INCREMENTAL=0 cargo chef cook --profile ci-debug --all-targets --recipe-path recipe.json && \
+#
+# WORKDIR must match the GitHub Actions workspace path (/__w/<repo>/<repo>).
+# Cargo encodes the workspace root into build-script OUT_DIR hashes; if the
+# cook runs from a different directory, build-dependency fingerprints will not
+# match and the entire build-dep graph (prost-build, tonic-build, sha2, etc.)
+# will be recompiled on every CI run despite being pre-baked here.
+# The real source is bind-mounted over this directory at runtime; cargo-chef's
+# stub files are shadowed and the pre-built artifacts in ${HOME}/deps/target
+# remain intact.
+#
+# REPO_NAME is passed at build time so GH_WORKSPACE can be derived without
+# needing .git inside the build context. Pass via:
+#   docker build --build-arg REPO_NAME=$(basename $(git remote get-url origin) .git) ...
+# The CI workflow derives it from $GITHUB_REPOSITORY automatically.
+ARG REPO_NAME=oxia-rust
+COPY --from=planner --chown=${USER}:${USER} /recipe/recipe.json /tmp/recipe.json
+RUN GH_WORKSPACE="/__w/${REPO_NAME}/${REPO_NAME}" && \
+    mkdir -p "${GH_WORKSPACE}" && \
+    cp /tmp/recipe.json "${GH_WORKSPACE}/recipe.json" && \
+    cd "${GH_WORKSPACE}" && \
+    CARGO_INCREMENTAL=0 cargo chef cook --profile ci-debug --all-targets --recipe-path recipe.json && \
     CARGO_INCREMENTAL=0 cargo chef cook --profile ci --all-targets --recipe-path recipe.json
 WORKDIR ${HOME}
 ENV CARGO_TARGET_DIR=${HOME}/deps/target
