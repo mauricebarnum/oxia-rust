@@ -60,6 +60,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: REPO_NAME=${{ github.event.repository.name }}
           cache-from: type=registry,ref=ghcr.io/${{ github.repository }}/rust-build:cache
           cache-to: type=registry,ref=ghcr.io/${{ github.repository }}/rust-build:cache,mode=max
           no-cache: ${{ github.event_name == 'schedule' }}
