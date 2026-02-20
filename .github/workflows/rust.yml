@@ -69,21 +69,25 @@ jobs:
         run: |
           BUILD_MODE="${{ github.event.inputs.build_mode || 'auto' }}"
           if [ "$BUILD_MODE" = "ci" ]; then
+            echo "CARGO_PROFILE=ci" >> $GITHUB_ENV
             echo "RELEASE_FLAG=--profile ci" >> $GITHUB_ENV
             echo "NEXTEST_FLAG=--cargo-profile ci" >> $GITHUB_ENV
           elif [ "$BUILD_MODE" = "debug" ]; then
+            echo "CARGO_PROFILE=debug" >> $GITHUB_ENV
             echo "RELEASE_FLAG=" >> $GITHUB_ENV
             echo "NEXTEST_FLAG=" >> $GITHUB_ENV
           elif [ "${{ github.event_name }}" = "pull_request" ]; then
             # Auto mode: ci-debug for PRs
+            echo "CARGO_PROFILE=ci-debug" >> $GITHUB_ENV
             echo "RELEASE_FLAG=--profile ci-debug" >> $GITHUB_ENV
             echo "NEXTEST_FLAG=--cargo-profile ci-debug" >> $GITHUB_ENV
           else
             # Auto mode: ci profile for branch pushes (main or any other branch)
+            echo "CARGO_PROFILE=ci" >> $GITHUB_ENV
             echo "RELEASE_FLAG=--profile ci" >> $GITHUB_ENV
             echo "NEXTEST_FLAG=--cargo-profile ci" >> $GITHUB_ENV
           fi
-          echo "Build mode: $BUILD_MODE, Event: ${{ github.event_name }}, Release flag: $RELEASE_FLAG"
+          echo "Build mode: $BUILD_MODE, Event: ${{ github.event_name }}, Profile: $CARGO_PROFILE"
 
       # TODO: move this to the build image
       - name: Compute rustc hash
@@ -93,9 +97,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/sccache
-          key: sccache-${{ runner.os }}-${{ env.RUSTC_HASH }}
+          key: sccache-${{ runner.os }}-${{ env.CARGO_PROFILE }}-${{ env.RUSTC_HASH }}
           restore-keys: |
-            sccache-${{ runner.os }}-
+            sccache-${{ runner.os }}-${{ env.CARGO_PROFILE }}-
 
       - name: detect-vendored-build
         id: vendored
