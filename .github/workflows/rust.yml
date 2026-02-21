@@ -129,6 +129,7 @@ jobs:
         run: cargo +nightly miri nextest run --package mauricebarnum-oxia-client --frozen
         env:
           MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-disable-isolation
+          RUSTC_WRAPPER: ""
 
       - name: show-sccache-stats
         run: sccache --show-stats || true
