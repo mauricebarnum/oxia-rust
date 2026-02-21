@@ -99,7 +99,8 @@ ENV \
 
 RUN rustup component add clippy
 RUN rustup toolchain install --profile minimal --allow-downgrade nightly && \
-    rustup component add --toolchain nightly miri rust-src
+    rustup component add --toolchain nightly miri rust-src && \
+    cargo +nightly miri setup
 
 COPY build/cargo-config.toml ${CARGO_HOME}/config.toml
 
@@ -150,7 +151,8 @@ RUN GH_WORKSPACE="/__w/${REPO_NAME}/${REPO_NAME}" && \
     cp /tmp/recipe.json "${GH_WORKSPACE}/recipe.json" && \
     cd "${GH_WORKSPACE}" && \
     CARGO_INCREMENTAL=0 cargo chef cook --profile ci-debug --all-targets --recipe-path recipe.json && \
-    CARGO_INCREMENTAL=0 cargo chef cook --profile ci --all-targets --recipe-path recipe.json
+    CARGO_INCREMENTAL=0 cargo chef cook --profile ci --all-targets --recipe-path recipe.json && \
+    cargo +nightly fetch --locked
 
 # ===== Copy Go from Official Image =====
 COPY --from=go-official /usr/local/go /usr/local/go
