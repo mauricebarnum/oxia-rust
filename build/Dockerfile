@@ -68,6 +68,7 @@ RUN apt-get update && apt-get install -y \
     gnupg \
     jq \
     libssl-dev \
+    mold \
     pkg-config \
     protobuf-compiler \
     python3 \
