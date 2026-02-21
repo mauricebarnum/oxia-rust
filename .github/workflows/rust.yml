@@ -134,10 +134,11 @@ jobs:
         run: cargo nextest run $NEXTEST_FLAG --frozen --no-fail-fast --verbose
 
       - name: miri-client
-        run: cargo +nightly miri nextest run --package mauricebarnum-oxia-client --frozen
+        run: |
+          unset RUSTC_WRAPPER
+          cargo +nightly miri nextest run --package mauricebarnum-oxia-client --frozen
         env:
           MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-disable-isolation
-          RUSTC_WRAPPER: ""
 
       - name: show-sccache-stats
         run: sccache --show-stats || true
