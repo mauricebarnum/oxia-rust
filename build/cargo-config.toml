@@ -47,11 +47,6 @@ incremental = false        # see Cargo.toml — must match
 [profile.ci-debug.package."*"]
 opt-level = 3 # see Cargo.toml — must match
 
-# Use mold as the linker on Linux (installed in the Docker image).
-# Applies to both x86_64 and aarch64 targets. No effect outside the image.
-[target.'cfg(target_os = "linux")']
-rustflags = ["-C", "link-arg=-fuse-ld=mold"]
-
 # Must match workspace Cargo.toml [profile.ci] — see fingerprint warning above.
 [profile.ci]
 inherits = "release"
