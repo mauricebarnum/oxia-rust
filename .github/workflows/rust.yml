@@ -100,6 +100,14 @@ jobs:
           restore-keys: |
             sccache-${{ runner.os }}-${{ env.CARGO_PROFILE }}-
 
+      - name: enable-miri-cache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/deps/target/miri
+          key: miri-${{ runner.os }}-${{ env.RUSTC_HASH }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            miri-${{ runner.os }}-${{ env.RUSTC_HASH }}-
+
       - name: detect-vendored-build
         id: vendored
         run: |
