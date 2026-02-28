@@ -39,8 +39,8 @@ repos:
 
       - id: cargo-fmt
         name: cargo fmt
-        entry: cargo fmt
+        entry: cargo +nightly fmt --all -- --check
         language: system
         types: [rust]
-        args: ["--check"]
+        args: []
         pass_filenames: false
