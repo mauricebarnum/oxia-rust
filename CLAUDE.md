@@ -1,12 +1,12 @@
-# CLAUDE.md - Project Guidance for Claude Code
+# CLAUDE.md – Project Guidance for Claude Code
 
 This CLAUDE.md guides Claude Code (`claude`) for this experimental Rust Oxia client repo. Follow strictly for safe, efficient collaboration. TITLE CLAUDE.md [file:43]
 
 ## Safety & Workflow Rules (New)
 
-- **Branches**: ALWAYS prefix `claude-` (e.g., `claude-feature`). Checkout new feature branch before edits: `git checkout -b claude-task-name`. Never touch `main`/`origin/main`. [file:43]
+- **Branches**: ALWAYS prefix `claude-` (e.g., `claude-feature`). Check out new feature branch before edits: `git checkout -b claude-task-name`. Never touch `main`/`origin/main`. [file:43]
 - **Isolation**: Write to `./claude-temp/` first (create if needed: `mkdir claude-temp`). Propose diffs with `/diff`; confirm before main files. Read via `@file.rs` on-demand. [web:35]
-- **Git Safety**: Pre-session: `git stash push -m "pre-claude"`. Stash changes: `git stash push`. No commits/pushes without `/confirm`. Post: `git stash pop` selectively. Block destructives via hooks. [web:33][conversation_history:24]
+- **Git Safety**: Pre-session: `git stash push -m "pre-claude"`. Stash changes: `git stash push`. No commits/pushes without `/confirm`. Post: `git stash pop` selectively. Block destructives via hooks. [web:33]
 - **Tokens**: Use `/rewind` (Esc Esc) for undos. Limit tools (`ENABLE_TOOL_SEARCH=auto:5%`). Test incrementally; summarize with `/compact`. Monitor `/cost`. [web:10]
 - **Read-Only**: NEVER modify `./ext/oxia/` (vendored Oxia mirror). [file:43]
 - _Work in progress_: Always consider unmerged commits on the current branch
@@ -19,16 +19,16 @@ Experimental Rust Oxia client: sharding, gRPC, notifications. Workspace: common 
 
 ## Build & Test Commands
 
-| Task     | Command                                                    | Notes                       |
-| -------- | ---------------------------------------------------------- | --------------------------- |
-| Build    | `cargo build --all-targets`                                | All targets                 |
-| Tests    | `cargo nextest run`                                        | Full; or `--package client` |
-| Unit only| `cargo nextest run -E 'kind(lib)'`                         | Sandbox-safe; no sockets    |
-| ExtSyms  | `cargo nextest run -E 'binary(extsyms)'`                   | Public API types allowlist  |
-| Lint     | `cargo clippy --all-targets --all-features -- -D warnings` | Strict                      |
-| Format   | `cargo fmt` / `--check`                                    | -                           |
-| Security | `cargo deny check`                                         | Licenses                    |
-| Miri     | `+nightly cargo miri nextest run --package client`         | UB detection [file:43]      |
+| Task      | Command                                                    | Notes                       |
+|-----------|------------------------------------------------------------|-----------------------------|
+| Build     | `cargo build --all-targets`                                | All targets                 |
+| Tests     | `cargo nextest run`                                        | Full; or `--package client` |
+| Unit only | `cargo nextest run -E 'kind(lib)'`                         | Sandbox-safe; no sockets    |
+| ExtSyms   | `cargo nextest run -E 'binary(extsyms)'`                   | Public API types allowlist  |
+| Lint      | `cargo clippy --all-targets --all-features -- -D warnings` | Strict                      |
+| Format    | `cargo fmt` / `--check`                                    | -                           |
+| Security  | `cargo deny check`                                         | Licenses                    |
+| Miri      | `+nightly cargo miri nextest run --package client`         | UB detection [file:43]      |
 
 CI uses `--release --frozen`. Local: omit.
 
@@ -60,7 +60,7 @@ CI uses `--release --frozen`. Local: omit.
 - Clippy: Settings are in workspace Cargo.toml
 - **Imports**: Prefer unmerged `use` statements (one item per line). No `use std::{foo, bar};` merging.
 - Docs: Terse; Rust API guidelines; `const fn`.
-- Github: Draft PRs; `--force-with-lease`; tests/clippy pre-push. Ignore local `main`. [file:43]
+- GitHub: Draft PRs; `--force-with-lease`; tests/clippy pre-push. Ignore local `main`. [file:43]
 
 ## Efficiency Prompts
 
@@ -71,4 +71,4 @@ CI uses `--release --frozen`. Local: omit.
 
 - Include minimal features when adding or managing dependencies
 - Do not add dependencies rejected by `cargo deny`
-- When making a module `pub`, update `allowed_external_types` in `client/Cargo.toml` for any newly-exposed external types
+- When making a module `pub`, update `allowed_external_types` in `client/Cargo.toml` for any newly exposed external types

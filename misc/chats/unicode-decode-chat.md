@@ -3235,7 +3235,7 @@ For a string like `"\\u0041".repeat(1000)` (1000 Unicode escapes):
 This optimization provides significant memory efficiency improvements, especially for applications processing large amounts of Unicode-escaped text.
 
 ### User
-the estimation itself now allocates memory.  instead, the estimation should avoid any allocatins even if that reduces accuracy.  counting the length of each escape sequence should not require an allocation.  and how would the current strategy compare with one that simply counts the number of sequences and multiplies by a single estimated size of a "typical" escape? could then just count the number of `\` charactesrs to quickly estimate the number of escapes in the string?
+the estimation itself now allocates memory.  instead, the estimation should avoid any allocations even if that reduces accuracy.  counting the length of each escape sequence should not require an allocation.  and how would the current strategy compare with one that simply counts the number of sequences and multiplies by a single estimated size of a "typical" escape? could then just count the number of `\` characters to quickly estimate the number of escapes in the string?
 
 ### Agent
 You're absolutely right! The current estimation algorithm defeats the purpose by allocating memory during the estimation phase. Let me implement a zero-allocation estimation strategy and compare different approaches.
@@ -4784,12 +4784,12 @@ for _ in 0..4 {
 
 From the test output, here are typical results:
 
-| Case | Actual | Simple | Heuristic | Precise |
-|------|--------|--------|-----------|---------|
-| `simple text` | 11 | 11 (100%) | 11 (100%) | 11 (100%) |
-| `\u0041\u0042\u0043` | 3 | 18 (600%) | 9 (300%) | 3 (100%) |
-| `\U0001F602\U0001F680\U0001F389` | 12 | 30 (250%) | 12 (100%) | 12 (100%) |
-| `Mixed \u0048\U0001F602 content!` | 20 | 31 (155%) | 22 (110%) | 20 (100%) |
+| Case                              | Actual | Simple    | Heuristic | Precise   |
+|-----------------------------------|--------|-----------|-----------|-----------|
+| `simple text`                     | 11     | 11 (100%) | 11 (100%) | 11 (100%) |
+| `\u0041\u0042\u0043`              | 3      | 18 (600%) | 9 (300%)  | 3 (100%)  |
+| `\U0001F602\U0001F680\U0001F389`  | 12     | 30 (250%) | 12 (100%) | 12 (100%) |
+| `Mixed \u0048\U0001F602 content!` | 20     | 31 (155%) | 22 (110%) | 20 (100%) |
 
 ### Key Innovations
 

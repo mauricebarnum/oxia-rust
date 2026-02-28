@@ -22,7 +22,7 @@ OXIA_TMP="${tmp_dir}/oxia"
 
 git clone --filter=blob:none -n https://github.com/oxia-db/oxia "${OXIA_TMP}"
 git -C "${OXIA_TMP}" config core.sparseCheckout true
-git -C "${OXIA_TMP}" sparse-checkout set ${OXIA_SUBDIRS}
+git -C "${OXIA_TMP}" sparse-checkout set "${OXIA_SUBDIRS}"
 git -C "${OXIA_TMP}" checkout -q "${VERSION}"
 (
 	cd "${OXIA_TMP}/cmd"
