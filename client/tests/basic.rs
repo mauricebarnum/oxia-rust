@@ -14,8 +14,9 @@
 
 #![cfg(not(miri))]
 
-use mauricebarnum_oxia_client::config;
 use std::time::Duration;
+
+use mauricebarnum_oxia_client::config;
 use tracing::info;
 
 mod common;

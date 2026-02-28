@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use clap::Args;
-
 use tracing::trace;
 
 use super::CommandRunnable;

@@ -15,7 +15,6 @@
 use std::time::Duration;
 
 use clap::Parser;
-
 use mauricebarnum_oxia_client as client_lib;
 
 mod commands;

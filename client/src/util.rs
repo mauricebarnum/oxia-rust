@@ -101,10 +101,11 @@ impl Ord for WithSlashCmp<'_> {
     }
 }
 
-use crate::{GetResponse, KeyComparisonType};
+use crate::GetResponse;
+use crate::KeyComparisonType;
 
 // Compare the keys of two GetResponse instances, ignoring the value and other metadata.
-// TODO: consider at least looking at the record version, but I don't beleive the Go implementation
+// TODO: consider at least looking at the record version, but I don't believe the Go implementation
 // does this, and that's our reference. See https://github.com/streamnative/oxia/blob/main/oxia/async_client_impl.go
 #[inline]
 pub fn select_response(
@@ -127,7 +128,11 @@ pub fn select_response(
     assert_ne!(KeyComparisonType::Equal, ct);
 
     if let Some(pv) = prev {
-        use KeyComparisonType::{Ceiling, Equal, Floor, Higher, Lower};
+        use KeyComparisonType::Ceiling;
+        use KeyComparisonType::Equal;
+        use KeyComparisonType::Floor;
+        use KeyComparisonType::Higher;
+        use KeyComparisonType::Lower;
         let ordering = cmp(&pv, &candidate);
         match ct {
             Equal => panic!("bug: should not get here"),
@@ -153,13 +158,15 @@ pub fn select_response(
 #[cfg(test)]
 #[allow(clippy::too_many_lines)]
 mod tests {
-    use super::*;
-    use crate::config::RetryConfig;
-    use itertools::Itertools;
     use std::cmp::Ordering;
     use std::io;
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
+
+    use itertools::Itertools;
+
+    use super::*;
+    use crate::config::RetryConfig;
 
     #[tokio::test]
     #[cfg_attr(miri, ignore)]
@@ -260,7 +267,7 @@ mod tests {
 
         struct TestCase {
             expected: GetResponse,
-            comparison: crate::KeyComparisonType,
+            comparison: KeyComparisonType,
             responses: Vec<GetResponse>,
         }
 
@@ -343,7 +350,7 @@ mod tests {
             }
 
             println!(
-                "--- Comparision: {:?}\n    Responses: [{}]\n    Expected: {}\n    Actual:   {}\n",
+                "--- Comparison: {:?}\n    Responses: [{}]\n    Expected: {}\n    Actual:   {}\n",
                 tc.comparison,
                 tc.responses.iter().map(format_response).join(", "),
                 format_response(&tc.expected),
@@ -375,10 +382,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "left: Equal\n right: Equal")]
     fn test_select_response_panic_on_equal() {
-        select_response(
-            None,
-            crate::GetResponse::default(),
-            KeyComparisonType::Equal,
-        );
+        select_response(None, GetResponse::default(), KeyComparisonType::Equal);
     }
 }

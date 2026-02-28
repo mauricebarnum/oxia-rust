@@ -14,7 +14,6 @@
 
 use clap::Args;
 use futures::stream::StreamExt;
-
 use mauricebarnum_oxia_client::batch_get;
 use tracing::trace;
 

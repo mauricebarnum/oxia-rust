@@ -16,10 +16,11 @@
 
 #![cfg(not(miri))]
 
-use mauricebarnum_oxia_client as client;
-use mauricebarnum_oxia_client::config;
 use std::sync::Arc;
 use std::time::Duration;
+
+use mauricebarnum_oxia_client as client;
+use mauricebarnum_oxia_client::config;
 use tokio::sync::Barrier;
 use tracing::info;
 

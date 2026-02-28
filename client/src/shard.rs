@@ -23,6 +23,7 @@ use arc_swap::ArcSwap;
 use bytes::Bytes;
 use futures::stream::Stream;
 use futures::stream::StreamExt;
+use mauricebarnum_oxia_common::proto as oxia_proto;
 use rand::SeedableRng;
 use rand::distr::Distribution;
 use rand::distr::Uniform;
@@ -39,8 +40,6 @@ use tracing::debug;
 use tracing::info;
 use tracing::trace;
 use tracing::warn;
-
-use mauricebarnum_oxia_common::proto as oxia_proto;
 
 use crate::DeleteOptions;
 use crate::DeleteRangeOptions;
@@ -132,7 +131,7 @@ const DIRECT_ID_SLOTS: u64 = 20;
 // Shard ids should be small integers, nearly contiguous.  Or so we think:  the ids are generated
 // by the Oxia server, so we need to be careful to avoid being poisoned with data that causes
 // memory consumption to go crazy or leading to bogus indexing.  The approach here is to hope we
-// have a small set of contigous ids and they are directly mapped to values.
+// have a small set of contigous ids, and that they are directly mapped to values.
 pub struct ShardIdMap<T> {
     // Array for O(1) direct lookup (Small, dense IDs)
     direct: [Option<T>; DIRECT_ID_SLOTS as usize],
@@ -142,7 +141,7 @@ pub struct ShardIdMap<T> {
 }
 
 impl<T: fmt::Debug> fmt::Debug for ShardIdMap<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ShardIdMap")
             .field("direct", &self.direct)
             .field("spilled", &self.spilled)
@@ -315,7 +314,7 @@ impl Client {
     /// Performs dynamic leader lookup on each call - no caching at this level.
     /// The `ChannelPool` handles connection caching by URL, so repeated calls
     /// to the same leader reuse the existing connection.
-    async fn get_grpc_client(&self) -> crate::Result<GrpcClient> {
+    async fn get_grpc_client(&self) -> Result<GrpcClient> {
         let leader = self
             .get_leader()
             .ok_or_else(|| Error::NoShardMapping(self.data.shard_id))?;
@@ -334,7 +333,7 @@ impl Client {
     async fn rpc<T, F, Fut>(&self, f: F) -> Result<T>
     where
         F: FnOnce(GrpcClient) -> Fut,
-        Fut: std::future::Future<Output = std::result::Result<T, tonic::Status>>,
+        Fut: Future<Output = std::result::Result<T, tonic::Status>>,
     {
         let client = self.get_grpc_client().await?;
         let result: Result<T> = f(client).await.map_err(Into::into);
@@ -448,7 +447,7 @@ impl Client {
 
         tokio::spawn(async move {
             // We'll send heartbeats a random time +/- X% of one quarter of session timeout.
-            // This will allow us miss a few heartbeats without losing the session
+            // This will allow us to miss a few heartbeats without losing the session
             let distr = {
                 const JITTER: f64 = 0.03;
                 let target_ms = session_timeout_ms as f64 / 4.0;
@@ -591,7 +590,9 @@ impl Client {
                     .sequence_key_deltas
                     .as_ref()
                     .map_or_else(Vec::new, |x| (*x).to_vec()),
-                secondary_indexes: SecondaryIndex::to_proto(opts.secondary_indexes.clone()),
+                secondary_indexes: SecondaryIndex::take_proto_indices(
+                    opts.secondary_indexes.clone(),
+                ),
                 override_version_id: opts.override_version_id,
                 override_modifications_count: opts.override_modifications_count,
             }],
@@ -776,7 +777,7 @@ impl Client {
     async fn demux_stream(
         context: Arc<ClientData>,
         keys: Vec<Arc<str>>,
-        read_response: Result<tonic::Response<tonic::Streaming<oxia_proto::ReadResponse>>>,
+        read_response: Result<tonic::Response<Streaming<oxia_proto::ReadResponse>>>,
     ) -> impl Stream<Item = batch_get::ResponseItem> {
         enum State {
             Demuxing {
@@ -812,7 +813,7 @@ impl Client {
 
         futures::stream::unfold(state, move |mut state| async move {
             loop {
-                match state {
+                return match state {
                     State::Demuxing {
                         context,
                         mut keys_iter,
@@ -839,21 +840,18 @@ impl Client {
                             return None;
                         };
 
-                        let item = batch_get::ResponseItem::new(
-                            k,
-                            crate::shard::get_response_as_result(r),
-                        );
+                        let item = batch_get::ResponseItem::new(k, get_response_as_result(r));
                         let next = State::Demuxing {
                             context,
                             keys_iter,
                             gets_iter,
                         };
-                        return Some((item, next));
+                        Some((item, next))
                     }
                     State::Failing { mut keys_iter, err } => {
                         let key = keys_iter.next()?;
                         let failed = batch_get::ResponseItem::failed(key, err.clone());
-                        return Some((failed, State::Failing { keys_iter, err }));
+                        Some((failed, State::Failing { keys_iter, err }))
                     }
                 };
             }
@@ -1064,17 +1062,18 @@ trait ShardMapperBuilder {
 }
 
 mod int32_hash_range {
-    use crate::OverlappingRanges;
-    use crate::ServerError;
-    use crate::ShardId;
+    use std::cmp::Ordering;
+    use std::collections::HashSet;
+
+    use mauricebarnum_oxia_common::proto as oxia_proto;
+    use xxhash_rust::xxh3::xxh3_64;
 
     use super::Result;
     use super::ShardMapper;
     use super::ShardMapperBuilder;
-    use mauricebarnum_oxia_common::proto as oxia_proto;
-    use std::cmp::Ordering;
-    use std::collections::HashSet;
-    use xxhash_rust::xxh3::xxh3_64;
+    use crate::OverlappingRanges;
+    use crate::ServerError;
+    use crate::ShardId;
 
     #[derive(Debug)]
     struct Range {
@@ -1299,8 +1298,6 @@ mod int32_hash_range {
 mod searchable {
     use std::time::Instant;
 
-    use crate::shard::ShardMapEpoch;
-
     use super::Client;
     use super::Error;
     use super::Result;
@@ -1308,6 +1305,7 @@ mod searchable {
     use super::ShardIdMap;
     use super::ShardMapper;
     use super::int32_hash_range;
+    use crate::shard::ShardMapEpoch;
 
     #[derive(Debug, Default)]
     pub struct Shards {
@@ -1374,22 +1372,22 @@ mod searchable {
 
 #[derive(Debug)]
 pub struct NotificationsStream {
-    inner: tonic::Streaming<oxia_proto::NotificationBatch>,
+    inner: Streaming<oxia_proto::NotificationBatch>,
 }
 
 impl NotificationsStream {
-    const fn from_proto(inner: tonic::Streaming<oxia_proto::NotificationBatch>) -> Self {
+    const fn from_proto(inner: Streaming<oxia_proto::NotificationBatch>) -> Self {
         Self { inner }
     }
 }
 
 impl Stream for NotificationsStream {
-    type Item = crate::Result<crate::NotificationBatch>;
+    type Item = Result<crate::NotificationBatch>;
 
     fn poll_next(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
+    ) -> Poll<Option<Self::Item>> {
         match self.get_mut().inner.poll_next_unpin(cx) {
             Poll::Ready(Some(item)) => {
                 let r = match item {
@@ -1585,7 +1583,7 @@ impl ShardAssignmentTask {
                     self.shards.load().created().is_some_and(|last | last.elapsed() > MIN_REFRESH_INTERVAL)
                 } => (),
                 _ = interval.tick() => ()
-            };
+            }
         }
         info!("ShardAssignmentTask exiting");
     }
@@ -1832,7 +1830,7 @@ mod tests {
         use crate::config::Config;
         use crate::pool::ChannelPool;
 
-        fn make_test_config() -> Arc<config::Config> {
+        fn make_test_config() -> Arc<Config> {
             Config::builder().service_addr("localhost:1234").build()
         }
 
@@ -1842,7 +1840,7 @@ mod tests {
             Arc::new(ArcSwap::from_pointee(leaders))
         }
 
-        fn make_test_client(config: &Arc<config::Config>) -> Client {
+        fn make_test_client(config: &Arc<Config>) -> Client {
             let pool = ChannelPool::new(config);
             let shard_id = ShardId::new(1);
             let leaders = make_test_leaders(shard_id, "localhost:1234");
@@ -1923,7 +1921,7 @@ mod tests {
             ];
 
             for kind in io_conn_errors {
-                let err = crate::Error::from(io::Error::from(kind));
+                let err = Error::from(io::Error::from(kind));
                 assert!(
                     err.is_connection_error(),
                     "{kind:?} should be a connection error"
@@ -1938,7 +1936,7 @@ mod tests {
             ];
 
             for kind in io_non_conn_errors {
-                let err = crate::Error::from(io::Error::from(kind));
+                let err = Error::from(io::Error::from(kind));
                 assert!(
                     !err.is_connection_error(),
                     "{kind:?} should NOT be a connection error"

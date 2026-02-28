@@ -23,7 +23,6 @@
 use std::time::Duration;
 
 use futures::StreamExt;
-
 use mauricebarnum_oxia_client::Client;
 use mauricebarnum_oxia_client::batch_get;
 use mauricebarnum_oxia_client::config;

@@ -24,7 +24,7 @@ use crate::Error;
 use crate::Result;
 use crate::config::Config;
 
-type CompletionResult = crate::Result<Channel>;
+type CompletionResult = Result<Channel>;
 
 mod state {
     use std::collections::HashMap;
@@ -130,7 +130,7 @@ impl<Fact: ChannelFactory> ChannelPool<Fact> {
         }
     }
 
-    async fn await_pending_op(mut rx: broadcast::Receiver<CompletionResult>) -> CompletionResult {
+    async fn await_pending_op(mut rx: Receiver<CompletionResult>) -> CompletionResult {
         let rv = rx.recv().await;
         match rv {
             Ok(Ok(r)) => Ok(r),

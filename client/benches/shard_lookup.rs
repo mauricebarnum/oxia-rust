@@ -17,10 +17,13 @@
 // Run with: cargo bench --package mauricebarnum-oxia-client --bench shard_lookup
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use std::time::Instant;
 
-use arc_swap::{ArcSwap, ArcSwapOption};
-use tokio::sync::{Mutex, RwLock};
+use arc_swap::ArcSwap;
+use arc_swap::ArcSwapOption;
+use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 // Simulate the searchable::Shards structure
 #[derive(Clone, Default)]

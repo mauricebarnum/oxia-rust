@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use mauricebarnum_oxia_client::{Client, Result, config};
-use std::{sync::Arc, time::Duration};
-use tracing_subscriber::{EnvFilter, fmt};
+use std::sync::Arc;
+use std::time::Duration;
 
-use crate::config::Config;
+use mauricebarnum_oxia_client::Client;
+use mauricebarnum_oxia_client::Result;
+use mauricebarnum_oxia_client::config::Config;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt;
 
 fn main() -> Result<()> {
     unsafe {

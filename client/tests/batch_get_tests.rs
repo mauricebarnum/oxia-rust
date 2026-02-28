@@ -14,12 +14,13 @@
 
 #![cfg(not(miri))]
 
-use futures::StreamExt;
-use mauricebarnum_oxia_client as client;
-use mauricebarnum_oxia_client::config;
 use std::collections::HashSet;
 use std::fs;
 use std::time::Duration;
+
+use futures::StreamExt;
+use mauricebarnum_oxia_client as client;
+use mauricebarnum_oxia_client::config;
 use tokio::time::timeout;
 use tracing::info;
 

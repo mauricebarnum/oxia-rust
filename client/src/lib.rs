@@ -24,9 +24,8 @@ use bon::Builder;
 use bytes::Bytes;
 use futures::stream::StreamExt;
 use futures::stream::TryStreamExt;
-use tonic::transport::Channel;
-
 use mauricebarnum_oxia_common::proto as oxia_proto;
+use tonic::transport::Channel;
 
 use crate::notification::NotificationsStream;
 use crate::pool::ChannelPool;
@@ -82,7 +81,9 @@ impl SecondaryIndex {
         self.0.clone()
     }
 
-    pub(crate) fn to_proto(mut si: Option<Arc<[Self]>>) -> Vec<oxia_proto::SecondaryIndex> {
+    pub(crate) fn take_proto_indices(
+        mut si: Option<Arc<[Self]>>,
+    ) -> Vec<oxia_proto::SecondaryIndex> {
         match &mut si {
             None => Vec::new(),
             Some(arc) => {
@@ -634,7 +635,7 @@ pub(crate) async fn execute_with_retry<F, Fut, R>(
     op: F,
 ) -> Result<R>
 where
-    Fut: std::future::Future<Output = Result<R>> + Send,
+    Fut: Future<Output = Result<R>> + Send,
     R: Send,
     F: Fn() -> Fut + Send + Sync,
 {
@@ -698,7 +699,7 @@ async fn stale_shard_map_retry<F, Fut, R>(
     op: F,
 ) -> Result<R>
 where
-    Fut: std::future::Future<Output = Result<R>> + Send,
+    Fut: Future<Output = Result<R>> + Send,
     R: Send,
     F: Fn() -> Fut + Send + Sync,
 {
@@ -818,7 +819,7 @@ impl Client {
     pub async fn wait_for_update(
         &self,
         after_epoch: ShardMapEpoch,
-        timeout: std::time::Duration,
+        timeout: Duration,
     ) -> Result<ShardMapEpoch> {
         self.get_shard_manager()?
             .wait_for_update(after_epoch, timeout)
@@ -829,7 +830,7 @@ impl Client {
     fn get_shard_manager(&self) -> Result<Arc<shard::Manager>> {
         self.shard_manager
             .clone()
-            .ok_or_else(|| crate::Error::Custom("Shard manager not initialized".to_string()))
+            .ok_or_else(|| Error::Custom("Shard manager not initialized".to_string()))
     }
 
     fn get_shard(&self, k: &str) -> Result<shard::Client> {
@@ -869,7 +870,7 @@ impl Client {
             return execute_get(shard, key, options).await;
         }
 
-        // Multi-shard case: query all shards and select best response
+        // Multi-shard case: query all shards and select the best response
         let max_parallel = match self.config.max_parallel_requests() {
             0 => usize::MAX,
             n => n,
@@ -935,7 +936,7 @@ impl Client {
         };
 
         // Finally, return a stream that will collect results from each shard as they become
-        // available.  Per-shard ordering is as defined by the Oxia server (as of this writing,
+        // available.  Per-shard ordering is defined by the Oxia server (as of this writing,
         // they should be in the same order).  The ordering of responses between shards and the early failures
         // already collected is unspecified.
         //
@@ -1218,7 +1219,7 @@ impl Client {
     }
 
     /// Create a notifications stream with default options.
-    pub fn create_notifications_stream(&self) -> Result<notification::NotificationsStream> {
+    pub fn create_notifications_stream(&self) -> Result<NotificationsStream> {
         self.create_notifications_stream_with_options(NotificationsOptions::default())
     }
 
@@ -1226,7 +1227,7 @@ impl Client {
     pub fn create_notifications_stream_with_options(
         &self,
         options: NotificationsOptions,
-    ) -> Result<notification::NotificationsStream> {
+    ) -> Result<NotificationsStream> {
         let shard_manager = self.get_shard_manager()?;
         Ok(NotificationsStream::new(
             Arc::clone(&self.config),

@@ -16,13 +16,15 @@ use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
-use std::process;
+use std::path::Path;
+use std::path::PathBuf;
+use std::process::Command;
 use std::process::ExitCode;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use is_executable::IsExecutable;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
+use sha2::Sha256;
 use walkdir::WalkDir;
 
 const OXIA_BIN: &str = "oxia";
@@ -101,7 +103,7 @@ fn build_oxia_cli() -> io::Result<OsString> {
             .expect("failed to run `go build` for oxia CLI");
 
         assert!(status.success(), "oxia build failed");
-        fs::write(&hash_path, new_hash)?; // update hash after successful build
+        fs::write(&hash_path, new_hash)?; // update hash after a successful build
     }
 
     // Keep exporting the path to the built binary for consumers
@@ -114,7 +116,7 @@ fn find_oxia_in_path() -> Option<PathBuf> {
         .find(|p| p.is_executable())
 }
 
-fn main() -> process::ExitCode {
+fn main() -> ExitCode {
     println!("cargo:rerun-if-env-changed=OXIA_BIN");
     println!("cargo:rerun-if-env-changed=OXIA_BIN_IGNORE_PATH");
 

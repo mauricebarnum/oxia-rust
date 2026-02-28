@@ -15,10 +15,13 @@
 use std::time::Duration;
 
 use chrono::Utc;
-use mauricebarnum_oxia_client::{Client, Error, PutOptions, Result, config};
-use tracing_subscriber::{EnvFilter, fmt};
-
-use crate::config::Config;
+use mauricebarnum_oxia_client::Client;
+use mauricebarnum_oxia_client::Error;
+use mauricebarnum_oxia_client::PutOptions;
+use mauricebarnum_oxia_client::Result;
+use mauricebarnum_oxia_client::config::Config;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt;
 // use tracing::{debug, error, info, span, warn};
 // use tracing_subscriber::{EnvFilter, fmt};
 
@@ -33,7 +36,6 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    // Replace with your Oxia server address
     let server_address = "localhost:6648";
 
     let config = Config::builder()
@@ -57,7 +59,6 @@ async fn main() -> Result<()> {
     let result = client.get(&key).await?;
     println!("get result: {result:?}");
 
-    // Let's list all of the keys
     let result = client.list("", "").await?;
     for (i, v) in result.keys.iter().enumerate() {
         println!("list {i} {v}");
@@ -65,8 +66,6 @@ async fn main() -> Result<()> {
 
     // Delete the last key inserted
     client.delete(&key).await?;
-
-    // Scan for all of the keys
 
     let result = client.range_scan("", "").await?;
     for (i, v) in result.records.iter().enumerate() {
@@ -82,7 +81,7 @@ async fn main() -> Result<()> {
         .put_with_options(
             "ephemeral_key",
             Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            crate::PutOptions::builder().ephemeral(true).build(),
+            PutOptions::builder().ephemeral(true).build(),
         )
         .await?;
     println!("put result: {result:?}");

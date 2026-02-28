@@ -22,7 +22,6 @@ use std::net::Ipv4Addr;
 use std::net::SocketAddrV4;
 use std::net::TcpStream;
 use std::num::NonZeroU32;
-use std::path;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Child;
@@ -86,8 +85,7 @@ pub fn oxia_cli_path() -> &'static Path {
     p
 }
 
-/// Create a test temp directory. Auto-cleaned on drop unless
-/// `OXIA_KEEP_TEST_DATA=1` is set.
+/// Create a test temp directory. Auto-cleaned unless `OXIA_KEEP_TEST_DATA=1` is set.
 fn test_tempdir() -> anyhow::Result<TempDir> {
     let keep = env::var("OXIA_KEEP_TEST_DATA")
         .map(|v| matches!(v.as_str(), "" | "1" | "true" | "yes" | "on"))
@@ -184,8 +182,8 @@ pub fn wait_for_health(addr: &str, service: &str, timeout_secs: u64) -> anyhow::
 struct TestServerArgs {
     service_addr: String,
     metrics_addr: String,
-    db_dir: path::PathBuf,
-    wal_dir: path::PathBuf,
+    db_dir: PathBuf,
+    wal_dir: PathBuf,
     nshards: NonZeroU32,
 }
 

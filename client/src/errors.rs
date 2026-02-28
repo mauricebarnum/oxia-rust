@@ -52,7 +52,7 @@ impl OxiaError {
     }
 }
 
-impl std::fmt::Display for OxiaError {
+impl Display for OxiaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
             Self::KEY_NOT_FOUND => f.write_str("key not found code=1"),
@@ -151,7 +151,7 @@ pub struct ShardError {
     pub err: Arc<Error>,
 }
 
-/// Error error type returned in the public API
+/// Error: error type returned in the public API
 ///
 /// Arc-wrapping strategy:
 /// 1. Non-Clone types (`tonic::Status`, `io::Error`) → always Arc-wrapped
@@ -372,8 +372,9 @@ impl From<ServerError> for Error {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tracing::info;
+
+    use super::*;
 
     #[test_log::test]
     fn test_error_is_retryable_true() {

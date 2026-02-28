@@ -1,4 +1,4 @@
-// Copyright 2025 Maurice S. Barnum
+// Copyright 2025-2026 Maurice S. Barnum
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -154,7 +154,7 @@ async fn run_cmd(ctxts: &[Context], cmd: Commands) {
 
 #[async_trait::async_trait]
 impl CommandRunnable for ShellCommand {
-    async fn run(self, ctx: crate::Context) -> anyhow::Result<()> {
+    async fn run(self, ctx: Context) -> anyhow::Result<()> {
         trace!(?self, ?ctx, "params");
         Self::run_shell(ctx).await
     }
