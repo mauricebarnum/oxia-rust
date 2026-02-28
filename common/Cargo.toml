@@ -8,13 +8,10 @@ license = "Apache-2.0"
 [dependencies]
 bytes = "1.11.1"
 prost = "0.14.3"                                                       # If using Protobuf
-prost-types = "0.14.3"
 tonic = { version = "0.14.5", features = ["gzip", "channel", "zstd"] }
 tonic-prost = "0.14.5"
 
 [build-dependencies]
-prost-build = "0.14.3"
-tonic-build = "0.14.5"
 tonic-prost-build = "0.14.5"
 
 [lints.clippy]
