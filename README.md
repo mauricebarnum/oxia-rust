@@ -4,7 +4,7 @@ This contains an incomplete implementation of an [Oxia](https://github.com/oxia-
 
 Grpc support is based upon [tonic](https://github.com/hyperium/tonic).
 
-Support for all of the Oxia service is incomplete.
+Support for the all Oxia features is incomplete.
 
 # Implementation notes
 
@@ -17,7 +17,7 @@ Support for all of the Oxia service is incomplete.
   - Go sources are vendored from upstream
 - common - low-level client
   - crate: mauricebarnum-oxia-common
-  - provide grpc binding to the [OxiaClient](crates/common/proto/client.proto) service, using tonic
+  - provide grpc binding to the [OxiaClient](ext/oxia/common/proto/client.proto) service, using tonic
 - client - higher-level client
   - crate: mauricebarnum-oxia-client
   - implements sharding, dispatch, etc. intended to be more ergonomic than the raw grpc binding
@@ -45,7 +45,7 @@ Support for all of the Oxia service is incomplete.
     }
 ```
 
-This allows the caller more flexibility on the types used for "string" and "bytes" paramters, and permits the implementation freedom with resource management. In the example above, both the `key` and `value` content will need to be owned so it can be moved into a GRPC request.
+This allows the caller more flexibility on the types used for "string" and "bytes" parameters, and permits the implementation freedom with resource management. In the example above, both the `key` and `value` content will need to be owned so it can be moved into a GRPC request.
 
 Direct calls are more efficient, but given that the client is primarily a GRPC façade, the overhead is minor.
 
@@ -53,10 +53,10 @@ The `x / x_with_options` API pattern is (or can be) zero cost abstractions as di
 
 Downsides:
 
-- No ABI: any changes to `Client` will require recompiling callers. In the Rust ecosystem with poor support for ABI contracts, this doesn't seem to be a major concern outside of compile time.
+- No ABI: any changes to `Client` will require recompiling callers. In the Rust ecosystem with poor support for ABI contracts, this doesn't seem to be a major concern outside compile time.
 - "Plugin" model is the user's problem: in the case where an application would like to switch implementations, such as a mock client or one with custom instrumentation, the burden is on the caller to implement the necessary wrappers.
 
-Switching to a trait interface should be doable with minimal changes to both the implementation and the callers. In the "this is an experiment" nature of the current code base, it made more sense to explore the generic decision space ("impl Into<T>"? "impl AsRef<T>"? concrete param? etc). I'm considering putting in a test that will validate at compile time that the `Client` interface remains close to object safe. I haven't done it yet because I didn't want to deal with the maintenance overhead of the test, but the API is stable enough now that it shouldn't be a problem going forward. Maybe an LLM can generate it for me without making too much of a mess.
+Switching to a trait interface should be doable with minimal changes to both the implementation and the callers. In the "this is an experiment" nature of the current code base, it made more sense to explore the generic decision space ("impl Into<T>"? "impl AsRef<T>"? concrete param? etc.). I'm considering putting in a test that will validate at compile time that the `Client` interface remains close to object safe. I haven't done it yet because I didn't want to deal with the maintenance overhead of the test, but the API is stable enough now that it shouldn't be a problem going forward. Maybe an LLM can generate it for me without making too much of a mess.
 
 # TODO
 

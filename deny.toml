@@ -16,7 +16,7 @@
 [graph]
 # If 1 or more target triples (and optionally, target_features) are specified,
 # only the specified targets will be checked when running `cargo deny check`.
-# This means, if a particular package is only ever used as a target specific
+# This means, if a particular package is only ever used as a target-specific
 # dependency, such as, for example, the `nix` crate only being used via the
 # `target_family = "unix"` configuration, that only having windows targets in
 # this list would mean the nix crate, as well as any of its exclusive
@@ -40,14 +40,14 @@ targets = [
 # (https://doc.rust-lang.org/cargo/reference/pkgid-spec.html)
 #exclude = []
 # If true, metadata will be collected with `--all-features`. Note that this can't
-# be toggled off if true, if you want to conditionally enable `--all-features` it
+# be toggled off if true, if you want to conditionally enable `--all-features`, it
 # is recommended to pass `--all-features` on the cmd line instead
 all-features = false
 # If true, metadata will be collected with `--no-default-features`. The same
 # caveat with `all-features` applies
 no-default-features = false
-# If set, these feature will be enabled when collecting metadata. If `--features`
-# is specified on the cmd line they will take precedence over this option.
+# If set, these features will be enabled when collecting metadata. If `--features`
+# is specified on the cmd line, they will take precedence over this option.
 #features = []
 
 # The output table provides options for how/if diagnostics are outputted
@@ -112,7 +112,7 @@ exceptions = [
     #{ allow = ["Zlib"], crate = "adler32" },
 ]
 
-# Some crates don't have (easily) machine readable licensing information,
+# Some crates don't have (easily) machine-readable licensing information,
 # adding a clarification entry for it allows you to manually specify the
 # licensing information
 #[[licenses.clarify]]
