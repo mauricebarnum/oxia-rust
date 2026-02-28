@@ -22,8 +22,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use anyhow::Result;
 use futures::StreamExt;
-
 use mauricebarnum_oxia_client::Client;
 use mauricebarnum_oxia_client::DeleteOptions;
 use mauricebarnum_oxia_client::Error;
@@ -37,8 +37,6 @@ use mauricebarnum_oxia_client::PutOptions;
 use mauricebarnum_oxia_client::RangeScanOptions;
 use mauricebarnum_oxia_client::SecondaryIndex;
 use mauricebarnum_oxia_client::config;
-
-use anyhow::Result;
 
 mod common;
 use common::TestResultExt;
@@ -794,7 +792,7 @@ async fn test_notifications_no_reconnect_default() -> anyhow::Result<()> {
     // Wait a bit for the stream to potentially close
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // The stream should either timeout or return None/error (not continue receiving)
+    // The stream should either time out or return None/error (not continue receiving)
     // We test that we don't get a successful notification after restart
     let result = timeout(Duration::from_secs(3), notifications.next()).await;
 

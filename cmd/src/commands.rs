@@ -95,7 +95,7 @@ impl CommandRunnable for Commands {
 }
 
 #[inline]
-fn to_result<T, E>(r: std::result::Result<T, E>) -> anyhow::Result<()>
+fn to_result<T, E>(r: Result<T, E>) -> anyhow::Result<()>
 where
     E: Into<anyhow::Error>,
 {

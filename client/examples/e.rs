@@ -34,7 +34,6 @@ fn main() -> Result<()> {
         //     .with_env_filter(EnvFilter::new("tonic=trace,hyper=trace,h2=trace"))
         //     .init();
 
-        // Replace with your Oxia server address
         let server_address = "localhost:6648";
 
         let config = config::Config::builder()

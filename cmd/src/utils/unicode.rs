@@ -425,7 +425,7 @@ mod tests {
 
     #[test]
     fn test_decode_unicode_escapes_zero_padding() {
-        // Test with leading zeros in unicode escape
+        // Test with leading zeros in Unicode escape
         let input = "\\u0000\\u0001\\u000A".to_string();
         let expected = Bytes::from("\u{0000}\u{0001}\u{000A}");
         let actual = decode_escapes(input).unwrap();
@@ -594,7 +594,7 @@ mod tests {
         assert_eq!(estimate_decoded_size("\\u0041"), 1); // 'A' is 1 byte in UTF-8
         assert_eq!(estimate_decoded_size("\\U0001F602"), 4); // Emoji is 4 bytes in UTF-8
         assert_eq!(estimate_decoded_size("\\n\\t"), 2); // Non-unicode escapes = 1 byte each
-        assert_eq!(estimate_decoded_size("hé"), 3); // UTF-8 multi-byte character
+        assert_eq!(estimate_decoded_size("hé"), 3); // UTF-8 multibyte character
         assert_eq!(estimate_decoded_size("\\u00e9"), 2); // 'é' is 2 bytes in UTF-8
 
         // Test mixed content

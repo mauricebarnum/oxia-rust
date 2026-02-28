@@ -14,8 +14,8 @@
 
 use clap::Args;
 use clap::ValueEnum;
-
-use mauricebarnum_oxia_client::{GetOptions, KeyComparisonType};
+use mauricebarnum_oxia_client::GetOptions;
+use mauricebarnum_oxia_client::KeyComparisonType;
 use tracing::trace;
 
 use super::CommandRunnable;

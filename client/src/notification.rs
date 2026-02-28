@@ -65,7 +65,7 @@ impl ShardOffsetMap {
 
 type ShardStream = StreamNotifyClose<BoxStream<'static, Result<NotificationBatch>>>;
 type ShardStreamMap = StreamMap<ShardId, ShardStream>;
-type ReconnectFuture = BoxFuture<'static, (ShardId, crate::Result<ShardStream>)>;
+type ReconnectFuture = BoxFuture<'static, (ShardId, Result<ShardStream>)>;
 
 struct StreamingState {
     streams: ShardStreamMap,
@@ -84,7 +84,7 @@ impl Default for StreamingState {
 }
 
 struct WaitingReadyState {
-    /// Streams still waiting for first batch
+    /// Streams that are still waiting for first batch
     waiting: ShardStreamMap,
     /// Streams that have received their first batch
     ready: ShardStreamMap,
@@ -93,13 +93,13 @@ struct WaitingReadyState {
     /// Reconnect state (carried through)
     pending_reconnects: Option<Box<FuturesUnordered<ReconnectFuture>>>,
     /// Buffered non-empty first batches (max N shards)
-    buffered: VecDeque<crate::NotificationBatch>,
+    buffered: VecDeque<NotificationBatch>,
 }
 
 // State is rarely copied, so the smaller enum size from boxing StreamingState
 // is not a good tradeoff for the extra heap allocation and indirection on access.
-// WaitingReadyState, on the other hand, is optionally used and only during initialization
-// of the stream, so we'll keep that on the heap so it's size is not important.
+// WaitingReadyState, on the other hand, is optionally used only during initialization
+// of the stream, so we'll avoid bloating the size of State to avoid un unlikely heap allocation
 #[allow(clippy::large_enum_variant)]
 enum State {
     Streaming(StreamingState),
@@ -361,7 +361,7 @@ impl NotificationsStream {
     ///
     /// - `Error::RequestTimeout` if the timeout expires before all shards are ready
     /// - Any error from the underlying notification streams
-    pub async fn wait_ready(&mut self, timeout: Duration) -> crate::Result<()> {
+    pub async fn wait_ready(&mut self, timeout: Duration) -> Result<()> {
         let deadline = tokio::time::Instant::now() + timeout;
 
         // Drive Configuring to completion if needed
@@ -464,7 +464,7 @@ impl Stream for NotificationsStream {
                         continue;
                     }
 
-                    match s.streams.poll_next_unpin(cx) {
+                    return match s.streams.poll_next_unpin(cx) {
                         Poll::Ready(Some((id, r))) => {
                             if r.is_none() {
                                 // Stream closed normally
@@ -509,15 +509,11 @@ impl Stream for NotificationsStream {
                                     offset,
                                 );
                             }
-                            return Poll::Ready(r);
+                            Poll::Ready(r)
                         }
-                        Poll::Ready(None) => {
-                            return Poll::Ready(None);
-                        }
-                        Poll::Pending => {
-                            return Poll::Pending;
-                        }
-                    }
+                        Poll::Ready(None) => Poll::Ready(None),
+                        Poll::Pending => Poll::Pending,
+                    };
                 }
 
                 State::Configuring(fut) => match fut.poll_unpin(cx) {

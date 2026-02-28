@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use base64::Engine as _;
-
 use base64::prelude::BASE64_URL_SAFE_NO_PAD;
 use bytes::Bytes;
 use clap::Args;
