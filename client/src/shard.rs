@@ -50,6 +50,7 @@ use crate::GrpcClient;
 use crate::ListOptions;
 use crate::ListResponse;
 use crate::OxiaError;
+use crate::OxiaRpcError;
 use crate::PutOptions;
 use crate::PutResponse;
 use crate::RangeScanOptions;
@@ -261,6 +262,28 @@ fn format_leader_url(a: &oxia_proto::ShardAssignment) -> Arc<str> {
     Arc::from(format!("http://{}", a.leader))
 }
 
+fn format_leader_hint_url(hint: &crate::LeaderHint) -> Arc<str> {
+    Arc::from(format!("http://{}", hint.leader_address))
+}
+
+fn apply_leader_hint_to_directory(leaders: &LeaderDirectory, hint: &crate::LeaderHint) -> bool {
+    let new_url = format_leader_hint_url(hint);
+    let current = leaders.load();
+    if let Some(existing) = current.get(hint.shard)
+        && existing.as_ref() == new_url.as_ref()
+    {
+        return false;
+    }
+
+    let mut new_map = ShardIdMap::default();
+    for (id, url) in current.iter() {
+        new_map.insert(id, Arc::clone(url));
+    }
+    new_map.insert(hint.shard, new_url);
+    leaders.store(Arc::new(new_map));
+    true
+}
+
 #[derive(Debug)]
 struct ClientData {
     config: Arc<config::Config>,
@@ -331,6 +354,16 @@ impl Client {
         if let Some(leader) = self.get_leader() {
             self.data.channel_pool.remove(&leader).await;
         }
+    }
+
+    /// Apply a leader hint for this shard, updating the shared leader directory.
+    ///
+    /// No-ops if the hint is for a different shard.
+    fn apply_leader_hint(&self, hint: &crate::LeaderHint) {
+        if hint.shard != self.data.shard_id {
+            return;
+        }
+        apply_leader_hint_to_directory(&self.data.leaders, hint);
     }
 
     /// Execute an RPC with automatic channel invalidation on connection errors.
@@ -883,8 +916,20 @@ impl Client {
         };
 
         let read_result = self
-            .rpc(|mut grpc| async move { grpc.read(read_req).await })
+            .rpc(|mut grpc| {
+                let req = read_req.clone();
+                async move { grpc.read(req).await }
+            })
             .await;
+
+        let read_result = match read_result {
+            Err(Error::OxiaRpc(OxiaRpcError::NodeIsNotLeader { hint: Some(hint) })) => {
+                self.apply_leader_hint(&hint);
+                self.rpc(|mut grpc| async move { grpc.read(read_req).await })
+                    .await
+            }
+            other => other,
+        };
 
         Self::demux_stream(Arc::clone(&self.data), batch_req.keys, read_result).await
     }
@@ -1596,7 +1641,6 @@ impl ShardAssignmentTask {
 #[derive(Debug)]
 pub struct Manager {
     shards: Arc<ArcSwap<searchable::Shards>>,
-    #[allow(dead_code)]
     leaders: LeaderDirectory,
     cancel_token: CancellationToken,
     task_handle: JoinHandle<()>,
@@ -1684,6 +1728,15 @@ impl Manager {
     /// Rate-limited to prevent excessive refreshes.
     pub fn trigger_refresh(&self) {
         self.refresh_signal.notify_one();
+    }
+
+    /// Apply a leader hint, updating the shared leader directory immediately.
+    ///
+    /// Also triggers a background refresh so the authoritative map eventually catches up.
+    pub(crate) fn apply_leader_hint(&self, hint: &crate::LeaderHint) {
+        if apply_leader_hint_to_directory(&self.leaders, hint) {
+            self.trigger_refresh();
+        }
     }
 
     /// Waits for the shard map to be updated to an epoch greater than `after_epoch`.
