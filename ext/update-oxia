@@ -6,6 +6,9 @@ set -x
 DEFAULT_VERSION=v0.15.1
 VERSION="${1-${DEFAULT_VERSION}}"
 
+DEFAULT_REPO=https://github.com/oxia-db/oxia
+REPO="${2-${DEFAULT_REPO}}"
+
 OXIA_DIR="oxia"
 OXIA_SUBDIRS="cmd common oxia oxiad"
 
@@ -14,16 +17,20 @@ OXIA_SUBDIRS="cmd common oxia oxiad"
 #
 tmp_dir="$(mktemp -d)"
 cleanup() {
-    rm -rf "${tmp_dir}"
+    if [ $? -eq 0 ]; then
+        rm -rf "${tmp_dir}"
+    else
+        echo "WARNING: not removing ${tmp_dir}" >&2
+    fi
 }
 trap cleanup EXIT
 
 OXIA_TMP="${tmp_dir}/oxia"
 
-git clone --filter=blob:none -n https://github.com/oxia-db/oxia "${OXIA_TMP}"
+git clone --filter=blob:none -n "${REPO}" "${OXIA_TMP}"
 git -C "${OXIA_TMP}" config core.sparseCheckout true
-git -C "${OXIA_TMP}" sparse-checkout set "${OXIA_SUBDIRS}"
 git -C "${OXIA_TMP}" checkout -q "${VERSION}"
+git -C "${OXIA_TMP}" sparse-checkout set ${OXIA_SUBDIRS}
 (
     cd "${OXIA_TMP}/cmd"
     go mod vendor -v
