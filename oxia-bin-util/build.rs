@@ -50,7 +50,8 @@ fn get_oxia_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
 }
 
 fn build_oxia_cli() -> io::Result<OsString> {
-    let tools_src_dir = Path::new("../ext/oxia/cmd");
+    let ext_dir = Path::new("../ext");
+    let tools_src_dir = ext_dir.join("oxia/cmd");
     let vendor_root = tools_src_dir.join("vendor");
 
     let oxia_dir = get_oxia_dir().unwrap();
@@ -59,11 +60,13 @@ fn build_oxia_cli() -> io::Result<OsString> {
 
     let go_mod = tools_src_dir.join("go.mod").to_str().unwrap().to_string();
     let go_sum = tools_src_dir.join("go.sum").to_str().unwrap().to_string();
+    let oxia_version = ext_dir.join("oxia.version").to_str().unwrap().to_string();
 
     // Make Cargo re-run when vendored code or go.mod/go.sum change.
     println!("cargo:rerun-if-changed={}", vendor_root.display());
     println!("cargo:rerun-if-changed={go_mod}");
     println!("cargo:rerun-if-changed={go_sum}");
+    println!("cargo:rerun-if-changed={oxia_version}");
 
     // Compute a stable content hash of all relevant Go sources + go.mod/go.sum
     let mut hasher = Sha256::new();
@@ -71,6 +74,7 @@ fn build_oxia_cli() -> io::Result<OsString> {
     // Hash go.mod / go.sum
     hasher.update(fs::read(&go_mod)?);
     hasher.update(fs::read(&go_sum)?);
+    hasher.update(fs::read(&oxia_version)?);
 
     // Hash all .go files under the vendored oxia module
     for entry in WalkDir::new(&vendor_root)
