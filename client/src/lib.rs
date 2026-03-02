@@ -671,6 +671,14 @@ pub(crate) async fn create_grpc_client(
     Ok(GrpcClient::new(channel))
 }
 
+const fn extract_leader_hint(e: &Error) -> Option<&LeaderHint> {
+    if let Error::OxiaRpc(OxiaRpcError::NodeIsNotLeader { hint }) = e {
+        hint.as_ref()
+    } else {
+        None
+    }
+}
+
 pub(crate) async fn execute_with_retry<F, Fut, R>(
     config: &Arc<config::Config>,
     shard_manager: Option<&Arc<shard::Manager>>,
@@ -709,10 +717,11 @@ where
         && let Err(ref e) = result
         && e.is_wrong_leader()
     {
+        let hint = extract_leader_hint(e).cloned();
         let remaining = timeout
             .zip(start)
             .map(|(t, s)| t.saturating_sub(s.elapsed()));
-        return stale_shard_map_retry(config, sm, remaining, start, &op).await;
+        return stale_shard_map_retry(config, sm, remaining, start, hint, &op).await;
     }
 
     // Or... no retries are requested
@@ -731,13 +740,18 @@ where
 
 /// Retry loop for stale shard map (wrong leader) errors.
 ///
-/// Each iteration: capture epoch → trigger refresh → wait for update → retry op.
+/// When `initial_hint` is `Some`, the first iteration applies the hint immediately (fast path)
+/// instead of waiting for a discovery refresh.  Subsequent iterations use the hint extracted
+/// from the retry result, or fall back to the slow path when no hint is available.
+///
+/// Each slow-path iteration: capture epoch → trigger refresh → wait for update → retry op.
 /// Bounded by retry attempts (or 1 if no retry config) and the overall request timeout.
 async fn stale_shard_map_retry<F, Fut, R>(
     config: &Arc<config::Config>,
     shard_manager: &Arc<shard::Manager>,
     remaining: Option<Duration>,
     start: Option<Instant>,
+    initial_hint: Option<LeaderHint>,
     op: F,
 ) -> Result<R>
 where
@@ -747,6 +761,8 @@ where
 {
     let max_attempts = config.retry().map_or(1, |r| r.attempts);
     let request_timeout = config.request_timeout();
+
+    let mut hint = initial_hint;
 
     for _ in 0..max_attempts {
         // Check remaining time budget
@@ -761,12 +777,19 @@ where
             None => remaining,
         };
 
-        let epoch = shard_manager.epoch();
-        shard_manager.trigger_refresh();
+        if let Some(ref h) = hint {
+            // Fast path: leader hint known — apply immediately without waiting
+            // apply_leader_hint also calls trigger_refresh internally
+            shard_manager.apply_leader_hint(h);
+        } else {
+            // Slow path: wait for discovery refresh
+            let epoch = shard_manager.epoch();
+            shard_manager.trigger_refresh();
 
-        // Wait for the shard map to update, using remaining timeout or a reasonable default
-        let wait_timeout = remaining.unwrap_or(Duration::from_secs(30));
-        shard_manager.wait_for_update(epoch, wait_timeout).await?;
+            // Wait for the shard map to update, using remaining timeout or a reasonable default
+            let wait_timeout = remaining.unwrap_or(Duration::from_secs(30));
+            shard_manager.wait_for_update(epoch, wait_timeout).await?;
+        }
 
         // Retry the operation with remaining timeout
         let remaining = match request_timeout.zip(start) {
@@ -779,7 +802,9 @@ where
         match &result {
             Ok(_) => return result,
             Err(Error::RequestTimeout) => return result,
-            Err(e) if e.is_wrong_leader() => (),
+            Err(e) if e.is_wrong_leader() => {
+                hint = extract_leader_hint(e).cloned();
+            }
             Err(_) => return result,
         }
     }
