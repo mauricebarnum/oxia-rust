@@ -22,12 +22,15 @@ import (
 	"log/slog"
 	"math"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/pkg/errors"
 	"go.uber.org/multierr"
 	pb "google.golang.org/protobuf/proto"
+
+	"github.com/oxia-db/oxia/oxiad/common/crc"
 
 	"github.com/oxia-db/oxia/oxiad/dataserver/database/kvstore"
 
@@ -51,6 +54,7 @@ var (
 const (
 	commitOffsetKey        = constant.InternalKeyPrefix + "commit-offset"
 	commitLastVersionIdKey = constant.InternalKeyPrefix + "last-version-id"
+	commitChecksumKey      = constant.InternalKeyPrefix + "checksum"
 	termKey                = constant.InternalKeyPrefix + "term"
 	termOptionsKey         = termKey + "-options"
 )
@@ -79,6 +83,10 @@ type DB interface {
 	io.Closer
 
 	EnableNotifications(enable bool)
+
+	EnableFeature(feature proto.Feature)
+	IsFeatureEnabled(feature proto.Feature) bool
+	ReadChecksum() crc.Checksum
 
 	ProcessWrite(b *proto.WriteRequest, commitOffset int64, timestamp uint64, updateOperationCallback UpdateOperationCallback) (*proto.WriteResponse, error)
 	Get(request *proto.GetRequest) (*proto.GetResponse, error)
@@ -115,6 +123,7 @@ func NewDB(namespace string, shardId int64, factory kvstore.Factory,
 		kv:                    kv,
 		shardId:               shardId,
 		notificationsEnabled:  true,
+		enabledFeatures:       sync.Map{},
 		sequenceWaiterTracker: NewSequencesWaitTracker(),
 		log: slog.With(
 			slog.String("component", "db"),
@@ -155,6 +164,16 @@ func NewDB(namespace string, shardId int64, factory kvstore.Factory,
 	}
 	db.committedVersionId.Store(lastVersionId)
 
+	// init the DB checksum
+	lastChecksum, err := db.readLastChecksum()
+	if err != nil {
+		return nil, err
+	}
+	if !lastChecksum.IsZero() {
+		db.enabledFeatures.Store(proto.Feature_FEATURE_DB_CHECKSUM, true)
+	}
+	db.committedChecksum.Store(&lastChecksum)
+
 	db.notificationsTracker = newNotificationsTracker(namespace, shardId, commitOffset, kv, notificationRetentionTime, clock)
 	return db, nil
 }
@@ -163,9 +182,11 @@ type db struct {
 	kv                    kvstore.KV
 	shardId               int64
 	committedVersionId    atomic.Int64
+	committedChecksum     atomic.Pointer[crc.Checksum]
 	notificationsTracker  *notificationsTracker
 	log                   *slog.Logger
 	notificationsEnabled  bool
+	enabledFeatures       sync.Map
 	sequenceWaiterTracker SequenceWaiterTracker
 
 	putCounter                metric.Counter
@@ -187,6 +208,9 @@ func (d *db) Snapshot() (kvstore.Snapshot, error) {
 
 func (d *db) EnableNotifications(enabled bool) {
 	d.notificationsEnabled = enabled
+}
+func (d *db) ReadChecksum() crc.Checksum {
+	return *d.committedChecksum.Load()
 }
 
 func (d *db) Close() error {
@@ -250,6 +274,15 @@ func (d *db) applyWriteRequest(b *proto.WriteRequest, batch kvstore.WriteBatch,
 	return notifications, res, nil
 }
 
+func (d *db) IsFeatureEnabled(feature proto.Feature) bool {
+	_, ok := d.enabledFeatures.Load(feature)
+	return ok
+}
+
+func (d *db) EnableFeature(feature proto.Feature) {
+	d.enabledFeatures.Store(feature, true)
+}
+
 func (d *db) ProcessWrite(b *proto.WriteRequest, commitOffset int64, timestamp uint64, updateOperationCallback UpdateOperationCallback) (*proto.WriteResponse, error) {
 	timer := d.batchWriteLatencyHisto.Timer()
 	defer timer.Done()
@@ -279,11 +312,22 @@ func (d *db) ProcessWrite(b *proto.WriteRequest, commitOffset int64, timestamp u
 		}
 	}
 
+	previousChecksum := *d.committedChecksum.Load()
+	committedChecksum := previousChecksum
+	if !previousChecksum.IsZero() || d.IsFeatureEnabled(proto.Feature_FEATURE_DB_CHECKSUM) {
+		committedChecksum = batch.Checksum(previousChecksum)
+		if err := d.addASCIILong(commitChecksumKey, int64(committedChecksum), batch, timestamp); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := batch.Commit(); err != nil {
 		return nil, err
 	}
 	// update the db local cache of version_id after commit success
 	d.committedVersionId.Store(uncommitedVersionId)
+	// update the db local cache of committed_checksum after commit success
+	d.committedChecksum.Store(&committedChecksum)
 
 	if notifications != nil {
 		d.notificationsTracker.UpdatedCommitOffset(commitOffset)
@@ -297,7 +341,9 @@ func (d *db) ProcessWrite(b *proto.WriteRequest, commitOffset int64, timestamp u
 }
 
 func (*db) addNotifications(batch kvstore.WriteBatch, notifications *Notifications) error {
-	value, err := notifications.batch.MarshalVT()
+	// Use deterministic marshaling to ensure consistent serialization order
+	// for the Notifications map, which is critical for checksum reproducibility.
+	value, err := pb.MarshalOptions{Deterministic: true}.Marshal(&notifications.batch)
 	if err != nil {
 		return err
 	}
@@ -433,14 +479,21 @@ func (d *db) KeyIterator(includeInternalKeys bool) (kvstore.KeyIterator, error) 
 }
 
 func (d *db) ReadCommitOffset() (int64, error) {
-	return d.readASCIILong(commitOffsetKey)
+	return d.readASCIILongOrDefault(commitOffsetKey, constant.I64NegativeOne)
 }
 
 func (d *db) readLastVersionId() (int64, error) {
-	return d.readASCIILong(commitLastVersionIdKey)
+	return d.readASCIILongOrDefault(commitLastVersionIdKey, constant.I64NegativeOne)
+}
+func (d *db) readLastChecksum() (crc.Checksum, error) {
+	cs, err := d.readASCIILongOrDefault(commitChecksumKey, constant.I64Zero)
+	if err != nil {
+		return 0, err
+	}
+	return crc.Checksum(uint32(cs)), nil
 }
 
-func (d *db) readASCIILong(key string) (int64, error) {
+func (d *db) readASCIILongOrDefault(key string, defaultValue int64) (int64, error) {
 	kv := d.kv
 
 	getReq := &proto.GetRequest{
@@ -449,15 +502,15 @@ func (d *db) readASCIILong(key string) (int64, error) {
 	}
 	gr, err := applyGet(kv, getReq)
 	if err != nil {
-		return wal.InvalidOffset, err
+		return 0, err
 	}
 	if gr.Status == proto.Status_KEY_NOT_FOUND {
-		return wal.InvalidOffset, nil
+		return defaultValue, nil
 	}
 
 	var res int64
 	if _, err = fmt.Sscanf(string(gr.Value), "%d", &res); err != nil {
-		return wal.InvalidOffset, err
+		return 0, err
 	}
 	return res, nil
 }

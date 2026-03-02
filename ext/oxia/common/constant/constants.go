@@ -16,6 +16,10 @@ package constant
 
 import "time"
 
+const I64NegativeOne int64 = -1
+const I64Zero int64 = 0
+const U32Zero uint32 = 0
+
 const (
 	MetadataTerm      = "term"
 	MetadataNamespace = "namespace"
