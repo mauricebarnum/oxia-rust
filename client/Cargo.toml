@@ -24,6 +24,8 @@ tokio-util = "0.7.18"
 bon = { version = "3.9.0", features = ["implied-bounds"] }
 dashmap = { version = "6", optional = true }
 fastrand = "2.3.0"
+prost = "0.14.3"
+prost-types = "0.14.3"
 
 [features]
 bench-dashmap = ["dep:dashmap"]
