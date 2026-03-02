@@ -20,13 +20,13 @@ Experimental Rust Oxia client: sharding, gRPC, notifications. Workspace: common 
 ## Build & Test Commands
 
 | Task      | Command                                                    | Notes                       |
-|-----------|------------------------------------------------------------|-----------------------------|
+| --------- | ---------------------------------------------------------- | --------------------------- |
 | Build     | `cargo build --all-targets`                                | All targets                 |
 | Tests     | `cargo nextest run`                                        | Full; or `--package client` |
 | Unit only | `cargo nextest run -E 'kind(lib)'`                         | Sandbox-safe; no sockets    |
 | ExtSyms   | `cargo nextest run -E 'binary(extsyms)'`                   | Public API types allowlist  |
 | Lint      | `cargo clippy --all-targets --all-features -- -D warnings` | Strict                      |
-| Format    | `cargo fmt` / `--check`                                    | -                           |
+| Format    | `cargo +nightly fmt --all` / `--check`                     | -                           |
 | Security  | `cargo deny check`                                         | Licenses                    |
 | Miri      | `+nightly cargo miri nextest run --package client`         | UB detection [file:43]      |
 
@@ -53,6 +53,7 @@ CI uses `--release --frozen`. Local: omit.
 1. `ArcSwap::load` shards/clients.
 2. `RwLock::read` pool (misses).
    Guidelines: ArcSwap > RwLock; tokio-sync; no locks pre-`.await`. [file:43]
+
 - **Async traits**: Use `BoxFuture` desugaring (see `notification.rs`, `address.rs`), not `async-trait` crate.
 
 ## Coding Style
