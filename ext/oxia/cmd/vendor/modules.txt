@@ -8,7 +8,7 @@ github.com/HdrHistogram/hdrhistogram-go
 ## explicit; go 1.23
 github.com/RaduBerinde/axisds
 github.com/RaduBerinde/axisds/regiontree
-# github.com/RaduBerinde/btreemap v0.0.0-20250419174037-3d62b7205d54
+# github.com/RaduBerinde/btreemap v0.0.0-20260105202824-d3184786f603
 ## explicit; go 1.23
 github.com/RaduBerinde/btreemap
 # github.com/armon/go-metrics v0.4.1
@@ -32,8 +32,8 @@ github.com/cenkalti/backoff/v4
 # github.com/cespare/xxhash/v2 v2.3.0
 ## explicit; go 1.11
 github.com/cespare/xxhash/v2
-# github.com/cockroachdb/crlib v0.0.0-20241112164430-1264a2edc35b
-## explicit; go 1.22
+# github.com/cockroachdb/crlib v0.0.0-20251122031428-fe658a2dbda1
+## explicit; go 1.24
 github.com/cockroachdb/crlib/crbytes
 github.com/cockroachdb/crlib/crstrings
 github.com/cockroachdb/crlib/crsync
@@ -293,8 +293,8 @@ github.com/json-iterator/go
 # github.com/juju/fslock v0.0.0-20160525022230-4d5c94c67b4b
 ## explicit
 github.com/juju/fslock
-# github.com/klauspost/compress v1.18.0
-## explicit; go 1.22
+# github.com/klauspost/compress v1.18.4
+## explicit; go 1.23
 github.com/klauspost/compress
 github.com/klauspost/compress/fse
 github.com/klauspost/compress/huff0
@@ -331,7 +331,7 @@ github.com/mattn/go-colorable
 # github.com/mattn/go-isatty v0.0.20
 ## explicit; go 1.15
 github.com/mattn/go-isatty
-# github.com/minio/minlz v1.0.1-0.20250507153514-87eb42fe8882
+# github.com/minio/minlz v1.0.1
 ## explicit; go 1.21
 github.com/minio/minlz
 github.com/minio/minlz/internal/race
@@ -374,10 +374,12 @@ github.com/oxia-db/oxia/oxia/internal
 github.com/oxia-db/oxia/oxia/internal/batch
 github.com/oxia-db/oxia/oxia/internal/metrics
 github.com/oxia-db/oxia/oxia/internal/model
-# github.com/oxia-db/oxia/oxiad v0.0.0-20251121170122-7c84f6e6bbc3 => ../oxiad
-## explicit; go 1.25
+# github.com/oxia-db/oxia/oxiad v0.0.0-20260227070408-a610fa89bfb0 => ../oxiad
+## explicit; go 1.25.0
 github.com/oxia-db/oxia/oxiad/common/collection
+github.com/oxia-db/oxia/oxiad/common/crc
 github.com/oxia-db/oxia/oxiad/common/entity
+github.com/oxia-db/oxia/oxiad/common/feature
 github.com/oxia-db/oxia/oxiad/common/logging
 github.com/oxia-db/oxia/oxiad/common/metric
 github.com/oxia-db/oxia/oxiad/common/option
@@ -405,8 +407,10 @@ github.com/oxia-db/oxia/oxiad/dataserver/constant
 github.com/oxia-db/oxia/oxiad/dataserver/controller
 github.com/oxia-db/oxia/oxiad/dataserver/controller/follow
 github.com/oxia-db/oxia/oxiad/dataserver/controller/lead
+github.com/oxia-db/oxia/oxiad/dataserver/controller/statemachine
 github.com/oxia-db/oxia/oxiad/dataserver/database
 github.com/oxia-db/oxia/oxiad/dataserver/database/kvstore
+github.com/oxia-db/oxia/oxiad/dataserver/errors
 github.com/oxia-db/oxia/oxiad/dataserver/option
 github.com/oxia-db/oxia/oxiad/dataserver/wal
 github.com/oxia-db/oxia/oxiad/dataserver/wal/codec
@@ -561,8 +565,8 @@ go.yaml.in/yaml/v2
 # go.yaml.in/yaml/v3 v3.0.4
 ## explicit; go 1.16
 go.yaml.in/yaml/v3
-# golang.org/x/exp v0.0.0-20250506013437-ce4c2cf36ca6
-## explicit; go 1.23.0
+# golang.org/x/exp v0.0.0-20260218203240-3dfff04db8fa
+## explicit; go 1.25.0
 golang.org/x/exp/constraints
 golang.org/x/exp/maps
 golang.org/x/exp/slices
@@ -673,8 +677,8 @@ google.golang.org/grpc/serviceconfig
 google.golang.org/grpc/stats
 google.golang.org/grpc/status
 google.golang.org/grpc/tap
-# google.golang.org/protobuf v1.36.6
-## explicit; go 1.22
+# google.golang.org/protobuf v1.36.11
+## explicit; go 1.23
 google.golang.org/protobuf/encoding/protodelim
 google.golang.org/protobuf/encoding/protojson
 google.golang.org/protobuf/encoding/prototext
