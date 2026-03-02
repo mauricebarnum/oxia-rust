@@ -611,6 +611,24 @@ impl NotificationBatch {
     }
 }
 
+/// Redirect hint attached to [`OxiaRpcError::NodeIsNotLeader`] responses.
+///
+/// Populated when the server knows which node is the current leader for the shard.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LeaderHint {
+    pub shard: ShardId,
+    pub leader_address: String,
+}
+
+impl LeaderHint {
+    pub(crate) fn from_proto(x: oxia_proto::LeaderHint) -> Self {
+        Self {
+            shard: x.shard.into(),
+            leader_address: x.leader_address,
+        }
+    }
+}
+
 type GrpcClient = oxia_proto::OxiaClientClient<Channel>;
 
 pub(crate) async fn create_grpc_client(

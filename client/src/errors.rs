@@ -15,70 +15,209 @@
 use std::fmt::Display;
 use std::io;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
+use mauricebarnum_oxia_common::proto;
 use thiserror::Error as ThisError;
+use tracing::info;
 
 use crate::KeyComparisonType;
 use crate::ShardId;
 
-/// Error codes from Oxia gRPC service responses.
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct OxiaError(i32);
-
-impl OxiaError {
-    pub const KEY_NOT_FOUND: Self = Self(1);
-    pub const UNEXPECTED_VERSION_ID: Self = Self(2);
-    pub const SESSION_DOES_NOT_EXIST: Self = Self(3);
-    /// Leader has fenced the shard
-    pub const INVALID_STATUS: Self = Self(102);
-    /// Leader is closing
-    pub const ALREADY_CLOSED: Self = Self(104);
-    /// Node is not the leader for this shard
-    pub const NODE_IS_NOT_LEADER: Self = Self(106);
-
-    #[inline]
-    pub const fn new(code: i32) -> Self {
-        Self(code)
-    }
-
-    /// Returns true if this error indicates the request was sent to the wrong leader.
-    #[inline]
-    pub const fn is_wrong_leader(self) -> bool {
-        matches!(
-            self,
-            Self::INVALID_STATUS | Self::ALREADY_CLOSED | Self::NODE_IS_NOT_LEADER
-        )
-    }
+/// Error codes from Oxia proto-level response statuses.
+///
+/// These codes appear in the `status` field of successful gRPC response bodies.
+/// gRPC-level routing errors (wrong leader, etc.) are represented separately on [`Error`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash, thiserror::Error)]
+pub enum OxiaError {
+    #[error("key not found")]
+    KeyNotFound,
+    #[error("unexpected version ID")]
+    UnexpectedVersionId,
+    #[error("session does not exist")]
+    SessionDoesNotExist,
+    #[error("unknown Oxia error code={0}")]
+    Unknown(i32),
 }
 
-impl Display for OxiaError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match *self {
-            Self::KEY_NOT_FOUND => f.write_str("key not found code=1"),
-            Self::UNEXPECTED_VERSION_ID => f.write_str("unexpected version ID code=2"),
-            Self::SESSION_DOES_NOT_EXIST => f.write_str("session does not exist code=3"),
-            Self::INVALID_STATUS => f.write_str("invalid status (leader fenced) code=102"),
-            Self::ALREADY_CLOSED => f.write_str("already closed (leader closing) code=104"),
-            Self::NODE_IS_NOT_LEADER => f.write_str("node is not leader code=106"),
-            _ => write!(f, "unknown Oxia error code={}", self.0),
+impl From<i32> for OxiaError {
+    fn from(code: i32) -> Self {
+        match code {
+            1 => Self::KeyNotFound,
+            2 => Self::UnexpectedVersionId,
+            3 => Self::SessionDoesNotExist,
+            n => Self::Unknown(n),
         }
     }
 }
 
-impl std::error::Error for OxiaError {}
+/// gRPC-level Oxia routing codes (≥ 100).
+///
+/// These appear in `grpc-status-details-bin` of failed gRPC calls (tonic maps
+/// non-standard codes to `tonic::Code::Unknown`). They are distinct from the
+/// proto-body [`OxiaError`] codes (1–3), which appear in successful response bodies.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum OxiaRpcError {
+    /// Code 100 — server has not completed initialization.
+    #[error("server not initialized")]
+    NotInitialized,
 
-impl From<i32> for OxiaError {
-    #[inline]
-    fn from(code: i32) -> Self {
-        Self(code)
+    /// Code 101 — request carried an invalid Raft term.
+    #[error("invalid term")]
+    InvalidTerm,
+
+    /// Code 102 — shard is in the wrong status for the requested operation (leader fenced).
+    #[error("invalid status (leader fenced)")]
+    InvalidStatus,
+
+    /// Code 103 — server cancelled the operation.
+    #[error("operation cancelled by server")]
+    Cancelled,
+
+    /// Code 104 — the leader is shutting down.
+    #[error("already closed (leader closing)")]
+    AlreadyClosed,
+
+    /// Code 105 — a leader is already connected to this follower.
+    #[error("leader already connected")]
+    LeaderAlreadyConnected,
+
+    /// Code 106 — the contacted node is not the shard leader.
+    /// `hint` carries the redirect when the server provided one.
+    #[error("node is not leader")]
+    NodeIsNotLeader { hint: Option<crate::LeaderHint> },
+
+    /// Code 107 — the contacted node is not a follower for this shard.
+    #[error("node is not follower")]
+    NodeIsNotFollower,
+
+    /// Code 108 — the referenced session does not exist.
+    #[error("session not found")]
+    SessionNotFound,
+
+    /// Code 109 — the requested session timeout is outside permitted bounds.
+    #[error("invalid session timeout")]
+    InvalidSessionTimeout,
+
+    /// Code 110 — the requested namespace does not exist.
+    #[error("namespace not found")]
+    NamespaceNotFound,
+
+    /// Code 111 — notifications are not enabled for this namespace.
+    #[error("notifications not enabled")]
+    NotificationsNotEnabled,
+
+    /// An Oxia gRPC code that this client version does not recognise.
+    #[error("unknown Oxia gRPC code {0}")]
+    Unknown(i32),
+}
+
+// Public api
+impl OxiaRpcError {
+    /// Returns `true` if this error indicates the request hit the wrong leader.
+    pub const fn is_wrong_leader(&self) -> bool {
+        matches!(
+            self,
+            Self::InvalidStatus | Self::AlreadyClosed | Self::NodeIsNotLeader { .. }
+        )
+    }
+
+    /// Returns `true` if it might make sense to retry when this error is seen.
+    pub const fn is_retryable(&self) -> bool {
+        // We avoid a default arm to ensure that all new error types are addressed intentionally
+        #[allow(clippy::match_same_arms)]
+        match self {
+            Self::AlreadyClosed => true,
+            Self::Cancelled => true,
+            Self::InvalidStatus => true,
+            Self::NodeIsNotFollower => true,
+            Self::NodeIsNotLeader { .. } => true,
+            Self::NotInitialized => true,
+
+            Self::InvalidSessionTimeout => false,
+            Self::InvalidTerm => false,
+            Self::LeaderAlreadyConnected => false,
+            Self::NamespaceNotFound => false,
+            Self::NotificationsNotEnabled => false,
+            Self::SessionNotFound => false,
+            Self::Unknown(_) => false,
+        }
     }
 }
 
-impl From<OxiaError> for i32 {
-    #[inline]
-    fn from(err: OxiaError) -> Self {
-        err.0
+impl OxiaRpcError {
+    fn extract_leader_hint(details: Vec<prost_types::Any>) -> Option<crate::LeaderHint> {
+        use prost::Message as _;
+        use prost::Name as _;
+
+        static LEADER_HINT_FULL_NAME: OnceLock<String> = OnceLock::new();
+        let target_name = LEADER_HINT_FULL_NAME.get_or_init(proto::LeaderHint::full_name);
+
+        details
+            .into_iter()
+            .find(|a| {
+                let url = &a.type_url;
+                if url.ends_with(target_name) {
+                    let offset = url.len() - target_name.len();
+                    // If we're not at the start of url, check that our match is
+                    // anchored by '/'
+                    offset == 0 || url.as_bytes().get(offset - 1) == Some(&b'/')
+                } else {
+                    false
+                }
+            })
+            .and_then(|a| proto::LeaderHint::decode(a.value.as_slice()).ok())
+            .map(crate::LeaderHint::from_proto)
+    }
+
+    fn from_code(x: i32, details: Vec<prost_types::Any>) -> Self {
+        match x {
+            100 => Self::NotInitialized,
+            101 => Self::InvalidTerm,
+            102 => Self::InvalidStatus,
+            103 => Self::Cancelled,
+            104 => Self::AlreadyClosed,
+            105 => Self::LeaderAlreadyConnected,
+            106 => Self::NodeIsNotLeader {
+                hint: Self::extract_leader_hint(details),
+            },
+            107 => Self::NodeIsNotFollower,
+            108 => Self::SessionNotFound,
+            109 => Self::InvalidSessionTimeout,
+            110 => Self::NamespaceNotFound,
+            111 => Self::NotificationsNotEnabled,
+            code => {
+                info!(code, "unknown code");
+                Self::Unknown(code)
+            }
+        }
+    }
+}
+
+impl TryFrom<tonic::Status> for OxiaRpcError {
+    type Error = tonic::Status;
+
+    fn try_from(x: tonic::Status) -> Result<Self, Self::Error> {
+        use prost::Message as _;
+        use proto::google::rpc::Status as RpcStatus;
+
+        if x.code() == tonic::Code::Unknown {
+            let raw_bytes = x.details();
+            if !raw_bytes.is_empty()
+                && let Ok(rs) = RpcStatus::decode(x.details())
+            {
+                return Ok(Self::from_code(rs.code, rs.details));
+            }
+            if let Some(c) = x
+                .metadata()
+                .get("grpc-status")
+                .and_then(|m| m.to_str().ok())
+                .and_then(|s| s.parse::<i32>().ok())
+            {
+                return Ok(Self::from_code(c, vec![]));
+            }
+        }
+        Err(x)
     }
 }
 
@@ -201,6 +340,10 @@ pub enum Error {
     #[error("Shard error: {0}")]
     ShardError(#[from] ShardError),
 
+    /// A gRPC-level Oxia error (code ≥ 100).
+    #[error(transparent)]
+    OxiaRpc(#[from] OxiaRpcError),
+
     #[error("Request timed out")]
     RequestTimeout,
 
@@ -231,11 +374,11 @@ fn format_shard_errors(errors: &[ShardError]) -> String {
 impl Error {
     /// Whether the error is likely transient and worth retrying
     pub fn is_retryable(&self) -> bool {
+        // Do not have a default arm so that adding a new error type requires explicitly deciding
+        // what to do.  Never mind that the answer is almost always `false`
+
         #[allow(clippy::match_same_arms)]
         match self {
-            // Transport errors (connection refused, DNS failures, etc.) are retryable
-            // as the server may come back online
-            Self::Transport(_) => true,
             Self::Grpc(status) => matches!(
                 status.code(),
                 tonic::Code::Unavailable | tonic::Code::Unknown | tonic::Code::Internal
@@ -249,9 +392,22 @@ impl Error {
                     | io::ErrorKind::WouldBlock
             ),
             Self::MultipleShardError(errs) => errs.iter().any(|e| e.err.is_retryable()),
-            Self::ShardError(e) => e.err.is_retryable(),
+            Self::ShardError(err) => err.err.is_retryable(),
+            Self::OxiaRpc(err) => err.is_retryable(),
+
+            Self::NoResponseFromServer(_) => true,
+            Self::Transport(_) => true,
+
+            Self::Cancelled => false,
+            Self::Client(_) => false,
+            Self::Custom(_) => false,
+            Self::InvalidKeyComparisonType(_) => false,
+            Self::NoShardMapping(_) => false,
+            Self::NoShardMappingForKey(_) => false,
+            Self::Other(_) => false,
+            Self::Oxia(_) => false,
             Self::RequestTimeout => false,
-            _ => false,
+            Self::Server(_) => false,
         }
     }
 
@@ -318,7 +474,7 @@ impl Error {
     /// Whether the error indicates the request was sent to the wrong leader.
     pub fn is_wrong_leader(&self) -> bool {
         match self {
-            Self::Oxia(oxia_err) => oxia_err.is_wrong_leader(),
+            Self::OxiaRpc(e) => e.is_wrong_leader(),
             Self::ShardError(e) => e.err.is_wrong_leader(),
             Self::MultipleShardError(errs) => errs.iter().any(|e| e.err.is_wrong_leader()),
             _ => false,
@@ -328,16 +484,14 @@ impl Error {
 
 impl From<tonic::Status> for Error {
     fn from(status: tonic::Status) -> Self {
-        let code = status.code();
-        let is_timeout = code == tonic::Code::DeadlineExceeded
-            || (code == tonic::Code::Cancelled && status.message() == "Timeout expired");
-
-        if is_timeout {
-            Self::RequestTimeout
-        } else if code == tonic::Code::Cancelled {
-            Self::Cancelled
-        } else {
-            Self::Grpc(Arc::new(status))
+        match OxiaRpcError::try_from(status) {
+            Ok(e) => e.into(),
+            Err(s) => match s.code() {
+                tonic::Code::DeadlineExceeded => Self::RequestTimeout,
+                tonic::Code::Cancelled if s.message() == "Timeout expired" => Self::RequestTimeout,
+                tonic::Code::Cancelled => Self::Cancelled,
+                _ => Self::Grpc(Arc::new(s)),
+            },
         }
     }
 }
@@ -508,5 +662,53 @@ mod tests {
 
         // Unavailable is both retryable and a connection error
         assert!(retryable.is_connection_error());
+    }
+
+    #[test_log::test]
+    fn test_node_is_not_leader_without_hint() {
+        // A plain tonic::Status with no details stays as Grpc
+        let status = tonic::Status::new(tonic::Code::Unknown, "");
+        let err = Error::from(status);
+        assert!(matches!(err, Error::Grpc(_)));
+    }
+
+    #[test_log::test]
+    fn test_oxia_error_from_i32() {
+        assert_eq!(OxiaError::from(1), OxiaError::KeyNotFound);
+        assert_eq!(OxiaError::from(2), OxiaError::UnexpectedVersionId);
+        assert_eq!(OxiaError::from(3), OxiaError::SessionDoesNotExist);
+        // gRPC-level codes are not proto-body codes; they round-trip through Unknown
+        assert_eq!(OxiaError::from(102), OxiaError::Unknown(102));
+        assert_eq!(OxiaError::from(104), OxiaError::Unknown(104));
+        assert_eq!(OxiaError::from(106), OxiaError::Unknown(106));
+        assert_eq!(OxiaError::from(999), OxiaError::Unknown(999));
+    }
+
+    #[test_log::test]
+    fn test_is_wrong_leader() {
+        assert!(Error::OxiaRpc(OxiaRpcError::NodeIsNotLeader { hint: None }).is_wrong_leader());
+        assert!(
+            Error::OxiaRpc(OxiaRpcError::NodeIsNotLeader {
+                hint: Some(crate::LeaderHint {
+                    shard: ShardId::new(1),
+                    leader_address: "host:1234".into(),
+                }),
+            })
+            .is_wrong_leader()
+        );
+        assert!(Error::OxiaRpc(OxiaRpcError::InvalidStatus).is_wrong_leader());
+        assert!(Error::OxiaRpc(OxiaRpcError::AlreadyClosed).is_wrong_leader());
+        assert!(!Error::Oxia(OxiaError::KeyNotFound).is_wrong_leader());
+        assert!(
+            !Error::Grpc(Arc::new(tonic::Status::new(tonic::Code::Unknown, ""))).is_wrong_leader()
+        );
+    }
+
+    #[test_log::test]
+    fn test_is_retryable_wrong_leader() {
+        assert!(Error::OxiaRpc(OxiaRpcError::NodeIsNotLeader { hint: None }).is_retryable());
+        assert!(Error::OxiaRpc(OxiaRpcError::InvalidStatus).is_retryable());
+        assert!(Error::OxiaRpc(OxiaRpcError::AlreadyClosed).is_retryable());
+        assert!(!Error::Oxia(OxiaError::KeyNotFound).is_retryable());
     }
 }

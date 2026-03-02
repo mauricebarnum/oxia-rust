@@ -1,0 +1,72 @@
+#!/bin/bash
+
+set -euo pipefail
+set -x
+
+# Versions for forensics
+# GOOGLEAPIS has the RPC Status; PROTOBUF has the core types (Any, etc)
+DEFAULT_API_VERSION=master
+DEFAULT_CORE_VERSION=v29.3 # Matches current stable WKTs
+
+API_VERSION="${1-${DEFAULT_API_VERSION}}"
+CORE_VERSION="${2-${DEFAULT_CORE_VERSION}}"
+
+API_REPO=https://github.com/googleapis/googleapis
+CORE_REPO=https://github.com/protocolbuffers/protobuf
+
+GOOGLE_DIR="google-protos"
+
+# Temporary location setup
+tmp_dir="$(mktemp -d)"
+cleanup() {
+    if [ $? -eq 0 ]; then
+        rm -rf "${tmp_dir}"
+    else
+        echo "WARNING: not removing ${tmp_dir}" >&2
+    fi
+}
+trap cleanup EXIT
+
+API_TMP="${tmp_dir}/googleapis"
+CORE_TMP="${tmp_dir}/protobuf"
+
+# 1. Fetch google/rpc from googleapis (Sparse)
+git clone --filter=blob:none --no-checkout "${API_REPO}" "${API_TMP}"
+git -C "${API_TMP}" sparse-checkout init --cone
+git -C "${API_TMP}" sparse-checkout set google/rpc
+git -C "${API_TMP}" checkout "${API_VERSION}"
+
+# 2. Fetch google/protobuf from protocolbuffers (Sparse)
+git clone --filter=blob:none --no-checkout "${CORE_REPO}" "${CORE_TMP}"
+git -C "${CORE_TMP}" sparse-checkout init --cone
+git -C "${CORE_TMP}" sparse-checkout set src/google/protobuf
+git -C "${CORE_TMP}" checkout "${CORE_VERSION}"
+
+# 3. Safety check for uncommitted changes
+if [ -d "${GOOGLE_DIR}" ]; then
+    if ! git diff --quiet HEAD -- "${GOOGLE_DIR}" || ! git diff --cached --quiet -- "${GOOGLE_DIR}"; then
+        echo "Error: ${GOOGLE_DIR} has uncommitted changes. Commit or stash them first."
+        exit 1
+    fi
+fi
+
+# 4. Clean and Assemble (only the two files actually needed at compile time)
+rm -rf "${GOOGLE_DIR}"
+mkdir -p "${GOOGLE_DIR}/google/rpc"
+mkdir -p "${GOOGLE_DIR}/google/protobuf"
+
+# status.proto is the only google/rpc file compiled
+cp "${API_TMP}/google/rpc/status.proto" "${GOOGLE_DIR}/google/rpc/"
+
+# any.proto is imported by status.proto; all other WKTs are provided by prost-types
+cp "${CORE_TMP}/src/google/protobuf/any.proto" "${GOOGLE_DIR}/google/protobuf/"
+
+# 5. Record versions for forensics
+{
+  echo "googleapis-version: $(git -C "${API_TMP}" rev-parse HEAD)"
+  echo "protobuf-version: $(git -C "${CORE_TMP}" rev-parse HEAD)"
+} > google-protos.version
+
+git add google-protos.version "${GOOGLE_DIR}/"
+
+echo "Successfully vendored Google protos to ${GOOGLE_DIR}"

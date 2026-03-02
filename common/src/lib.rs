@@ -16,4 +16,10 @@ pub mod proto {
     tonic::include_proto!("io.oxia.proto.v1");
     pub use oxia_admin_client::OxiaAdminClient;
     pub use oxia_client_client::OxiaClientClient;
+
+    pub mod google {
+        pub mod rpc {
+            tonic::include_proto!("google.rpc");
+        }
+    }
 }
