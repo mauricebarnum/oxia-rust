@@ -170,8 +170,11 @@ impl OxiaRpcError {
             .map(crate::LeaderHint::from_proto)
     }
 
-    fn from_code(x: i32, details: Vec<prost_types::Any>) -> Self {
-        match x {
+    fn from_rpc_code(x: i32, details: Vec<prost_types::Any>) -> Option<Self> {
+        if x < 100 {
+            return None;
+        }
+        let r = match x {
             100 => Self::NotInitialized,
             101 => Self::InvalidTerm,
             102 => Self::InvalidStatus,
@@ -190,7 +193,8 @@ impl OxiaRpcError {
                 info!(code, "unknown code");
                 Self::Unknown(code)
             }
-        }
+        };
+        Some(r)
     }
 }
 
@@ -201,23 +205,23 @@ impl TryFrom<tonic::Status> for OxiaRpcError {
         use prost::Message as _;
         use proto::google::rpc::Status as RpcStatus;
 
-        if x.code() == tonic::Code::Unknown {
-            let raw_bytes = x.details();
-            if !raw_bytes.is_empty()
-                && let Ok(rs) = RpcStatus::decode(x.details())
-            {
-                return Ok(Self::from_code(rs.code, rs.details));
-            }
-            if let Some(c) = x
-                .metadata()
+        if x.code() != tonic::Code::Unknown {
+            return Err(x);
+        }
+
+        (if x.details().is_empty() {
+            x.metadata()
                 .get("grpc-status")
                 .and_then(|m| m.to_str().ok())
-                .and_then(|s| s.parse::<i32>().ok())
-            {
-                return Ok(Self::from_code(c, vec![]));
-            }
-        }
-        Err(x)
+                .and_then(|s| s.parse().ok())
+                .map(|c| (c, vec![]))
+        } else {
+            RpcStatus::decode(x.details())
+                .ok()
+                .map(|s| (s.code, s.details))
+        })
+        .and_then(|(sc, sd)| Self::from_rpc_code(sc, sd))
+        .ok_or(x)
     }
 }
 
