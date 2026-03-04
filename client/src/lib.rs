@@ -859,13 +859,25 @@ impl Client {
         self.get_shard_manager()?.get_client_by_shard_id(id)
     }
 
+    #[inline]
+    pub async fn get(&self, k: impl Into<String>) -> Result<Option<GetResponse>> {
+        self.get_with_options(k, GetOptions::default()).await
+    }
+
+    #[inline]
     pub async fn get_with_options(
         &self,
         key: impl Into<String>,
         options: GetOptions,
     ) -> Result<Option<GetResponse>> {
-        let key = Arc::from(key.into());
+        self.get_internal(Arc::from(key.into()), options).await
+    }
 
+    async fn get_internal(
+        &self,
+        key: Arc<str>,
+        options: GetOptions,
+    ) -> Result<Option<GetResponse>> {
         // Define the core operation with retry/timeout wrapper
         let execute_get = |shard: shard::Client, key: Arc<str>, options: GetOptions| async move {
             execute_with_retry(&self.config, self.shard_manager.as_ref(), move || {
@@ -911,10 +923,6 @@ impl Client {
             .await?;
 
         Ok(best_response)
-    }
-
-    pub async fn get(&self, k: impl Into<String>) -> Result<Option<GetResponse>> {
-        self.get_with_options(k, GetOptions::default()).await
     }
 
     /// `batch_get` request multiple keys, minimizing requests to the backend
@@ -978,14 +986,32 @@ impl Client {
         Ok(final_stream)
     }
 
+    #[inline]
+    pub async fn put(
+        &self,
+        key: impl Into<String>,
+        value: impl Into<Bytes>,
+    ) -> Result<PutResponse> {
+        self.put_with_options(key, value, PutOptions::new()).await
+    }
+
+    #[inline]
     pub async fn put_with_options(
         &self,
         key: impl Into<String>,
         value: impl Into<Bytes>,
         options: PutOptions,
     ) -> Result<PutResponse> {
-        let key = Arc::from(key.into());
-        let value = value.into();
+        self.put_internal(Arc::from(key.into()), value.into(), options)
+            .await
+    }
+
+    async fn put_internal(
+        &self,
+        key: Arc<str>,
+        value: Bytes,
+        options: PutOptions,
+    ) -> Result<PutResponse> {
         let selector = options.partition_key.as_deref().unwrap_or(&key);
         let shard = self.get_shard(selector)?;
         execute_with_retry(&self.config, self.shard_manager.as_ref(), move || {
@@ -998,20 +1024,22 @@ impl Client {
         .await
     }
 
-    pub async fn put(
-        &self,
-        key: impl Into<String>,
-        value: impl Into<Bytes>,
-    ) -> Result<PutResponse> {
-        self.put_with_options(key, value, PutOptions::new()).await
+    #[inline]
+    pub async fn delete(&self, key: impl Into<String>) -> Result<()> {
+        self.delete_with_options(key, DeleteOptions::default())
+            .await
     }
 
+    #[inline]
     pub async fn delete_with_options(
         &self,
         key: impl Into<String>,
         options: DeleteOptions,
     ) -> Result<()> {
-        let key = Arc::from(key.into());
+        self.delete_internal(Arc::from(key.into()), options).await
+    }
+
+    async fn delete_internal(&self, key: Arc<str>, options: DeleteOptions) -> Result<()> {
         let selector = options.partition_key.as_deref().unwrap_or(&key);
         let shard = self.get_shard(selector)?;
         execute_with_retry(&self.config, self.shard_manager.as_ref(), move || {
@@ -1023,15 +1051,39 @@ impl Client {
         .await
     }
 
-    pub async fn delete(&self, key: impl Into<String>) -> Result<()> {
-        self.delete_with_options(key, DeleteOptions::default())
-            .await
+    #[inline]
+    pub async fn delete_range(
+        &self,
+        start_inclusive: impl Into<String>,
+        end_exclusive: impl Into<String>,
+    ) -> Result<()> {
+        self.delete_range_with_options(
+            start_inclusive,
+            end_exclusive,
+            DeleteRangeOptions::default(),
+        )
+        .await
     }
 
+    #[inline]
     pub async fn delete_range_with_options(
         &self,
         start_inclusive: impl Into<String>,
         end_exclusive: impl Into<String>,
+        options: DeleteRangeOptions,
+    ) -> Result<()> {
+        self.delete_range_internal(
+            Arc::from(start_inclusive.into()),
+            Arc::from(end_exclusive.into()),
+            options,
+        )
+        .await
+    }
+
+    async fn delete_range_internal(
+        &self,
+        start_inclusive: Arc<str>,
+        end_exclusive: Arc<str>,
         options: DeleteRangeOptions,
     ) -> Result<()> {
         let do_delete_range = |shard: shard::Client,
@@ -1048,9 +1100,6 @@ impl Client {
             .await
         };
 
-        let start = Arc::from(start_inclusive.into());
-        let end = Arc::from(end_exclusive.into());
-
         if let Some(shard) = {
             if let Some(pk) = options.partition_key.as_deref() {
                 Some(self.get_shard(pk)?)
@@ -1060,7 +1109,7 @@ impl Client {
                 None
             }
         } {
-            return do_delete_range(shard, start, end, options).await;
+            return do_delete_range(shard, start_inclusive, end_exclusive, options).await;
         }
 
         let n = match self.config.max_parallel_requests() {
@@ -1071,7 +1120,12 @@ impl Client {
         let mut result_stream =
             futures::stream::iter(self.get_shard_manager()?.get_shard_clients())
                 .map(|shard| {
-                    do_delete_range(shard, Arc::clone(&start), Arc::clone(&end), options.clone())
+                    do_delete_range(
+                        shard,
+                        Arc::clone(&start_inclusive),
+                        Arc::clone(&end_exclusive),
+                        options.clone(),
+                    )
                 })
                 .buffer_unordered(n);
 
@@ -1091,23 +1145,35 @@ impl Client {
         Ok(())
     }
 
-    pub async fn delete_range(
+    #[inline]
+    pub async fn list(
         &self,
         start_inclusive: impl Into<String>,
         end_exclusive: impl Into<String>,
-    ) -> Result<()> {
-        self.delete_range_with_options(
-            start_inclusive,
-            end_exclusive,
-            DeleteRangeOptions::default(),
-        )
-        .await
+    ) -> Result<ListResponse> {
+        self.list_with_options(start_inclusive, end_exclusive, ListOptions::default())
+            .await
     }
 
+    #[inline]
     pub async fn list_with_options(
         &self,
         start_inclusive: impl Into<String>,
         end_exclusive: impl Into<String>,
+        options: ListOptions,
+    ) -> Result<ListResponse> {
+        self.list_internal(
+            Arc::from(start_inclusive.into()),
+            Arc::from(end_exclusive.into()),
+            options,
+        )
+        .await
+    }
+
+    async fn list_internal(
+        &self,
+        start_inclusive: Arc<str>,
+        end_exclusive: Arc<str>,
         options: ListOptions,
     ) -> Result<ListResponse> {
         let do_list = |shard: shard::Client,
@@ -1124,12 +1190,9 @@ impl Client {
             .await
         };
 
-        let start = Arc::from(start_inclusive.into());
-        let end = Arc::from(end_exclusive.into());
-
         if let Some(pk) = options.partition_key.as_deref() {
             let shard = self.get_shard(pk)?;
-            return do_list(shard, start, end, options).await;
+            return do_list(shard, start_inclusive, end_exclusive, options).await;
         }
 
         let n = match self.config.max_parallel_requests() {
@@ -1139,7 +1202,14 @@ impl Client {
 
         let mut result_stream =
             futures::stream::iter(self.get_shard_manager()?.get_shard_clients())
-                .map(|shard| do_list(shard, Arc::clone(&start), Arc::clone(&end), options.clone()))
+                .map(|shard| {
+                    do_list(
+                        shard,
+                        Arc::clone(&start_inclusive),
+                        Arc::clone(&end_exclusive),
+                        options.clone(),
+                    )
+                })
                 .buffer_unordered(n);
 
         let mut response = ListResponse::default();
@@ -1160,19 +1230,35 @@ impl Client {
         Ok(response)
     }
 
-    pub async fn list(
+    #[inline]
+    pub async fn range_scan(
         &self,
         start_inclusive: impl Into<String>,
         end_exclusive: impl Into<String>,
-    ) -> Result<ListResponse> {
-        self.list_with_options(start_inclusive, end_exclusive, ListOptions::default())
+    ) -> Result<RangeScanResponse> {
+        self.range_scan_with_options(start_inclusive, end_exclusive, RangeScanOptions::default())
             .await
     }
 
+    #[inline]
     pub async fn range_scan_with_options(
         &self,
         start_inclusive: impl Into<String>,
         end_exclusive: impl Into<String>,
+        options: RangeScanOptions,
+    ) -> Result<RangeScanResponse> {
+        self.range_scan_internal(
+            Arc::from(start_inclusive.into()),
+            Arc::from(end_exclusive.into()),
+            options,
+        )
+        .await
+    }
+
+    async fn range_scan_internal(
+        &self,
+        start_inclusive: Arc<str>,
+        end_exclusive: Arc<str>,
         options: RangeScanOptions,
     ) -> Result<RangeScanResponse> {
         let do_range_scan = |shard: shard::Client,
@@ -1189,12 +1275,9 @@ impl Client {
             .await
         };
 
-        let start = Arc::from(start_inclusive.into());
-        let end = Arc::from(end_exclusive.into());
-
         if let Some(pk) = options.partition_key.as_deref() {
             let shard = self.get_shard(pk)?;
-            return do_range_scan(shard, start, end, options).await;
+            return do_range_scan(shard, start_inclusive, end_exclusive, options).await;
         }
 
         let n = match self.config.max_parallel_requests() {
@@ -1205,7 +1288,12 @@ impl Client {
         let mut result_stream =
             futures::stream::iter(self.get_shard_manager()?.get_shard_clients())
                 .map(|shard| {
-                    do_range_scan(shard, Arc::clone(&start), Arc::clone(&end), options.clone())
+                    do_range_scan(
+                        shard,
+                        Arc::clone(&start_inclusive),
+                        Arc::clone(&end_exclusive),
+                        options.clone(),
+                    )
                 })
                 .buffer_unordered(n);
 
@@ -1225,15 +1313,6 @@ impl Client {
         }
 
         Ok(response)
-    }
-
-    pub async fn range_scan(
-        &self,
-        start_inclusive: impl Into<String>,
-        end_exclusive: impl Into<String>,
-    ) -> Result<RangeScanResponse> {
-        self.range_scan_with_options(start_inclusive, end_exclusive, RangeScanOptions::default())
-            .await
     }
 
     /// Create a notifications stream with default options.
