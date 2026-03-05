@@ -66,10 +66,12 @@ use crate::pool::ChannelPool;
 pub struct ShardMapEpoch(u64);
 
 impl ShardMapEpoch {
+    #[inline]
     fn new() -> Self {
         Self::default()
     }
 
+    #[inline]
     const fn next(self) -> Self {
         Self(self.0 + 1)
     }
@@ -82,6 +84,7 @@ pub type ShardMapUpdateResult = std::result::Result<ShardMapEpoch, Error>;
 pub struct ShardId(i64);
 
 impl ShardId {
+    #[inline]
     pub const fn new(val: i64) -> Self {
         Self(val)
     }
@@ -89,6 +92,7 @@ impl ShardId {
     // A canonical invalid value
     pub const INVALID: Self = Self(-1);
 
+    #[inline]
     pub const fn is_invalid(self) -> bool {
         self.0 < 0
     }

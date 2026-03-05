@@ -41,6 +41,7 @@ pub enum OxiaError {
 }
 
 impl From<i32> for OxiaError {
+    #[inline]
     fn from(code: i32) -> Self {
         match code {
             1 => Self::KeyNotFound,
@@ -115,6 +116,7 @@ pub enum OxiaRpcError {
 // Public api
 impl OxiaRpcError {
     /// Returns `true` if this error indicates the request hit the wrong leader.
+    #[inline]
     pub const fn is_wrong_leader(&self) -> bool {
         matches!(
             self,
@@ -123,6 +125,7 @@ impl OxiaRpcError {
     }
 
     /// Returns `true` if it might make sense to retry when this error is seen.
+    #[inline]
     pub const fn is_retryable(&self) -> bool {
         // We avoid a default arm to ensure that all new error types are addressed intentionally
         #[allow(clippy::match_same_arms)]
@@ -377,6 +380,7 @@ fn format_shard_errors(errors: &[ShardError]) -> String {
 
 impl Error {
     /// Whether the error is likely transient and worth retrying
+    #[inline]
     pub fn is_retryable(&self) -> bool {
         // Do not have a default arm so that adding a new error type requires explicitly deciding
         // what to do.  Never mind that the answer is almost always `false`
@@ -417,6 +421,7 @@ impl Error {
 
     /// Whether the error indicates a connection failure that should invalidate cached channels.
     /// This is used to trigger channel reconnection on the next request.
+    #[inline]
     pub fn is_connection_error(&self) -> bool {
         match self {
             Self::Transport(_) => true,
@@ -476,6 +481,7 @@ impl Error {
     }
 
     /// Whether the error indicates the request was sent to the wrong leader.
+    #[inline]
     pub fn is_wrong_leader(&self) -> bool {
         match self {
             Self::OxiaRpc(e) => e.is_wrong_leader(),

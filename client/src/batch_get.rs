@@ -63,18 +63,21 @@ pub struct RequestBuilder {
 
 impl RequestBuilder {
     #[must_use]
+    #[inline]
     pub fn options(mut self, opts: Options) -> Self {
         self.opts = Some(opts);
         self
     }
 
     #[must_use]
+    #[inline]
     pub fn add_key(mut self, key: impl Into<Arc<str>>) -> Self {
         self.keys.push(key.into());
         self
     }
 
     #[must_use]
+    #[inline]
     pub fn add_keys<I, S>(mut self, keys: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -84,6 +87,7 @@ impl RequestBuilder {
         self
     }
 
+    #[inline]
     pub fn build(self) -> Request {
         Request {
             keys: self.keys,
@@ -99,6 +103,7 @@ pub struct Request {
 }
 
 impl Request {
+    #[inline]
     pub fn builder() -> RequestBuilder {
         RequestBuilder::default()
     }
@@ -111,11 +116,13 @@ pub struct ResponseItem {
 }
 
 impl ResponseItem {
+    #[inline]
     pub fn new(key: impl Into<Arc<str>>, response: Result<Option<GetResponse>>) -> Self {
         let key = key.into();
         Self { key, response }
     }
 
+    #[inline]
     pub fn failed(key: impl Into<Arc<str>>, err: Error) -> Self {
         Self::new(key, Err(err))
     }

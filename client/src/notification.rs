@@ -121,10 +121,12 @@ impl fmt::Debug for State {
 pub struct ConfigEpoch(usize);
 
 impl ConfigEpoch {
+    #[inline]
     pub const fn new() -> Self {
         Self(0)
     }
 
+    #[inline]
     pub const fn next(&mut self) {
         self.0 += 1;
     }

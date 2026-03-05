@@ -56,9 +56,12 @@ impl SecondaryIndex {
         })
     }
 
+    #[inline]
     pub fn index_name(&self) -> &str {
         &self.0.index_name
     }
+
+    #[inline]
     pub fn secondary_key(&self) -> &str {
         &self.0.secondary_key
     }
@@ -118,12 +121,14 @@ pub struct PutOptions {
 }
 
 impl PutOptions {
+    #[inline]
     pub fn new() -> Self {
         Self::default()
     }
 }
 
 impl Default for PutOptions {
+    #[inline]
     fn default() -> Self {
         Self::builder().build()
     }
@@ -172,6 +177,7 @@ impl KeyComparisonType {
 }
 
 impl From<KeyComparisonType> for i32 {
+    #[inline]
     fn from(k: KeyComparisonType) -> Self {
         k as Self
     }
@@ -195,18 +201,21 @@ pub struct GetOptions {
 }
 
 impl GetOptions {
+    #[inline]
     pub fn new() -> Self {
         Self::default()
     }
 }
 
 impl Default for GetOptions {
+    #[inline]
     fn default() -> Self {
         Self::builder().build()
     }
 }
 
 impl<S: get_options_builder::State> GetOptionsBuilder<S> {
+    #[inline]
     pub fn exclude_value(self) -> GetOptionsBuilder<get_options_builder::SetIncludeValue<S>>
     where
         S::IncludeValue: get_options_builder::IsUnset,
@@ -241,18 +250,21 @@ impl RecordVersion {
         }
     }
 
+    #[inline]
     pub const fn is_ephemeral(&self) -> bool {
         self.session_id.is_some()
     }
 }
 
 impl PartialEq for RecordVersion {
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == Ordering::Equal
     }
 }
 
 impl PartialOrd for RecordVersion {
+    #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
@@ -288,6 +300,7 @@ impl GetResponse {
 }
 
 impl PartialEq for GetResponse {
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
         // We want to compare `value` last, hence not using `#[derive(PartialEq)]`.  A manual
         // implementation might be more efficient, but let's start simple so we don't need to worry
@@ -297,6 +310,7 @@ impl PartialEq for GetResponse {
 }
 
 impl PartialOrd for GetResponse {
+    #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
@@ -320,12 +334,14 @@ pub struct DeleteOptions {
 }
 
 impl DeleteOptions {
+    #[inline]
     pub fn new() -> Self {
         Self::default()
     }
 }
 
 impl Default for DeleteOptions {
+    #[inline]
     fn default() -> Self {
         Self::builder().build()
     }
@@ -347,12 +363,14 @@ pub struct ListOptions {
 }
 
 impl ListOptions {
+    #[inline]
     pub fn new() -> Self {
         Self::default()
     }
 }
 
 impl Default for ListOptions {
+    #[inline]
     fn default() -> Self {
         Self::builder().build()
     }
@@ -390,6 +408,7 @@ impl ListResponse {
 }
 
 impl Default for ListResponse {
+    #[inline]
     fn default() -> Self {
         Self {
             keys: Vec::new(),
@@ -415,12 +434,14 @@ pub struct RangeScanOptions {
 }
 
 impl RangeScanOptions {
+    #[inline]
     pub fn new() -> Self {
         Self::default()
     }
 }
 
 impl Default for RangeScanOptions {
+    #[inline]
     fn default() -> Self {
         Self::builder().build()
     }
@@ -459,6 +480,7 @@ impl RangeScanResponse {
 }
 
 impl Default for RangeScanResponse {
+    #[inline]
     fn default() -> Self {
         Self {
             records: vec![],
@@ -476,12 +498,14 @@ pub struct DeleteRangeOptions {
 }
 
 impl DeleteRangeOptions {
+    #[inline]
     pub fn new() -> Self {
         Self::default()
     }
 }
 
 impl Default for DeleteRangeOptions {
+    #[inline]
     fn default() -> Self {
         Self::builder().build()
     }
@@ -774,6 +798,7 @@ pub struct Client {
 }
 
 impl Client {
+    #[inline]
     pub const fn new(config: Arc<config::Config>) -> Self {
         Self {
             shard_manager: None,
@@ -781,6 +806,7 @@ impl Client {
         }
     }
 
+    #[inline]
     pub const fn config(&self) -> &Arc<config::Config> {
         &self.config
     }
@@ -798,6 +824,7 @@ impl Client {
         Ok(())
     }
 
+    #[inline]
     pub async fn reconnect(&mut self) -> Result<()> {
         self.shard_manager = None;
         self.connect().await
@@ -806,11 +833,13 @@ impl Client {
     /// Returns the current shard map epoch.
     ///
     /// Epoch increments with each shard assignment update within this client's lifetime.
+    #[inline]
     pub fn epoch(&self) -> Result<ShardMapEpoch> {
         Ok(self.get_shard_manager()?.epoch())
     }
 
     /// Signals the background task to refresh shard assignments.
+    #[inline]
     pub fn trigger_refresh(&self) -> Result<()> {
         self.get_shard_manager()?.trigger_refresh();
         Ok(())
@@ -834,6 +863,7 @@ impl Client {
     ///     result => result
     /// }
     /// ```
+    #[inline]
     pub async fn wait_for_update(
         &self,
         after_epoch: ShardMapEpoch,
