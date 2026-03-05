@@ -69,10 +69,12 @@ pub struct StaticServiceDiscovery {
 }
 
 impl StaticServiceDiscovery {
+    #[inline]
     pub const fn new(addrs: Vec<String>) -> Self {
         Self { addrs }
     }
 
+    #[inline]
     pub fn single(addr: impl Into<String>) -> Self {
         Self {
             addrs: vec![addr.into()],
@@ -93,6 +95,7 @@ pub struct CoordinatorServiceDiscovery {
 }
 
 impl CoordinatorServiceDiscovery {
+    #[inline]
     pub const fn new(coordinator_addr: String) -> Self {
         Self { coordinator_addr }
     }

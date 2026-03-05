@@ -28,18 +28,13 @@ pub struct RetryConfig {
 }
 
 impl RetryConfig {
+    #[inline]
     pub const fn new(attempts: usize, initial_delay: Duration) -> Self {
         Self {
             attempts,
             initial_delay,
             max_delay: initial_delay.saturating_mul(10),
         }
-    }
-
-    #[must_use]
-    pub const fn max(mut self, x: Duration) -> Self {
-        self.max_delay = x;
-        self
     }
 }
 
@@ -65,28 +60,42 @@ pub struct Config {
 }
 
 impl Config {
+    #[inline]
     pub fn service_discovery(&self) -> Arc<dyn ServiceDiscovery> {
         Arc::clone(&self.service_discovery)
     }
 
+    #[inline]
     pub fn namespace(&self) -> &str {
         &self.namespace
     }
+
+    #[inline]
     pub fn identity(&self) -> &str {
         &self.identity
     }
+
+    #[inline]
     pub const fn session_timeout(&self) -> Duration {
         self.session_timeout
     }
+
+    #[inline]
     pub const fn max_parallel_requests(&self) -> usize {
         self.max_parallel_requests
     }
+
+    #[inline]
     pub const fn request_timeout(&self) -> Option<Duration> {
         self.request_timeout
     }
+
+    #[inline]
     pub const fn retry(&self) -> Option<RetryConfig> {
         self.retry
     }
+
+    #[inline]
     pub const fn retry_on_stale_shard_map(&self) -> bool {
         self.retry_on_stale_shard_map
     }
@@ -94,6 +103,7 @@ impl Config {
 
 impl<S: config_builder::State> ConfigBuilder<S> {
     /// Convenience for the simple case
+    #[inline]
     pub fn service_addr(
         self,
         service_addr: impl Into<String>,
@@ -105,6 +115,7 @@ impl<S: config_builder::State> ConfigBuilder<S> {
         self.service_discovery(StaticServiceDiscovery::single(service_addr))
     }
 
+    #[inline]
     pub fn build(self) -> Arc<Config>
     where
         S: config_builder::IsComplete,
