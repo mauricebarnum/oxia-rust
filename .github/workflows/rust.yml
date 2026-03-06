@@ -25,120 +25,13 @@ on:
         description: "Extra environment variables (e.g., FOO=bar BAZ=qux)"
         required: false
         default: ""
-  workflow_run:
-    workflows: ["build-docker-image"]
-    types:
-      - completed
-    branches: ["main"]
-
-env:
-  CARGO_TERM_COLOR: always
-  # Use sccache with local cache only (no GitHub Actions cache)
-  SCCACHE_DIR: "/tmp/sccache"
-  RUSTC_WRAPPER: "sccache"
-  RUST_BACKTRACE: full
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    container:
+    uses: ./.github/workflows/rust-build.yml
+    with:
       image: ghcr.io/${{ github.repository }}/rust-build:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
-    steps:
-      - name: set-extra-env
-        if: github.event.inputs.extra_env != ''
-        run: |
-          echo "Setting extra environment variables: ${{ github.event.inputs.extra_env }}"
-          # Export each variable for subsequent steps
-          for pair in ${{ github.event.inputs.extra_env }}; do
-            echo "Exporting $pair"
-            echo "$pair" >> $GITHUB_ENV
-          done
-
-      - name: checkout
-        uses: actions/checkout@v4
-
-      - name: cargo-deny
-        run: cargo deny check
-
-      - name: set-build-profile
-        run: |
-          BUILD_MODE="${{ github.event.inputs.build_mode || 'auto' }}"
-          if [ "$BUILD_MODE" = "ci" ]; then
-            echo "CARGO_PROFILE=ci" >> $GITHUB_ENV
-            echo "RELEASE_FLAG=--profile ci" >> $GITHUB_ENV
-            echo "NEXTEST_FLAG=--cargo-profile ci" >> $GITHUB_ENV
-          elif [ "$BUILD_MODE" = "debug" ]; then
-            echo "CARGO_PROFILE=debug" >> $GITHUB_ENV
-            echo "RELEASE_FLAG=" >> $GITHUB_ENV
-            echo "NEXTEST_FLAG=" >> $GITHUB_ENV
-          elif [ "${{ github.event_name }}" = "pull_request" ]; then
-            # Auto mode: ci-debug for PRs
-            echo "CARGO_PROFILE=ci-debug" >> $GITHUB_ENV
-            echo "RELEASE_FLAG=--profile ci-debug" >> $GITHUB_ENV
-            echo "NEXTEST_FLAG=--cargo-profile ci-debug" >> $GITHUB_ENV
-          else
-            # Auto mode: ci profile for branch pushes (main or any other branch)
-            echo "CARGO_PROFILE=ci" >> $GITHUB_ENV
-            echo "RELEASE_FLAG=--profile ci" >> $GITHUB_ENV
-            echo "NEXTEST_FLAG=--cargo-profile ci" >> $GITHUB_ENV
-          fi
-          echo "Build mode: $BUILD_MODE, Event: ${{ github.event_name }}, Profile: $CARGO_PROFILE"
-
-      # TODO: move this to the build image
-      - name: Compute rustc hash
-        run: echo "RUSTC_HASH=$(rustc --version | sha256sum | cut -d' ' -f1)" >> $GITHUB_ENV
-
-      - name: enable-sccache
-        uses: actions/cache@v4
-        with:
-          path: /tmp/sccache
-          key: sccache-${{ runner.os }}-${{ env.CARGO_PROFILE }}-${{ env.RUSTC_HASH }}
-          restore-keys: |
-            sccache-${{ runner.os }}-${{ env.CARGO_PROFILE }}-
-
-      - name: enable-miri-cache
-        uses: actions/cache@v4
-        with:
-          path: /home/runner/deps/target/miri
-          key: miri-${{ runner.os }}-${{ env.RUSTC_HASH }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            miri-${{ runner.os }}-${{ env.RUSTC_HASH }}-
-
-      - name: detect-vendored-build
-        id: vendored
-        run: |
-          vendored=false
-          if [ -f .cargo/config.toml ] && grep -q 'vendored-sources' .cargo/config.toml; then
-            vendored=true
-          fi
-          echo "vendored=${vendored}" >> "$GITHUB_OUTPUT"
-
-      - name: fetch-dependencies
-        if: steps.vendored.outputs.vendored == 'false'
-        run: |
-          cargo update --dry-run --verbose # update crate index
-          cargo fetch --locked   # fetch dependencies: last network dependency
-
-      - name: build
-        run: cargo build $RELEASE_FLAG --frozen --all-targets
-
-      - name: clippy
-        run: cargo clippy $RELEASE_FLAG --no-deps --all-targets --frozen -- -D warnings
-
-      - name: test
-        timeout-minutes: 10
-        run: cargo nextest run $NEXTEST_FLAG --frozen --no-fail-fast --verbose
-
-      - name: miri-client
-        run: |
-          unset RUSTC_WRAPPER
-          cargo +nightly miri nextest run --package mauricebarnum-oxia-client --frozen
-        env:
-          MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-disable-isolation
-
-      - name: show-sccache-stats
-        run: sccache --show-stats || true
+      build_mode: ${{ inputs.build_mode || 'auto' }}
+      extra_env: ${{ inputs.extra_env || '' }}
+      caller_event_name: ${{ github.event_name }}
+    secrets: inherit
