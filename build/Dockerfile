@@ -7,12 +7,12 @@ ARG CARGO_HOME=${HOME}/.cargo
 ARG RUSTUP_HOME=${HOME}/.rustup
 
 # Versions
-ARG RUST_VERSION=1.93.1
-ARG GO_VERSION=1.26.0
+ARG RUST_VERSION=1.94.0
+ARG GO_VERSION=1.26.1
 
 # ===== Pull Official Images =====
-FROM rust:${RUST_VERSION}-bookworm AS rust-official
-FROM golang:${GO_VERSION}-bookworm AS go-official
+FROM rust:${RUST_VERSION} AS rust-official
+FROM golang:${GO_VERSION} AS go-official
 
 # ===== Chef: shared base for planner and cook — guarantees same cargo-chef version =====
 FROM rust-official AS chef
@@ -36,15 +36,15 @@ COPY oxia-bin-util/Cargo.toml oxia-bin-util/
 # This is self-maintaining: adding new examples/tests/benches never requires
 # updating this Dockerfile.
 RUN for toml in */Cargo.toml; do \
-        dir="${toml%/Cargo.toml}"; \
-        mkdir -p "$dir/src"; \
-        touch "$dir/src/lib.rs" "$dir/src/main.rs"; \
+    dir="${toml%/Cargo.toml}"; \
+    mkdir -p "$dir/src"; \
+    touch "$dir/src/lib.rs" "$dir/src/main.rs"; \
     done \
     && while ! cargo metadata --no-deps --format-version 1 >/dev/null 2>/tmp/meta-err; do \
-           path=$(sed -n "s/.*failed to read \`\([^\`]*\)\`.*/\1/p" /tmp/meta-err | head -1); \
-           [ -n "$path" ] || { cat /tmp/meta-err >&2; exit 1; }; \
-           mkdir -p "$(dirname "$path")" && touch "$path"; \
-       done \
+    path=$(sed -n "s/.*failed to read \`\([^\`]*\)\`.*/\1/p" /tmp/meta-err | head -1); \
+    [ -n "$path" ] || { cat /tmp/meta-err >&2; exit 1; }; \
+    mkdir -p "$(dirname "$path")" && touch "$path"; \
+    done \
     && cargo chef prepare --recipe-path recipe.json
 
 FROM ubuntu:24.04 AS build
