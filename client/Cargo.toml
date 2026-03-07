@@ -6,14 +6,14 @@ license = "Apache-2.0"
 
 [dependencies]
 mauricebarnum-oxia-common = { path = "../common" }
-tokio = { version = "1.49.0", features = ["sync", "rt", "time"] }
+tokio = { version = "1.50.0", features = ["sync", "rt", "time"] }
 tokio-stream = "0.1.18"
 tonic = { version = "0.14.5", features = ["gzip", "channel", "zstd"] }
 thiserror = "2.0.18"
 bytes = "1.11.1"
 tracing = "0.1.44"
 futures = "0.3.32"
-getrandom = "0.4.1"
+getrandom = "0.4.2"
 rand = "0.10.0"
 xxhash-rust = { version = "0.8.15", default-features = false, features = [
     "xxh3",
@@ -31,14 +31,14 @@ prost-types = "0.14.3"
 bench-dashmap = ["dep:dashmap"]
 
 [dev-dependencies]
-tokio = { version = "1.49.0", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1.50.0", features = ["rt-multi-thread", "macros"] }
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
-chrono = "0.4.43"
-socket2 = "0.6.2"
+chrono = "0.4.44"
+socket2 = "0.6.3"
 test-log = { version = "0.2.19", features = ["trace", "color"] }
 oxia-bin-util = { path = "../oxia-bin-util" }
-tempfile = "3.25.0"
-anyhow = "1.0.101"
+tempfile = "3.26.0"
+anyhow = "1.0.102"
 itertools = "0.14.0"
 nix = { version = "0.31", default-features = false, features = ["signal"] }
 
