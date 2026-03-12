@@ -54,10 +54,6 @@ fn build_oxia_cli() -> io::Result<OsString> {
     let tools_src_dir = ext_dir.join("oxia/cmd");
     let vendor_root = tools_src_dir.join("vendor");
 
-    let oxia_dir = get_oxia_dir().unwrap();
-    let oxia_path = oxia_dir.join(OXIA_BIN);
-    let oxia_path_str = oxia_path.to_str().unwrap().to_string();
-
     let go_mod = tools_src_dir.join("go.mod").to_str().unwrap().to_string();
     let go_sum = tools_src_dir.join("go.sum").to_str().unwrap().to_string();
     let oxia_version = ext_dir.join("oxia.version").to_str().unwrap().to_string();
@@ -86,14 +82,14 @@ fn build_oxia_cli() -> io::Result<OsString> {
             hasher.update(fs::read(path)?);
         }
     }
-    let new_hash = format!("{:x}", hasher.finalize());
-    let hash_path = oxia_path.with_extension("sha256");
-    let old_hash = fs::read_to_string(&hash_path).ok();
+    let oxia_dir = get_oxia_dir().unwrap();
+    let oxia_path = oxia_dir.join(format!("{OXIA_BIN}-{:x}", hasher.finalize()));
 
-    let binary_missing = !oxia_path.exists();
-    let hash_changed = old_hash.as_deref() != Some(&new_hash);
+    // Convert to a string now so in the odd case we have bad utf8, the build aborts before running
+    // the go compiler
+    let oxia_path_str = oxia_path.to_str().unwrap().to_string();
 
-    if binary_missing || hash_changed {
+    if !oxia_path.exists() {
         let status = Command::new("go")
             .current_dir(tools_src_dir)
             .env("GOPROXY", "off")
@@ -107,7 +103,6 @@ fn build_oxia_cli() -> io::Result<OsString> {
             .expect("failed to run `go build` for oxia CLI");
 
         assert!(status.success(), "oxia build failed");
-        fs::write(&hash_path, new_hash)?; // update hash after a successful build
     }
 
     // Keep exporting the path to the built binary for consumers
