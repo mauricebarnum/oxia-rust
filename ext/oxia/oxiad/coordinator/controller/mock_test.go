@@ -19,6 +19,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -134,6 +135,7 @@ type mockPerNodeChannels struct {
 	// Feature negotiation support
 	supportedFeatures []proto.Feature
 	getInfoErr        error
+	getInfoCount      atomic.Int64
 }
 
 const defaultTimeout = 10 * time.Second
@@ -147,6 +149,7 @@ func (m *mockPerNodeChannels) expectBecomeLeaderRequest(t *testing.T, shard int6
 	case r = <-m.becomeLeaderRequests:
 	case <-time.After(defaultTimeout):
 		assert.Fail(t, "did not receive BecomeLeader request in time")
+		return
 	}
 
 	assert.Equal(t, shard, r.Shard)
@@ -163,6 +166,7 @@ func (m *mockPerNodeChannels) expectBecomeLeaderRequestWithFeatures(t *testing.T
 	case r = <-m.becomeLeaderRequests:
 	case <-time.After(defaultTimeout):
 		assert.Fail(t, "did not receive BecomeLeader request in time")
+		return
 	}
 
 	assert.Equal(t, shard, r.Shard)
@@ -179,6 +183,7 @@ func (m *mockPerNodeChannels) expectNewTermRequest(t *testing.T, shard int64, te
 	case r = <-m.newTermRequests:
 	case <-time.After(defaultTimeout):
 		assert.Fail(t, "did not receive NewTerm request in time")
+		return
 	}
 
 	assert.Equal(t, shard, r.Shard)
@@ -205,6 +210,7 @@ func (m *mockPerNodeChannels) expectDeleteShardRequest(t *testing.T, shard int64
 	case r = <-m.deleteShardRequests:
 	case <-time.After(defaultTimeout):
 		assert.Fail(t, "did not receive DeleteShard request in time")
+		return
 	}
 
 	assert.Equal(t, shard, r.Shard)
@@ -219,6 +225,7 @@ func (m *mockPerNodeChannels) expectAddFollowerRequest(t *testing.T, shard int64
 	case r = <-m.addFollowerRequests:
 	case <-time.After(defaultTimeout):
 		assert.Fail(t, "did not receive AddFollower request in time")
+		return
 	}
 
 	assert.Equal(t, shard, r.Shard)
@@ -233,6 +240,7 @@ func (m *mockPerNodeChannels) expectGetStatusRequest(t *testing.T, shard int64) 
 	case r = <-m.getStatusRequests:
 	case <-time.After(defaultTimeout):
 		assert.Fail(t, "did not receive GetStatus request in time")
+		return
 	}
 
 	assert.Equal(t, shard, r.Shard)
@@ -355,6 +363,7 @@ func (r *mockRpcProvider) GetInfo(_ context.Context, node model.Server, _ *proto
 	defer r.Unlock()
 
 	n := r.getNode(node)
+	n.getInfoCount.Add(1)
 	if n.getInfoErr != nil {
 		return nil, n.getInfoErr
 	}
