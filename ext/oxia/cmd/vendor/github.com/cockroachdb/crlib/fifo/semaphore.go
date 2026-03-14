@@ -16,6 +16,7 @@ package fifo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -34,8 +35,7 @@ type Semaphore struct {
 		sync.Mutex
 
 		capacity int64
-		// outstanding can exceed capacity if the capacity is dynamically decreased
-		// or if a single request exceeds the capacity.
+		// outstanding can exceed capacity if the capacity is dynamically decreased.
 		outstanding int64
 
 		waiters Queue[semaWaiter]
@@ -64,13 +64,17 @@ func NewSemaphore(capacity int64) *Semaphore {
 
 var semaQueuePool = MakeQueueBackingPool[semaWaiter]()
 
+// ErrRequestExceedsCapacity is returned when an Acquire requests more than the
+// current capacity of the semaphore.
+var ErrRequestExceedsCapacity = errors.New("request exceeds semaphore capacity")
+
 // TryAcquire attempts to acquire n units from the semaphore without waiting. On
 // success, returns true and the caller must later Release the units.
 func (s *Semaphore) TryAcquire(n int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.numWaitersLocked() == 0 && s.canAcquireLocked(n) {
+	if s.numWaitersLocked() == 0 && s.mu.outstanding+n <= s.mu.capacity {
 		s.mu.outstanding += n
 		return true
 	}
@@ -78,28 +82,24 @@ func (s *Semaphore) TryAcquire(n int64) bool {
 	return false
 }
 
-func (s *Semaphore) canAcquireLocked(n int64) bool {
-	// We allow a request larger than the capacity as long as there are no
-	// outstanding units.
-	return s.mu.outstanding+n <= s.mu.capacity || s.mu.outstanding == 0
-}
-
 // Acquire n units from the semaphore, waiting if necessary.
 //
 // If the context is canceled while we are waiting, returns the context error.
-//
-// If n exceeds the current capacity, the request will be allowed when there are
-// no other acquisitions (similar to n being equal to the capacity).
-//
+// If n exceeds the current capacity, returns ErrRequestExceedsCapacity.
 // On success, the caller must later Release the units.
 func (s *Semaphore) Acquire(ctx context.Context, n int64) error {
 	s.mu.Lock()
 
 	// Fast path.
-	if s.numWaitersLocked() == 0 && s.canAcquireLocked(n) {
+	if s.numWaitersLocked() == 0 && s.mu.outstanding+n <= s.mu.capacity {
 		s.mu.outstanding += n
 		s.mu.Unlock()
 		return nil
+	}
+
+	if n > s.mu.capacity {
+		s.mu.Unlock()
+		return ErrRequestExceedsCapacity
 	}
 
 	c := chanSyncPool.Get().(chan error)
@@ -177,8 +177,7 @@ type SemaphoreStats struct {
 	// Capacity is the current capacity of the semaphore.
 	Capacity int64
 	// Outstanding is the number of units that have been acquired. Note that this
-	// can exceed Capacity if the capacity was recently decreased or if a single
-	// request exceeded the capacity.
+	// can exceed Capacity if the capacity was recently decreased.
 	Outstanding int64
 	// NumHadToWait is the total number of Acquire calls (since the semaphore was
 	// created) that had to wait because the semaphore was exhausted. Useful for
@@ -220,10 +219,15 @@ func (s *Semaphore) processWaitersLocked() {
 				panic("negative numCanceled")
 			}
 
-		case s.canAcquireLocked(w.n):
+		case s.mu.outstanding+w.n <= s.mu.capacity:
 			// Request can be fulfilled.
 			s.mu.outstanding += w.n
 			w.c <- nil
+
+		case w.n > s.mu.capacity:
+			// Request must be failed. This can happen if the capacity was decreased
+			// while the element was queued.
+			w.c <- ErrRequestExceedsCapacity
 
 		default:
 			// Head of the queue needs to wait some more.
