@@ -3,14 +3,22 @@
   "extends": [
     "config:recommended"
   ],
+  "ignorePaths": [
+    "ext/oxia/**"
+  ],
   "packageRules": [
     {
-      "matchManagers": ["cargo"],
-      "commitLockfile": true
+      "matchManagers": ["github-actions"],
+      "automerge": false,
+      "semanticCommits": true
     }
   ],
   "lockFileMaintenance": {
     "enabled": true,
-    "schedule": ["weekly"]
-  }
+    "schedule": ["* 0 * * 1"]
+  },
+  "enabledManagers": [
+    "cargo",
+    "github-actions"
+  ]
 }
