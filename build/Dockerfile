@@ -60,7 +60,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # ===== OS packages (long-lived layer), runs as root =====
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -V -y \
     build-essential \
     ca-certificates \
     curl \
@@ -75,7 +75,7 @@ RUN apt-get update && apt-get install -y \
     unzip \
     zstd \
     && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
-    && apt-get install -y nodejs \
+    && apt-get install -V -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # ===== Create non-root build user and switch =====
