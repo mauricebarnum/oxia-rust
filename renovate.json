@@ -11,6 +11,30 @@
       "matchManagers": ["github-actions"],
       "automerge": false,
       "semanticCommits": true
+    },
+    {
+      "matchPackagePatterns": ["^tonic", "^prost"],
+      "groupName": "tonic/prost",
+      "groupSlug": "tonic-prost",
+      "description": "gRPC code generation and runtime"
+    },
+    {
+      "matchPackagePatterns": ["^tokio"],
+      "groupName": "tokio",
+      "groupSlug": "tokio",
+      "description": "async runtime and utilities"
+    },
+    {
+      "matchPackagePatterns": ["^tracing"],
+      "groupName": "tracing",
+      "groupSlug": "tracing",
+      "description": "structured logging and diagnostics"
+    },
+    {
+      "matchPackagePatterns": ["^clap"],
+      "groupName": "clap",
+      "groupSlug": "clap",
+      "description": "CLI argument parsing"
     }
   ],
   "lockFileMaintenance": {
