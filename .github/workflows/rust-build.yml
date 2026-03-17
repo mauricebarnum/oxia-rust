@@ -89,7 +89,7 @@ jobs:
         run: echo "RUSTC_HASH=$(rustc --version | sha256sum | cut -d' ' -f1)" >> $GITHUB_ENV
 
       - name: enable-sccache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/sccache
           key: sccache-${{ runner.os }}-${{ env.CARGO_PROFILE }}-${{ env.RUSTC_HASH }}
@@ -97,7 +97,7 @@ jobs:
             sccache-${{ runner.os }}-${{ env.CARGO_PROFILE }}-
 
       - name: enable-miri-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /home/runner/deps/target/miri
           key: miri-${{ runner.os }}-${{ env.RUSTC_HASH }}-${{ hashFiles('Cargo.lock') }}
