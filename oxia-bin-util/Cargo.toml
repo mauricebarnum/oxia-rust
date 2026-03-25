@@ -10,5 +10,5 @@ workspace = true
 
 [build-dependencies]
 is_executable = "1.0.5"
-sha2 = "0.10.9"
+sha2 = "0.11.0"
 walkdir = "2.5.0"
