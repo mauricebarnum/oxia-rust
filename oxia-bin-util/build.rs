@@ -83,7 +83,7 @@ fn build_oxia_cli() -> io::Result<OsString> {
         }
     }
     let oxia_dir = get_oxia_dir().unwrap();
-    let oxia_path = oxia_dir.join(format!("{OXIA_BIN}-{:x}", hasher.finalize()));
+    let oxia_path = oxia_dir.join(format!("{OXIA_BIN}-{}", hex::encode(hasher.finalize())));
 
     // Convert to a string now so in the odd case we have bad utf8, the build aborts before running
     // the go compiler
