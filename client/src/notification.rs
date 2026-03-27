@@ -247,7 +247,7 @@ impl NotificationsStream {
                 });
             }
 
-            let results: Vec<_> = futures::stream::iter(futs.into_iter())
+            let results: Vec<_> = futures::stream::iter(futs)
                 .buffer_unordered(max_parallel_requests)
                 .collect()
                 .await;

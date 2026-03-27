@@ -3,7 +3,7 @@ ARG USER=runner
 ARG HOME=/home/${USER}
 ARG CARGO_HOME=${HOME}/.cargo
 ARG RUSTUP_HOME=${HOME}/.rustup
-ARG RUST_VERSION=1.94.0
+ARG RUST_VERSION=1.94.1
 ARG GO_VERSION=1.26.1
 
 # ===== 1. Pull Official Images =====

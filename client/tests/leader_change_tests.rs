@@ -50,7 +50,7 @@ async fn connect_cluster(cluster: &TestCluster) -> Client {
 /// assignment task updates the `LeaderDirectory`.
 #[test_log::test(tokio::test)]
 async fn test_put_get_survives_kill() -> anyhow::Result<()> {
-    let timeout = tokio::time::timeout(Duration::from_secs(120), async {
+    let timeout = tokio::time::timeout(Duration::from_mins(2), async {
         let mut cluster = TestCluster::start(3, 3, 4)?;
         let client = connect_cluster(&cluster).await;
 
@@ -90,7 +90,7 @@ async fn test_put_get_survives_kill() -> anyhow::Result<()> {
 /// retry path if the server exits immediately.
 #[test_log::test(tokio::test)]
 async fn test_put_get_survives_stop() -> anyhow::Result<()> {
-    let timeout = tokio::time::timeout(Duration::from_secs(120), async {
+    let timeout = tokio::time::timeout(Duration::from_mins(2), async {
         let mut cluster = TestCluster::start(3, 3, 4)?;
         let client = connect_cluster(&cluster).await;
 
@@ -128,7 +128,7 @@ async fn test_put_get_survives_stop() -> anyhow::Result<()> {
 /// merge results, so partial shard failures must be handled correctly.
 #[test_log::test(tokio::test)]
 async fn test_fan_out_ops_survive_leader_change() -> anyhow::Result<()> {
-    let timeout = tokio::time::timeout(Duration::from_secs(120), async {
+    let timeout = tokio::time::timeout(Duration::from_mins(2), async {
         let mut cluster = TestCluster::start(3, 3, 4)?;
         let client = connect_cluster(&cluster).await;
 
@@ -193,7 +193,7 @@ async fn test_fan_out_ops_survive_leader_change() -> anyhow::Result<()> {
 /// subsequent kills of a different server are also handled.
 #[test_log::test(tokio::test)]
 async fn test_kill_restart_kill() -> anyhow::Result<()> {
-    let timeout = tokio::time::timeout(Duration::from_secs(120), async {
+    let timeout = tokio::time::timeout(Duration::from_mins(2), async {
         let mut cluster = TestCluster::start(3, 3, 4)?;
         let client = connect_cluster(&cluster).await;
 
@@ -250,7 +250,7 @@ async fn test_kill_restart_kill() -> anyhow::Result<()> {
 /// All tasks should complete without error thanks to retries.
 #[test_log::test(tokio::test)]
 async fn test_concurrent_ops_during_kill() -> anyhow::Result<()> {
-    let timeout = tokio::time::timeout(Duration::from_secs(120), async {
+    let timeout = tokio::time::timeout(Duration::from_mins(2), async {
         let mut cluster = TestCluster::start(3, 3, 4)?;
         let client = connect_cluster(&cluster).await;
 

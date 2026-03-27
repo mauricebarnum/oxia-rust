@@ -131,8 +131,9 @@ fn main() -> ExitCode {
     } else {
         let do_search = env::var("OXIA_BIN_IGNORE_PATH")
             .map(|v| v.trim().to_ascii_lowercase())
-            .map(|v| matches!(v.as_str(), "" | "0" | "false" | "no" | "off"))
-            .unwrap_or(true);
+            .map_or(true, |v| {
+                matches!(v.as_str(), "" | "0" | "false" | "no" | "off")
+            });
 
         if do_search && let Some(path) = find_oxia_in_path() {
             path.into()

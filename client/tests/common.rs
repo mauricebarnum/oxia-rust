@@ -88,8 +88,7 @@ pub fn oxia_cli_path() -> &'static Path {
 /// Create a test temp directory. Auto-cleaned unless `OXIA_KEEP_TEST_DATA=1` is set.
 fn test_tempdir() -> anyhow::Result<TempDir> {
     let keep = env::var("OXIA_KEEP_TEST_DATA")
-        .map(|v| matches!(v.as_str(), "" | "1" | "true" | "yes" | "on"))
-        .unwrap_or(false);
+        .is_ok_and(|v| matches!(v.as_str(), "" | "1" | "true" | "yes" | "on"));
     let mut builder = tempfile::Builder::new();
     builder.prefix("oxia-test-");
     if keep {
@@ -607,7 +606,7 @@ impl TestEnv for TestCluster {
     }
 
     fn test_timeout(&self) -> Duration {
-        Duration::from_secs(60)
+        Duration::from_mins(1)
     }
 }
 
