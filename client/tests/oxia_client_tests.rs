@@ -729,7 +729,7 @@ async fn test_notifications_reconnect_on_close() -> anyhow::Result<()> {
     server.restart()?;
 
     // Wait for server to be ready and reconnect to occur
-    tokio::time::sleep(Duration::from_millis(2000)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Put another record with a different key to ensure a new notification
     let key2 = test_key("reconnect_close_2");
