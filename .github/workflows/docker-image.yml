@@ -10,7 +10,8 @@ on:
     paths:
       - ".github/workflows/docker-image.yml"
       - "build/Dockerfile"
-      - "ext/oxia"
+      - "ext/oxia.version"
+      - "ext/oxia/**"
   workflow_dispatch:
   schedule:
     - cron: "13 3 6 * *" # monthly
