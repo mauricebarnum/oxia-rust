@@ -15,7 +15,7 @@
 package resource
 
 import (
-	"errors"
+	"context"
 	"log/slog"
 	"sync"
 	"time"
@@ -24,14 +24,15 @@ import (
 
 	"github.com/oxia-db/oxia/oxiad/coordinator/metadata"
 	"github.com/oxia-db/oxia/oxiad/coordinator/model"
+	"github.com/oxia-db/oxia/oxiad/coordinator/util"
 )
+
+type EnsembleSupplier func(namespaceConfig *model.NamespaceConfig, status *model.ClusterStatus) ([]model.Server, error)
 
 type StatusResource interface {
 	Load() *model.ClusterStatus
 
-	LoadWithVersion() (*model.ClusterStatus, metadata.Version)
-
-	Swap(newStatus *model.ClusterStatus, version metadata.Version) bool
+	ApplyChanges(config *model.ClusterConfig, ensembleSupplier EnsembleSupplier) (*model.ClusterStatus, map[int64]string, []int64)
 
 	Update(newStatus *model.ClusterStatus)
 
@@ -40,6 +41,23 @@ type StatusResource interface {
 	DeleteShardMetadata(namespace string, shard int64)
 
 	IsReady(clusterConfig *model.ClusterConfig) bool
+
+	// ChangeNotify returns a channel that is closed when the next status
+	// change occurs. Callers should capture this channel BEFORE checking
+	// the condition they are waiting for, to avoid missing a change:
+	//
+	//	for {
+	//	    ch := statusResource.ChangeNotify()
+	//	    if condition(statusResource.Load()) {
+	//	        return
+	//	    }
+	//	    select {
+	//	    case <-ch:
+	//	    case <-ctx.Done():
+	//	        return ctx.Err()
+	//	    }
+	//	}
+	ChangeNotify() <-chan struct{}
 }
 
 var _ StatusResource = &status{}
@@ -51,23 +69,45 @@ type status struct {
 	lock             sync.RWMutex
 	current          *model.ClusterStatus
 	currentVersionID metadata.Version
+	changeCh         chan struct{}
 }
 
-// handleStoreError handles errors from metadata.Store().
-// ErrMetadataBadVersion is treated as permanent — retrying with a
-// re-read version could overwrite valid data written by a new leader.
-// The LeadershipLostCh will trigger a full coordinator restart with
-// clean state.
-func (*status) handleStoreError(err error) error {
-	if errors.Is(err, metadata.ErrMetadataBadVersion) {
-		return backoff.Permanent(err)
+// notifyChange wakes all goroutines waiting on ChangeNotify.
+// Must be called while holding s.lock for writing.
+func (s *status) notifyChange() {
+	close(s.changeCh)
+	s.changeCh = make(chan struct{})
+}
+
+func (s *status) ChangeNotify() <-chan struct{} {
+	s.lock.RLock()
+	defer s.lock.RUnlock()
+	return s.changeCh
+}
+
+// WaitForCondition blocks until condition returns true for the current
+// status, using event-driven notifications instead of time-based polling.
+// It triggers triggerFn (if non-nil) each iteration to drive progress.
+func WaitForCondition(ctx context.Context, sr StatusResource, triggerFn func(), condition func(*model.ClusterStatus) bool) error {
+	for {
+		ch := sr.ChangeNotify()
+		if condition(sr.Load()) {
+			return nil
+		}
+		if triggerFn != nil {
+			triggerFn()
+		}
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
-	return err
 }
 
-func (s *status) loadWithInitSlow() {
-	s.lock.Lock()
-	defer s.lock.Unlock()
+// ensureLoaded loads the status from the metadata store if not already loaded.
+// Caller must hold s.lock for writing.
+func (s *status) ensureLoaded() {
 	if s.current != nil {
 		return
 	}
@@ -92,43 +132,45 @@ func (s *status) loadWithInitSlow() {
 }
 
 func (s *status) Load() *model.ClusterStatus {
-	current, _ := s.LoadWithVersion()
-	return current
-}
-
-func (s *status) LoadWithVersion() (*model.ClusterStatus, metadata.Version) {
 	s.lock.RLock()
-	defer s.lock.RUnlock()
-	if s.current == nil {
-		s.lock.RUnlock()
-		s.loadWithInitSlow()
-		s.lock.RLock()
+	if s.current != nil {
+		defer s.lock.RUnlock()
+		return s.current
 	}
-	return s.current, s.currentVersionID
-}
+	s.lock.RUnlock()
 
-func (s *status) Swap(newStatus *model.ClusterStatus, version metadata.Version) bool {
 	s.lock.Lock()
 	defer s.lock.Unlock()
-	if s.currentVersionID != version {
-		return false
+	s.ensureLoaded()
+	return s.current
+}
+
+func (s *status) ApplyChanges(config *model.ClusterConfig, ensembleSupplier EnsembleSupplier) (*model.ClusterStatus, map[int64]string, []int64) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	s.ensureLoaded()
+	newStatus := s.current.Clone()
+	shardsToAdd, shardsToDelete := util.ApplyClusterChanges(config, newStatus, ensembleSupplier)
+	if len(shardsToAdd) == 0 && len(shardsToDelete) == 0 {
+		return newStatus, shardsToAdd, shardsToDelete
 	}
-	err := backoff.RetryNotify(func() error {
+	_ = backoff.RetryNotify(func() error {
 		versionID, err := s.metadata.Store(newStatus, s.currentVersionID)
 		if err != nil {
-			return s.handleStoreError(err)
+			return err
 		}
 		s.current = newStatus
 		s.currentVersionID = versionID
 		return nil
 	}, backoff.NewExponentialBackOff(), func(err error, duration time.Duration) {
 		s.Warn(
-			"failed to swap status, retrying later",
+			"failed to apply cluster changes, retrying later",
 			slog.Any("error", err),
 			slog.Duration("retry-after", duration),
 		)
 	})
-	return err == nil
+	s.notifyChange()
+	return newStatus, shardsToAdd, shardsToDelete
 }
 
 func (s *status) Update(newStatus *model.ClusterStatus) {
@@ -137,7 +179,7 @@ func (s *status) Update(newStatus *model.ClusterStatus) {
 	_ = backoff.RetryNotify(func() error {
 		versionID, err := s.metadata.Store(newStatus, s.currentVersionID)
 		if err != nil {
-			return s.handleStoreError(err)
+			return err
 		}
 		s.current = newStatus
 		s.currentVersionID = versionID
@@ -149,6 +191,7 @@ func (s *status) Update(newStatus *model.ClusterStatus) {
 			slog.Duration("retry-after", duration),
 		)
 	})
+	s.notifyChange()
 }
 
 func (s *status) UpdateShardMetadata(namespace string, shard int64, shardMetadata model.ShardMetadata) {
@@ -164,7 +207,7 @@ func (s *status) UpdateShardMetadata(namespace string, shard int64, shardMetadat
 	_ = backoff.RetryNotify(func() error {
 		versionID, err := s.metadata.Store(clonedStatus, s.currentVersionID)
 		if err != nil {
-			return s.handleStoreError(err)
+			return err
 		}
 		s.current = clonedStatus
 		s.currentVersionID = versionID
@@ -176,6 +219,7 @@ func (s *status) UpdateShardMetadata(namespace string, shard int64, shardMetadat
 			slog.Duration("retry-after", duration),
 		)
 	})
+	s.notifyChange()
 }
 
 func (s *status) DeleteShardMetadata(namespace string, shard int64) {
@@ -194,7 +238,7 @@ func (s *status) DeleteShardMetadata(namespace string, shard int64) {
 	_ = backoff.RetryNotify(func() error {
 		versionID, err := s.metadata.Store(clonedStatus, s.currentVersionID)
 		if err != nil {
-			return s.handleStoreError(err)
+			return err
 		}
 		s.current = clonedStatus
 		s.currentVersionID = versionID
@@ -206,6 +250,7 @@ func (s *status) DeleteShardMetadata(namespace string, shard int64) {
 			slog.Duration("retry-after", duration),
 		)
 	})
+	s.notifyChange()
 }
 
 func (s *status) IsReady(clusterConfig *model.ClusterConfig) bool {
@@ -231,10 +276,14 @@ func (s *status) IsReady(clusterConfig *model.ClusterConfig) bool {
 
 func NewStatusResource(meta metadata.Provider) StatusResource {
 	s := status{
+		Logger: slog.With(
+			slog.String("component", "status-resource"),
+		),
 		lock:             sync.RWMutex{},
 		metadata:         meta,
 		currentVersionID: metadata.NotExists,
 		current:          nil,
+		changeCh:         make(chan struct{}),
 	}
 	s.Load()
 	return &s
