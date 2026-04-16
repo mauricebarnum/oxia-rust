@@ -19,8 +19,9 @@ import (
 
 	"github.com/pkg/errors"
 
+	"github.com/oxia-db/oxia/common/entity"
 	"github.com/oxia-db/oxia/common/proto"
-	"github.com/oxia-db/oxia/oxiad/common/entity"
+	"github.com/oxia-db/oxia/common/validation"
 	"github.com/oxia-db/oxia/oxiad/coordinator/policy"
 )
 
@@ -71,6 +72,40 @@ func (ks *KeySorting) Set(v string) error {
 
 func (*KeySorting) Type() string {
 	return "KeySorting"
+}
+
+func (cc *ClusterConfig) Validate() error {
+	if len(cc.Servers) == 0 {
+		return errors.New("cluster config: at least one server must be configured")
+	}
+
+	if len(cc.Namespaces) == 0 {
+		return errors.New("cluster config: at least one namespace must be configured")
+	}
+
+	for _, ns := range cc.Namespaces {
+		if err := validation.ValidateNamespace(ns.Name); err != nil {
+			return errors.Wrap(err, "cluster config")
+		}
+
+		if ns.ReplicationFactor < 1 {
+			return errors.Errorf("cluster config: namespace %q has invalid replicationFactor=%d, must be >= 1",
+				ns.Name, ns.ReplicationFactor)
+		}
+
+		if ns.InitialShardCount < 1 {
+			return errors.Errorf("cluster config: namespace %q has invalid initialShardCount=%d, must be >= 1",
+				ns.Name, ns.InitialShardCount)
+		}
+
+		if ns.ReplicationFactor > uint32(len(cc.Servers)) {
+			return errors.Errorf(
+				"cluster config: namespace %q has replicationFactor=%d but only %d servers are configured",
+				ns.Name, ns.ReplicationFactor, len(cc.Servers))
+		}
+	}
+
+	return nil
 }
 
 // /////////////////////////////////////////////////////////////////////////////////////////////////////////////////

@@ -24,8 +24,8 @@ import (
 	"github.com/emirpasic/gods/v2/sets/linkedhashset"
 
 	"github.com/oxia-db/oxia/oxiad/coordinator/action"
-	"github.com/oxia-db/oxia/oxiad/coordinator/metadata"
 	"github.com/oxia-db/oxia/oxiad/coordinator/model"
+	"github.com/oxia-db/oxia/oxiad/coordinator/resource"
 	"github.com/oxia-db/oxia/oxiad/coordinator/selector"
 	"github.com/oxia-db/oxia/oxiad/coordinator/selector/single"
 )
@@ -39,12 +39,8 @@ func (m *mockStatusResource) Load() *model.ClusterStatus {
 	return m.status
 }
 
-func (m *mockStatusResource) LoadWithVersion() (*model.ClusterStatus, metadata.Version) {
-	return m.status, "0"
-}
-
-func (m *mockStatusResource) Swap(_ *model.ClusterStatus, _ metadata.Version) bool {
-	return true
+func (m *mockStatusResource) ApplyChanges(_ *model.ClusterConfig, _ resource.EnsembleSupplier) (*model.ClusterStatus, map[int64]string, []int64) {
+	return m.status, nil, nil
 }
 
 func (m *mockStatusResource) Update(newStatus *model.ClusterStatus) {
@@ -57,6 +53,10 @@ func (m *mockStatusResource) DeleteShardMetadata(_ string, _ int64) {}
 
 func (m *mockStatusResource) IsReady(_ *model.ClusterConfig) bool {
 	return true
+}
+
+func (m *mockStatusResource) ChangeNotify() <-chan struct{} {
+	return make(chan struct{})
 }
 
 // mockClusterConfigResource implements resource.ClusterConfigResource for testing.
@@ -127,6 +127,69 @@ func newTestBalancer(
 		actionCh:                make(chan action.Action, 1000),
 		triggerCh:               make(chan any, 1),
 		nodeAvailableJudger:     func(_ string) bool { return true },
+	}
+}
+
+// selectRecordingSelector records whether Select was ever called.
+type selectRecordingSelector struct {
+	called bool
+}
+
+func (s *selectRecordingSelector) Select(_ *single.Context) (string, error) {
+	s.called = true
+	return "", selector.ErrUnsatisfiedAntiAffinity
+}
+
+func TestSwapShardSkipsRF1Namespace(t *testing.T) {
+	// Two nodes with an imbalanced distribution: sv-1 owns all 3 shards,
+	// sv-2 owns none. With RF=3 the balancer would try to swap, but with
+	// RF=1 it must skip entirely.
+	sv1 := model.Server{Internal: "sv-1"}
+	sv2 := model.Server{Internal: "sv-2"}
+
+	status := &model.ClusterStatus{
+		Namespaces: map[string]model.NamespaceStatus{
+			"rf1ns": {
+				ReplicationFactor: 1,
+				Shards: map[int64]model.ShardMetadata{
+					0: {Status: model.ShardStatusSteadyState, Ensemble: []model.Server{sv1}},
+					1: {Status: model.ShardStatusSteadyState, Ensemble: []model.Server{sv1}},
+					2: {Status: model.ShardStatusSteadyState, Ensemble: []model.Server{sv1}},
+				},
+			},
+		},
+	}
+
+	nodes := linkedhashset.New("sv-1", "sv-2")
+	sel := &selectRecordingSelector{}
+	configRes := &mockClusterConfigResource{
+		nodes:    nodes,
+		metadata: map[string]model.ServerMetadata{},
+		nsConfigs: map[string]*model.NamespaceConfig{
+			"rf1ns": {Name: "rf1ns", ReplicationFactor: 1},
+		},
+		nodeMap: map[string]*model.Server{
+			"sv-1": &sv1,
+			"sv-2": &sv2,
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	b := newTestBalancer(ctx, cancel, &mockStatusResource{status: status}, configRes, sel)
+
+	b.rebalanceEnsemble()
+
+	// The selector must never have been called because swapShard should
+	// return early for RF=1 namespaces.
+	if sel.called {
+		t.Fatal("selector was called for RF=1 namespace; expected swapShard to skip it")
+	}
+
+	// No swap actions should have been emitted.
+	if len(b.actionCh) != 0 {
+		t.Fatalf("expected 0 actions, got %d", len(b.actionCh))
 	}
 }
 

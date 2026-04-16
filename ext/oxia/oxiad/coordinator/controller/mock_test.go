@@ -128,6 +128,12 @@ type mockPerNodeChannels struct {
 		error
 	}
 
+	removeObserverRequests  chan *proto.RemoveObserverRequest
+	removeObserverResponses chan struct {
+		*proto.RemoveObserverResponse
+		error
+	}
+
 	shardAssignmentsStream *mockShardAssignmentClient
 	healthClient           *mockHealthClient
 	err                    error
@@ -272,6 +278,13 @@ func (m *mockPerNodeChannels) GetStatusResponse(term int64, status proto.Serving
 	}, nil}
 }
 
+func (m *mockPerNodeChannels) EnqueueGetStatusError(err error) {
+	m.getStatusResponses <- struct {
+		*proto.GetStatusResponse
+		error
+	}{nil, err}
+}
+
 func (m *mockPerNodeChannels) BecomeLeaderResponse(err error) {
 	m.becomeLeaderResponses <- struct {
 		*proto.BecomeLeaderResponse
@@ -291,6 +304,13 @@ func (m *mockPerNodeChannels) AddFollowerResponse(err error) {
 		*proto.AddFollowerResponse
 		error
 	}{&proto.AddFollowerResponse{}, err}
+}
+
+func (m *mockPerNodeChannels) RemoveObserverResponse(err error) {
+	m.removeObserverResponses <- struct {
+		*proto.RemoveObserverResponse
+		error
+	}{&proto.RemoveObserverResponse{}, err}
 }
 
 func newMockPerNodeChannels() *mockPerNodeChannels {
@@ -318,6 +338,11 @@ func newMockPerNodeChannels() *mockPerNodeChannels {
 		deleteShardRequests: make(chan *proto.DeleteShardRequest, 100),
 		deleteShardResponses: make(chan struct {
 			*proto.DeleteShardResponse
+			error
+		}, 100),
+		removeObserverRequests: make(chan *proto.RemoveObserverRequest, 100),
+		removeObserverResponses: make(chan struct {
+			*proto.RemoveObserverResponse
 			error
 		}, 100),
 		shardAssignmentsStream: newMockShardAssignmentClient(),
@@ -518,6 +543,29 @@ func (r *mockRpcProvider) AddFollower(ctx context.Context, node model.Server, re
 	select {
 	case response := <-s.addFollowerResponses:
 		return response.AddFollowerResponse, response.error
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(3 * time.Second):
+		return nil, errors.New("timeout")
+	}
+}
+
+func (r *mockRpcProvider) RemoveObserver(ctx context.Context, node model.Server, req *proto.RemoveObserverRequest) (*proto.RemoveObserverResponse, error) {
+	r.Lock()
+
+	s := r.getNode(node)
+	s.removeObserverRequests <- req
+
+	if s.err != nil {
+		r.Unlock()
+		return nil, s.err
+	}
+
+	r.Unlock()
+
+	select {
+	case response := <-s.removeObserverResponses:
+		return response.RemoveObserverResponse, response.error
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-time.After(3 * time.Second):

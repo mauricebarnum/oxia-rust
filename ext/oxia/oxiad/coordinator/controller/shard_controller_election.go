@@ -46,6 +46,7 @@ import (
 
 var (
 	ErrNotReadyForChangeEnsemble = errors.New("shard is not ready for change ensemble, please retry later")
+	ErrFollowerNotCaughtUp       = errors.New("follower not caught up yet")
 )
 
 type ShardElection struct {
@@ -222,12 +223,15 @@ func (*ShardElection) waitForMajority(ch chan struct {
 }
 
 func (e *ShardElection) selectNewLeader(candidatesStatus map[model.Server]*proto.EntryId) (
-	leader model.Server, followers map[model.Server]*proto.EntryId) {
+	leader model.Server, followers map[model.Server]*proto.EntryId, err error) {
 	candidates := chooseCandidates(candidatesStatus)
-	server, _ := e.leaderSelector.Select(&leaderselector.Context{
+	server, err := e.leaderSelector.Select(&leaderselector.Context{
 		Candidates: candidates,
 		Status:     e.statusResource.Load(),
 	})
+	if err != nil {
+		return model.Server{}, nil, err
+	}
 	leader = server
 	followers = make(map[model.Server]*proto.EntryId)
 	for a, e := range candidatesStatus {
@@ -235,7 +239,7 @@ func (e *ShardElection) selectNewLeader(candidatesStatus map[model.Server]*proto
 			followers[a] = e
 		}
 	}
-	return leader, followers
+	return leader, followers, nil
 }
 
 func (e *ShardElection) becomeLeader(term int64, leader model.Server, followers map[model.Server]*proto.EntryId,
@@ -297,9 +301,23 @@ func (e *ShardElection) ensureFollowerCaught(ensemble []model.Server, leader *mo
 						slog.Int64("leader-head-offset", leaderEntry.Offset),
 						slog.Int64("follower-head-offset", followerHeadOffset),
 					)
-					return errors.New("follower not caught up yet")
+					return ErrFollowerNotCaughtUp
 				}, oxiatime.NewBackOff(e.Context), func(err error, duration time.Duration) {
-					e.Warn("Failed to get the follower status. ", slog.Any("error", err.Error()), slog.Any("retry-after", duration))
+					switch {
+					case errors.Is(err, ErrFollowerNotCaughtUp):
+					case status.Code(err) == constant.CodeNodeIsNotMember:
+						e.Info("Follower has not been added by leader yet",
+							slog.Any("server", server),
+							slog.Int64("shard", e.shard),
+							slog.Duration("retry-after", duration),
+						)
+					default:
+						e.Warn("Failed to get the follower status",
+							slog.Any("server", server),
+							slog.Any("error", err),
+							slog.Duration("retry-after", duration),
+						)
+					}
 				})
 				if err != nil {
 					e.Info("Abort data server swap follower status validation due to context canceled", slog.Any("error", err))
@@ -442,7 +460,10 @@ func (e *ShardElection) start() (model.Server, error) {
 	if err != nil {
 		return model.Server{}, err
 	}
-	newLeader, followers := e.selectNewLeader(candidatesStatus)
+	newLeader, followers, err := e.selectNewLeader(candidatesStatus)
+	if err != nil {
+		return model.Server{}, err
+	}
 	if e.Enabled(context.Background(), slog.LevelInfo) {
 		f := make([]struct {
 			ServerAddress model.Server   `json:"server-address"`
