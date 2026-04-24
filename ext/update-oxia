@@ -60,7 +60,7 @@ cmd/*/*/oxia
 EOF
 
 git -C "${OXIA_TMP}" rev-parse HEAD >oxia.version
-git add oxia.version "${OXIA_DIR}/"
+git add update-oxia oxia.version "${OXIA_DIR}/"
 
 echo "Successfully updated ${OXIA_DIR} to ${VERSION}"
 echo "Review changes with: git status"
