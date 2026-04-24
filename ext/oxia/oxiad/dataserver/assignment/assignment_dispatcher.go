@@ -18,20 +18,17 @@ import (
 	"context"
 	"io"
 	"log/slog"
-	"net"
-	"strings"
 	"sync"
 
+	"github.com/emirpasic/gods/v2/sets/hashset"
 	"github.com/emirpasic/gods/v2/trees/redblacktree"
-	"github.com/pkg/errors"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health/grpc_health_v1"
-	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 	pb "google.golang.org/protobuf/proto"
 
-	rpc2 "github.com/oxia-db/oxia/oxiad/common/rpc"
+	oxiadcommonrpc "github.com/oxia-db/oxia/oxiad/common/rpc"
 
 	"github.com/oxia-db/oxia/common/constant"
 	"github.com/oxia-db/oxia/oxiad/common/sharding"
@@ -52,17 +49,19 @@ type ShardAssignmentsDispatcher interface {
 	PushShardAssignments(stream proto.OxiaCoordination_PushShardAssignmentsServer) error
 	RegisterForUpdates(req *proto.ShardAssignmentsRequest, client Client) error
 	GetLeader(shard int64) string
+	HasAuthority(authority string) bool
 }
 
 type shardAssignmentDispatcher struct {
 	sync.RWMutex
 	assignments           *proto.ShardAssignments
 	shardAssignmentsIndex *redblacktree.Tree[int64, *proto.ShardAssignment]
+	allowedAuthorities    *hashset.Set[string]
 
 	clients      map[int64]chan *proto.ShardAssignments
 	nextClientId int64
 	standalone   bool
-	healthServer rpc2.HealthServer
+	healthServer oxiadcommonrpc.HealthServer
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -172,7 +171,7 @@ func (s *shardAssignmentDispatcher) assignmentsInterceptorFunc(clientStream Clie
 			return nil, err
 		}
 		return func(assignments *proto.ShardAssignments) *proto.ShardAssignments {
-			assignments = pb.Clone(assignments).(*proto.ShardAssignments) //nolint:revive
+			assignments = cloneAssignments(assignments)
 			for _, nsa := range assignments.Namespaces {
 				for _, assignment := range nsa.Assignments {
 					assignment.Leader = authority
@@ -186,43 +185,19 @@ func (s *shardAssignmentDispatcher) assignmentsInterceptorFunc(clientStream Clie
 	}, nil
 }
 
-func validateAuthorityAddress(addr string) error {
-	if strings.Contains(addr, "://") {
-		return errors.Errorf("authority address %q must not contain a scheme", addr)
-	}
-	if strings.Contains(addr, "/") {
-		return errors.Errorf("authority address %q must not contain a path", addr)
-	}
-	if strings.Contains(addr, "?") {
-		return errors.Errorf("authority address %q must not contain a query string", addr)
-	}
-	if strings.Contains(addr, "#") {
-		return errors.Errorf("authority address %q must not contain a fragment", addr)
-	}
-
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return errors.Errorf("authority address %q is not a valid host:port pair: %v", addr, err)
-	}
-	if host == "" {
-		return errors.Errorf("authority address %q has an empty host", addr)
-	}
-
-	return nil
+func cloneAssignments(assignments *proto.ShardAssignments) *proto.ShardAssignments {
+	return pb.Clone(assignments).(*proto.ShardAssignments) //nolint:revive
 }
 
 func authority(ctx context.Context) (string, error) {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if ok {
-		addr := md[":authority"]
-		if len(addr) > 0 {
-			if err := validateAuthorityAddress(addr[0]); err != nil {
-				return "", status.Errorf(codes.InvalidArgument, "oxia: invalid authority address: %v", err)
-			}
-			return addr[0], nil
-		}
+	addr, err := oxiadcommonrpc.GetAuthority(ctx)
+	if err == nil {
+		return addr, nil
 	}
-	return "", status.Errorf(codes.Internal, "oxia: authority not identified")
+	if err.Error() == "authority not identified" {
+		return "", status.Errorf(codes.Internal, "oxia: authority not identified")
+	}
+	return "", status.Errorf(codes.InvalidArgument, "oxia: invalid authority address: %v", err)
 }
 
 func (s *shardAssignmentDispatcher) Close() error {
@@ -234,7 +209,7 @@ func (s *shardAssignmentDispatcher) Close() error {
 func (s *shardAssignmentDispatcher) Initialized() bool {
 	s.RLock()
 	defer s.RUnlock()
-	return s.assignments != nil
+	return s.standalone || s.assignments != nil
 }
 
 func (s *shardAssignmentDispatcher) PushShardAssignments(stream proto.OxiaCoordination_PushShardAssignmentsServer) error {
@@ -255,7 +230,7 @@ func (s *shardAssignmentDispatcher) PushShardAssignments(stream proto.OxiaCoordi
 func (s *shardAssignmentDispatcher) updateShardAssignment(assignments *proto.ShardAssignments) error {
 	// Once we receive the first update of the shards mapping, this service can be
 	// considered "ready" and it will be able to respond to service discovery requests
-	s.healthServer.SetServingStatus(rpc2.ReadinessProbeService, grpc_health_v1.HealthCheckResponse_SERVING)
+	s.healthServer.SetServingStatus(oxiadcommonrpc.ReadinessProbeService, grpc_health_v1.HealthCheckResponse_SERVING)
 
 	s.Lock()
 	defer s.Unlock()
@@ -271,12 +246,14 @@ func (s *shardAssignmentDispatcher) updateShardAssignment(assignments *proto.Sha
 	s.assignments = assignments
 
 	shardIndex := redblacktree.New[int64, *proto.ShardAssignment]()
+	allowedAuthorities := hashset.New[string](assignments.GetAllowedAuthorities()...)
 	for _, namespace := range assignments.Namespaces {
 		for idx, shardAssignment := range namespace.Assignments {
 			shardIndex.Put(shardAssignment.GetShard(), namespace.Assignments[idx])
 		}
 	}
 	s.shardAssignmentsIndex = shardIndex
+	s.allowedAuthorities = allowedAuthorities
 
 	// Update all the clients, without getting stuck if any client is not responsive
 	for id, clientCh := range s.clients {
@@ -305,10 +282,20 @@ func (s *shardAssignmentDispatcher) GetLeader(shardId int64) string {
 	return shard.GetLeader()
 }
 
-func NewShardAssignmentDispatcher(healthServer rpc2.HealthServer) ShardAssignmentsDispatcher {
+func (s *shardAssignmentDispatcher) HasAuthority(authority string) bool {
+	s.RLock()
+	defer s.RUnlock()
+	if s.standalone {
+		return true
+	}
+	return s.allowedAuthorities.Contains(authority)
+}
+
+func NewShardAssignmentDispatcher(healthServer oxiadcommonrpc.HealthServer) ShardAssignmentsDispatcher {
 	s := &shardAssignmentDispatcher{
 		assignments:           nil,
 		shardAssignmentsIndex: redblacktree.New[int64, *proto.ShardAssignment](),
+		allowedAuthorities:    hashset.New[string](),
 		healthServer:          healthServer,
 		clients:               make(map[int64]chan *proto.ShardAssignments),
 		log: slog.With(
@@ -331,7 +318,7 @@ func NewShardAssignmentDispatcher(healthServer rpc2.HealthServer) ShardAssignmen
 }
 
 func NewStandaloneShardAssignmentDispatcher(numShards uint32) ShardAssignmentsDispatcher {
-	assignmentDispatcher := NewShardAssignmentDispatcher(rpc2.NewClosableHealthServer(context.Background())).(*shardAssignmentDispatcher) //nolint:revive
+	assignmentDispatcher := NewShardAssignmentDispatcher(oxiadcommonrpc.NewClosableHealthServer(context.Background())).(*shardAssignmentDispatcher) //nolint:revive
 	assignmentDispatcher.standalone = true
 	res := &proto.ShardAssignments{
 		Namespaces: map[string]*proto.NamespaceShardsAssignment{

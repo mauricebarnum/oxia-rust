@@ -24,8 +24,12 @@ option java_multiple_files = true;
 
 service OxiaAdmin {
 
+  rpc ListDataServers(ListDataServersRequest) returns (ListDataServersResponse);
+  rpc GetDataServer(GetDataServerRequest) returns (GetDataServerResponse);
+
   rpc ListNamespaces(ListNamespacesRequest) returns (ListNamespacesResponse);
 
+  // Deprecated: Use ListDataServers instead.
   rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
 
   /**
@@ -34,6 +38,32 @@ service OxiaAdmin {
    */
   rpc SplitShard(SplitShardRequest) returns (SplitShardResponse);
 
+}
+
+message ListDataServersRequest {
+}
+
+message DataServer {
+  optional string name = 1;
+  string public_address = 2;
+  string internal_address = 3;
+}
+
+message DataServerInfo {
+  DataServer data_server = 1;
+  map<string, string> metadata = 2;
+}
+
+message ListDataServersResponse {
+  repeated DataServer data_servers = 1;
+}
+
+message GetDataServerRequest {
+  string data_server = 1;
+}
+
+message GetDataServerResponse {
+  DataServerInfo data_server_info = 1;
 }
 
 message ListNamespacesRequest {

@@ -3,7 +3,7 @@
 set -euo pipefail
 set -x
 
-DEFAULT_VERSION=v0.16.2
+DEFAULT_VERSION=v0.16.3
 VERSION="${1-${DEFAULT_VERSION}}"
 
 DEFAULT_REPO=https://github.com/oxia-db/oxia
