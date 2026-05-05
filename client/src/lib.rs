@@ -842,9 +842,9 @@ impl Client {
     }
 
     #[inline]
-    pub async fn reconnect(&mut self) -> Result<()> {
+    pub fn reconnect(&mut self) -> impl Future<Output = Result<()>> {
         self.shard_manager = None;
-        self.connect().await
+        self.connect()
     }
 
     /// Returns the current shard map epoch.
@@ -907,17 +907,17 @@ impl Client {
     }
 
     #[inline]
-    pub async fn get(&self, k: impl Into<String>) -> Result<Option<GetResponse>> {
-        self.get_with_options(k, GetOptions::default()).await
+    pub fn get(&self, k: impl Into<String>) -> impl Future<Output = Result<Option<GetResponse>>> {
+        self.get_with_options(k, GetOptions::default())
     }
 
     #[inline]
-    pub async fn get_with_options(
+    pub fn get_with_options(
         &self,
         key: impl Into<String>,
         options: GetOptions,
-    ) -> Result<Option<GetResponse>> {
-        self.get_internal(Arc::from(key.into()), options).await
+    ) -> impl Future<Output = Result<Option<GetResponse>>> {
+        self.get_internal(Arc::from(key.into()), options)
     }
 
     async fn get_internal(
@@ -1034,23 +1034,22 @@ impl Client {
     }
 
     #[inline]
-    pub async fn put(
+    pub fn put(
         &self,
         key: impl Into<String>,
         value: impl Into<Bytes>,
-    ) -> Result<PutResponse> {
-        self.put_with_options(key, value, PutOptions::new()).await
+    ) -> impl Future<Output = Result<PutResponse>> {
+        self.put_with_options(key, value, PutOptions::new())
     }
 
     #[inline]
-    pub async fn put_with_options(
+    pub fn put_with_options(
         &self,
         key: impl Into<String>,
         value: impl Into<Bytes>,
         options: PutOptions,
-    ) -> Result<PutResponse> {
+    ) -> impl Future<Output = Result<PutResponse>> {
         self.put_internal(Arc::from(key.into()), value.into(), options)
-            .await
     }
 
     async fn put_internal(
@@ -1072,18 +1071,17 @@ impl Client {
     }
 
     #[inline]
-    pub async fn delete(&self, key: impl Into<String>) -> Result<()> {
+    pub fn delete(&self, key: impl Into<String>) -> impl Future<Output = Result<()>> {
         self.delete_with_options(key, DeleteOptions::default())
-            .await
     }
 
     #[inline]
-    pub async fn delete_with_options(
+    pub fn delete_with_options(
         &self,
         key: impl Into<String>,
         options: DeleteOptions,
-    ) -> Result<()> {
-        self.delete_internal(Arc::from(key.into()), options).await
+    ) -> impl Future<Output = Result<()>> {
+        self.delete_internal(Arc::from(key.into()), options)
     }
 
     async fn delete_internal(&self, key: Arc<str>, options: DeleteOptions) -> Result<()> {
@@ -1099,32 +1097,30 @@ impl Client {
     }
 
     #[inline]
-    pub async fn delete_range(
+    pub fn delete_range(
         &self,
         start_inclusive: impl Into<String>,
         end_exclusive: impl Into<String>,
-    ) -> Result<()> {
+    ) -> impl Future<Output = Result<()>> {
         self.delete_range_with_options(
             start_inclusive,
             end_exclusive,
             DeleteRangeOptions::default(),
         )
-        .await
     }
 
     #[inline]
-    pub async fn delete_range_with_options(
+    pub fn delete_range_with_options(
         &self,
         start_inclusive: impl Into<String>,
         end_exclusive: impl Into<String>,
         options: DeleteRangeOptions,
-    ) -> Result<()> {
+    ) -> impl Future<Output = Result<()>> {
         self.delete_range_internal(
             Arc::from(start_inclusive.into()),
             Arc::from(end_exclusive.into()),
             options,
         )
-        .await
     }
 
     async fn delete_range_internal(
@@ -1193,28 +1189,26 @@ impl Client {
     }
 
     #[inline]
-    pub async fn list(
+    pub fn list(
         &self,
         start_inclusive: impl Into<String>,
         end_exclusive: impl Into<String>,
-    ) -> Result<ListResponse> {
+    ) -> impl Future<Output = Result<ListResponse>> {
         self.list_with_options(start_inclusive, end_exclusive, ListOptions::default())
-            .await
     }
 
     #[inline]
-    pub async fn list_with_options(
+    pub fn list_with_options(
         &self,
         start_inclusive: impl Into<String>,
         end_exclusive: impl Into<String>,
         options: ListOptions,
-    ) -> Result<ListResponse> {
+    ) -> impl Future<Output = Result<ListResponse>> {
         self.list_internal(
             Arc::from(start_inclusive.into()),
             Arc::from(end_exclusive.into()),
             options,
         )
-        .await
     }
 
     async fn list_internal(
@@ -1278,28 +1272,26 @@ impl Client {
     }
 
     #[inline]
-    pub async fn range_scan(
+    pub fn range_scan(
         &self,
         start_inclusive: impl Into<String>,
         end_exclusive: impl Into<String>,
-    ) -> Result<RangeScanResponse> {
+    ) -> impl Future<Output = Result<RangeScanResponse>> {
         self.range_scan_with_options(start_inclusive, end_exclusive, RangeScanOptions::default())
-            .await
     }
 
     #[inline]
-    pub async fn range_scan_with_options(
+    pub fn range_scan_with_options(
         &self,
         start_inclusive: impl Into<String>,
         end_exclusive: impl Into<String>,
         options: RangeScanOptions,
-    ) -> Result<RangeScanResponse> {
+    ) -> impl Future<Output = Result<RangeScanResponse>> {
         self.range_scan_internal(
             Arc::from(start_inclusive.into()),
             Arc::from(end_exclusive.into()),
             options,
         )
-        .await
     }
 
     async fn range_scan_internal(
