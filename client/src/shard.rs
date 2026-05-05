@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
+use futures::FutureExt;
 use futures::stream::Stream;
 use futures::stream::StreamExt;
 use mauricebarnum_oxia_common::proto as oxia_proto;
@@ -971,16 +972,16 @@ impl Client {
     }
 
     /// Deletes a range of keys with the given options
-    pub(crate) async fn delete_range(
+    pub(crate) fn delete_range(
         &self,
         start_inclusive: &str,
         end_exclusive: &str,
         options: &DeleteRangeOptions,
-    ) -> Result<()> {
+    ) -> impl Future<Output = Result<()>> {
         let req = self.make_delete_range_req(options, start_inclusive, end_exclusive);
-        let rsp = self.process_write(req).await?;
-
-        check_delete_range_response(&rsp).map_or_else(|| Ok(()), Err)
+        self.process_write(req).map(|r| {
+            r.and_then(|rsp| check_delete_range_response(&rsp).map_or_else(|| Ok(()), Err))
+        })
     }
 
     /// Lists keys in the given range with options

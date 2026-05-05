@@ -139,8 +139,8 @@ impl<Fact: ChannelFactory> ChannelPool<Fact> {
         }
     }
 
-    async fn create_channel(&self, target: &str) -> Result<Channel> {
-        self.factory.create(&self.config, target).await
+    fn create_channel(&self, target: &str) -> impl Future<Output = Result<Channel>> {
+        self.factory.create(&self.config, target)
     }
 
     async fn finalize_connection(

@@ -43,6 +43,7 @@ use std::time::Instant;
 use arc_swap::ArcSwap;
 #[cfg(feature = "bench-dashmap")]
 use dashmap::DashMap;
+use futures::FutureExt;
 use tokio::sync::RwLock;
 
 // ---------------------------------------------------------------------------
@@ -93,16 +94,19 @@ impl RwLockPool {
         }
     }
 
-    async fn get(&self, target: &str) -> Option<MockChannel> {
-        self.clients.read().await.get(target).cloned()
+    fn get(&self, target: &str) -> impl Future<Output = Option<MockChannel>> {
+        self.clients.read().map(|c| c.get(target).cloned())
     }
 
-    async fn remove(&self, target: &str) -> Option<MockChannel> {
-        self.clients.write().await.remove(target)
+    fn remove(&self, target: &str) -> impl Future<Output = Option<MockChannel>> {
+        self.clients.write().map(|mut c| c.remove(target))
     }
 
-    async fn insert(&self, target: &str, ch: MockChannel) {
-        self.clients.write().await.insert(target.to_string(), ch);
+    fn insert(&self, target: &str, ch: MockChannel) -> impl Future<Output = ()> {
+        let target = target.to_string();
+        async move {
+            self.clients.write().await.insert(target, ch);
+        }
     }
 }
 
