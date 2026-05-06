@@ -89,17 +89,14 @@ COPY build/cargo-config.toml ${CARGO_HOME}/config.toml
 
 COPY --from=planner /recipe/recipe.json /tmp/recipe.json
 
-# Cache mounts for Cargo registry, so downloads persist between image builds
-RUN --mount=type=cache,target=${CARGO_HOME}/registry/cache \
-    --mount=type=cache,target=${CARGO_HOME}/registry/index \
-    --mount=type=cache,target=${CARGO_HOME}/git \
-    GH_WORKSPACE="/__w/${REPO_NAME}/${REPO_NAME}" && \
+RUN GH_WORKSPACE="/__w/${REPO_NAME}/${REPO_NAME}" && \
     mkdir -p "${GH_WORKSPACE}" && \
     cp /tmp/recipe.json "${GH_WORKSPACE}/recipe.json" && \
     cd "${GH_WORKSPACE}" && \
     cargo chef cook --profile ci-debug --all-targets --recipe-path recipe.json && \
     cargo chef cook --profile ci --all-targets --recipe-path recipe.json && \
     cargo chef cook --profile test-release --all-targets --recipe-path recipe.json && \
+    cargo fetch --locked && \
     cargo +nightly fetch --locked
 
 # ===== 6. Go Builder =====
