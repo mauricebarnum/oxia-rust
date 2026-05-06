@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       build_mode:
-        description: "Build mode: auto, ci, ci-debug, or debug"
+        description: "Build mode: auto, ci, ci-debug, test-release, or debug"
         required: false
         default: "auto"
         type: string
@@ -25,7 +25,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # Use sccache with local cache only (no GitHub Actions cache)
   SCCACHE_DIR: "/tmp/sccache"
   RUSTC_WRAPPER: "sccache"
   RUST_BACKTRACE: full
@@ -71,6 +70,10 @@ jobs:
             echo "CARGO_PROFILE=ci-debug" >> $GITHUB_ENV
             echo "RELEASE_FLAG=--profile ci-debug" >> $GITHUB_ENV
             echo "NEXTEST_FLAG=--cargo-profile ci-debug" >> $GITHUB_ENV
+          elif [ "$BUILD_MODE" = "test-release" ]; then
+            echo "CARGO_PROFILE=test-release" >> $GITHUB_ENV
+            echo "RELEASE_FLAG=--profile test-release" >> $GITHUB_ENV
+            echo "NEXTEST_FLAG=--cargo-profile test-release" >> $GITHUB_ENV
           elif [ "$EVENT" = "pull_request" ]; then
             # Auto mode: ci-debug for PRs
             echo "CARGO_PROFILE=ci-debug" >> $GITHUB_ENV
@@ -84,7 +87,6 @@ jobs:
           fi
           echo "Build mode: $BUILD_MODE, Event: $EVENT, Profile: $CARGO_PROFILE"
 
-      # TODO: move this to the build image
       - name: Compute rustc hash
         run: echo "RUSTC_HASH=$(rustc --version | sha256sum | cut -d' ' -f1)" >> $GITHUB_ENV
 
@@ -126,8 +128,12 @@ jobs:
         run: cargo clippy $RELEASE_FLAG --no-deps --all-targets --frozen -- -D warnings
 
       - name: test
-        timeout-minutes: 10
+        timeout-minutes: 15  # release builds may be slower
         run: cargo nextest run $NEXTEST_FLAG --frozen --no-fail-fast --verbose
+
+      - name: doc-test
+        if: env.CARGO_PROFILE == 'test-release'
+        run: cargo test --doc $RELEASE_FLAG --frozen --verbose
 
       - name: miri-client
         run: |

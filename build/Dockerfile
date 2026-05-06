@@ -133,7 +133,6 @@ ENV USER=${USER} \
     CARGO_HOME=${CARGO_HOME} \
     RUSTUP_HOME=${RUSTUP_HOME} \
     CARGO_TARGET_DIR=${HOME}/deps/target \
-    CARGO_INCREMENTAL=0 \
     PATH=${CARGO_HOME}/bin:${RUSTUP_HOME}/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Ensure ownership and artifacts (including Miri sysroot) are transferred
