@@ -61,14 +61,16 @@ ARG CARGO_HOME
 ARG RUSTUP_HOME
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-RUN apt-get update && apt-get install -y \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y \
     build-essential ca-certificates curl git gnupg jq libssl-dev \
     pkg-config protobuf-compiler python3 python3-pip unzip zstd \
     && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-RUN useradd -ms /bin/bash ${USER} && \
+RUN groupadd -g 1001 ${USER} && useradd -ms /bin/bash -u 1001 -g 1001 ${USER} && \
     mkdir -p /__w "${CARGO_HOME}" "${RUSTUP_HOME}" && \
     chown -R ${USER}:${USER} /__w "${CARGO_HOME}" "${RUSTUP_HOME}"
 
@@ -95,7 +97,10 @@ ENV CARGO_HOME=${CARGO_HOME} \
 COPY build/cargo-config.toml ${CARGO_HOME}/config.toml
 
 COPY --from=planner --chown=${USER}:${USER} /recipe/recipe.json /tmp/recipe.json
-RUN GH_WORKSPACE="/__w/${REPO_NAME}/${REPO_NAME}" && \
+RUN --mount=type=cache,uid=1001,gid=1001,target=${CARGO_HOME}/registry/cache \
+    --mount=type=cache,uid=1001,gid=1001,target=${CARGO_HOME}/registry/index \
+    --mount=type=cache,uid=1001,gid=1001,target=${CARGO_HOME}/git \
+    GH_WORKSPACE="/__w/${REPO_NAME}/${REPO_NAME}" && \
     mkdir -p "${GH_WORKSPACE}" && \
     cp /tmp/recipe.json "${GH_WORKSPACE}/recipe.json" && \
     cd "${GH_WORKSPACE}" && \
@@ -107,8 +112,12 @@ RUN GH_WORKSPACE="/__w/${REPO_NAME}/${REPO_NAME}" && \
 FROM os-base AS go-builder
 COPY --from=go-official /usr/local/go /usr/local/go
 ENV PATH=/usr/local/go/bin:$PATH
-RUN --mount=type=bind,dst=/src GOPROXY=off GOCACHE=/tmp/gocache \
-    go -C /src/ext/oxia/cmd build -mod=vendor -o /tmp/oxia && rm -rf "$GOCACHE"
+# Cache mount persists Go build cache between image builds
+RUN --mount=type=cache,target=/tmp/gocache \
+    --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=bind,dst=/src \
+    GOPROXY=off GOCACHE=/tmp/gocache GOMODCACHE=/go/pkg/mod \
+    go -C /src/ext/oxia/cmd build -mod=vendor -o /tmp/oxia
 
 # ===== 7. Final Assembly =====
 FROM os-base AS final
