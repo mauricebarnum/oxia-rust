@@ -23,12 +23,37 @@ unexpected_cfgs = { level = "warn", check-cfg = [
     "cfg(accept_invalid_shard_ids)",
 ] }
 
+# The below is copied from build/cargo-config.toml.
+# DO  NOT EDIT
+
+# Cargo configuration installed into ${CARGO_HOME}/config.toml inside the
+# build image.  cargo-chef cook runs outside the workspace directory and
+# reads this file for profile settings; CI builds run inside the workspace
+# and read workspace Cargo.toml instead.  The two sources are merged by
+# Cargo with workspace Cargo.toml taking precedence.
+#
+# FINGERPRINT WARNING: For cargo-chef caching to survive into CI builds,
+# the effective compiler flags for each cooked profile must be identical in
+# both contexts.  Concretely:
+#   - [profile.ci-debug] here must exactly match [profile.ci-debug] in Cargo.toml.
+#   - [profile.ci] here must exactly match [profile.ci] in Cargo.toml.
+#   - [profile.test-release] here must exactly match [profile.test-release] in Cargo.toml.
+#   - [profile.release] here must exactly match [profile.release] in Cargo.toml
+#     (because [profile.ci] and [profile.test-release] inherit from it).
+# Update both files together whenever you change a profile.
+
+# Goal: Fast compiles, but fast enough runtime to not be frustrated.
 [profile.dev]
 opt-level = 1       # Basic optimizations so async code isn't glacial
 debug = "full"      # Maximum debug info for IDEs and GDB/LLDB
 incremental = true  # Essential for fast "edit-compile-test" cycles
 codegen-units = 256
 
+# Optimize dependencies even in debug mode
+[profile.dev.package."*"]
+opt-level = 3 # Your code stays debuggable; tokio/hyper/serde run at 100% speed
+
+# Must match workspace Cargo.toml
 [profile.release]
 opt-level = 3
 debug = true
@@ -43,7 +68,7 @@ codegen-units = 1
 rpath = false
 
 # CI-debug: Fast CI for PR validation. Optimized for compilation speed.
-# Must match build/cargo-config.toml
+# Must match workspace Cargo.toml
 [profile.ci-debug]
 inherits = "dev"
 debug = "line-tables-only" # Enough for backtraces, keeps compile fast
@@ -54,7 +79,7 @@ codegen-units = 256        # Fast parallel compilation
 opt-level = 3
 
 # CI: Branch builds (main pushes). Slightly more optimized but still fast.
-# Must match build/cargo-config.toml
+# Must match workspace Cargo.toml
 [profile.ci]
 inherits = "release"
 debug = "line-tables-only"
@@ -67,7 +92,7 @@ overflow-checks = true     # Catch arithmetic bugs
 strip = "none"
 
 # Test-release: Full optimizations plus assertions for catching release-only bugs.
-# Must match build/cargo-config.toml
+# Must match workspace Cargo.toml
 [profile.test-release]
 inherits = "release"
 debug = true            # Full debug info for accurate backtraces
