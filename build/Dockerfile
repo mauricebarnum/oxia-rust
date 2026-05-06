@@ -1,8 +1,7 @@
-# Global Scope ARGs
-ARG USER=runner
-ARG HOME=/home/${USER}
-ARG CARGO_HOME=${HOME}/.cargo
-ARG RUSTUP_HOME=${HOME}/.rustup
+# Global Scope ARGs (change these defaults if you ever switch user)
+ARG CARGO_HOME=/root/.cargo
+ARG RUSTUP_HOME=/root/.rustup
+ARG HOME=/root
 ARG RUST_VERSION=1.95.0
 ARG GO_VERSION=1.26.2
 
@@ -12,13 +11,10 @@ FROM golang:${GO_VERSION} AS go-official
 
 # ===== 2. Toolchain & Tool Preparer =====
 FROM rust-official AS toolchain-builder
-# Do NOT override RUSTUP_HOME/CARGO_HOME here; use image defaults (/usr/local)
-# to ensure the pre-installed stable toolchain is found by rustup.
-
+# Use image defaults (/usr/local) for CARGO_HOME/RUSTUP_HOME
 RUN rustup component add clippy && \
     rustup toolchain install --profile minimal --allow-downgrade nightly && \
     rustup component add --toolchain nightly miri rust-src && \
-    # Pre-build the miri sysroot in the default location
     cargo +nightly miri setup
 
 ARG CARGO_CHECK_EXTERNAL_TYPES_VERSION=nightly-2025-10-18
@@ -55,8 +51,6 @@ RUN for toml in */Cargo.toml; do \
 
 # ===== 4. OS Base =====
 FROM ubuntu:24.04 AS os-base
-ARG USER
-ARG HOME
 ARG CARGO_HOME
 ARG RUSTUP_HOME
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -70,24 +64,21 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-RUN groupadd -g 1001 ${USER} && useradd -ms /bin/bash -u 1001 -g 1001 ${USER} && \
-    mkdir -p /__w "${CARGO_HOME}" "${RUSTUP_HOME}" && \
-    chown -R ${USER}:${USER} /__w "${CARGO_HOME}" "${RUSTUP_HOME}"
+RUN mkdir -p /__w "${CARGO_HOME}" "${RUSTUP_HOME}"
 
 # ===== 5. Rust Cooker =====
 FROM os-base AS rust-cooker
-ARG USER
-ARG HOME
+ARG REPO_NAME=oxia-rust
 ARG CARGO_HOME
 ARG RUSTUP_HOME
-ARG REPO_NAME=oxia-rust
-USER ${USER}
+ARG HOME
+
 WORKDIR ${HOME}
 
-# MIGRATION: Copy from default image locations into runner's custom home
-COPY --from=toolchain-builder --chown=${USER}:${USER} /usr/local/cargo ${CARGO_HOME}
-COPY --from=toolchain-builder --chown=${USER}:${USER} /usr/local/rustup ${RUSTUP_HOME}
-COPY --from=chef --chown=${USER}:${USER} /usr/local/cargo/bin/cargo-chef ${CARGO_HOME}/bin/cargo-chef
+# Copy toolchains to our parameterised paths (root owned)
+COPY --from=toolchain-builder /usr/local/cargo ${CARGO_HOME}
+COPY --from=toolchain-builder /usr/local/rustup ${RUSTUP_HOME}
+COPY --from=chef /usr/local/cargo/bin/cargo-chef ${CARGO_HOME}/bin/cargo-chef
 
 ENV CARGO_HOME=${CARGO_HOME} \
     RUSTUP_HOME=${RUSTUP_HOME} \
@@ -96,10 +87,12 @@ ENV CARGO_HOME=${CARGO_HOME} \
 
 COPY build/cargo-config.toml ${CARGO_HOME}/config.toml
 
-COPY --from=planner --chown=${USER}:${USER} /recipe/recipe.json /tmp/recipe.json
-RUN --mount=type=cache,uid=1001,gid=1001,target=${CARGO_HOME}/registry/cache \
-    --mount=type=cache,uid=1001,gid=1001,target=${CARGO_HOME}/registry/index \
-    --mount=type=cache,uid=1001,gid=1001,target=${CARGO_HOME}/git \
+COPY --from=planner /recipe/recipe.json /tmp/recipe.json
+
+# Cache mounts for Cargo registry, so downloads persist between image builds
+RUN --mount=type=cache,target=${CARGO_HOME}/registry/cache \
+    --mount=type=cache,target=${CARGO_HOME}/registry/index \
+    --mount=type=cache,target=${CARGO_HOME}/git \
     GH_WORKSPACE="/__w/${REPO_NAME}/${REPO_NAME}" && \
     mkdir -p "${GH_WORKSPACE}" && \
     cp /tmp/recipe.json "${GH_WORKSPACE}/recipe.json" && \
@@ -113,33 +106,27 @@ RUN --mount=type=cache,uid=1001,gid=1001,target=${CARGO_HOME}/registry/cache \
 FROM os-base AS go-builder
 COPY --from=go-official /usr/local/go /usr/local/go
 ENV PATH=/usr/local/go/bin:$PATH
-# Cache mount persists Go build cache between image builds
-RUN --mount=type=cache,target=/tmp/gocache \
-    --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=bind,dst=/src \
-    GOPROXY=off GOCACHE=/tmp/gocache GOMODCACHE=/go/pkg/mod \
+RUN --mount=type=bind,dst=/src \
+    --mount=type=cache,target=/tmp/gocache \
+    GOPROXY=off GOCACHE=/tmp/gocache \
     go -C /src/ext/oxia/cmd build -mod=vendor -o /tmp/oxia
 
 # ===== 7. Final Assembly =====
 FROM os-base AS final
-ARG USER
-ARG HOME
 ARG CARGO_HOME
 ARG RUSTUP_HOME
+ARG HOME
 
-# Redefine ENV for runtime persistence
-ENV USER=${USER} \
-    HOME=${HOME} \
-    CARGO_HOME=${CARGO_HOME} \
+ENV CARGO_HOME=${CARGO_HOME} \
     RUSTUP_HOME=${RUSTUP_HOME} \
     CARGO_TARGET_DIR=${HOME}/deps/target \
     PATH=${CARGO_HOME}/bin:${RUSTUP_HOME}/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-# Ensure ownership and artifacts (including Miri sysroot) are transferred
-COPY --from=rust-cooker --chown=${USER}:${USER} ${CARGO_HOME} ${CARGO_HOME}
-COPY --from=rust-cooker --chown=${USER}:${USER} ${RUSTUP_HOME} ${RUSTUP_HOME}
-COPY --from=rust-cooker --chown=${USER}:${USER} ${HOME}/deps ${HOME}/deps
+# Copy all pre‑built pieces (root owned, no chown)
+COPY --from=rust-cooker ${CARGO_HOME} ${CARGO_HOME}
+COPY --from=rust-cooker ${RUSTUP_HOME} ${RUSTUP_HOME}
+COPY --from=rust-cooker ${HOME}/deps ${HOME}/deps
+COPY --from=go-official /usr/local/go /usr/local/go
 COPY --from=go-builder /tmp/oxia ${CARGO_HOME}/bin/oxia
 
-USER ${USER}
 WORKDIR ${HOME}
