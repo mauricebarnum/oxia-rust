@@ -104,8 +104,9 @@ RUN --mount=type=cache,uid=1001,gid=1001,target=${CARGO_HOME}/registry/cache \
     mkdir -p "${GH_WORKSPACE}" && \
     cp /tmp/recipe.json "${GH_WORKSPACE}/recipe.json" && \
     cd "${GH_WORKSPACE}" && \
-    CARGO_INCREMENTAL=0 cargo chef cook --profile ci-debug --all-targets --recipe-path recipe.json && \
-    CARGO_INCREMENTAL=0 cargo chef cook --profile ci --all-targets --recipe-path recipe.json && \
+    cargo chef cook --profile ci-debug --all-targets --recipe-path recipe.json && \
+    cargo chef cook --profile ci --all-targets --recipe-path recipe.json && \
+    cargo chef cook --profile test-release --all-targets --recipe-path recipe.json && \
     cargo +nightly fetch --locked
 
 # ===== 6. Go Builder =====
