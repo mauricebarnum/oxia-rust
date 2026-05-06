@@ -140,7 +140,6 @@ ENV USER=${USER} \
 COPY --from=rust-cooker --chown=${USER}:${USER} ${CARGO_HOME} ${CARGO_HOME}
 COPY --from=rust-cooker --chown=${USER}:${USER} ${RUSTUP_HOME} ${RUSTUP_HOME}
 COPY --from=rust-cooker --chown=${USER}:${USER} ${HOME}/deps ${HOME}/deps
-COPY --from=go-official /usr/local/go /usr/local/go
 COPY --from=go-builder /tmp/oxia ${CARGO_HOME}/bin/oxia
 
 USER ${USER}
