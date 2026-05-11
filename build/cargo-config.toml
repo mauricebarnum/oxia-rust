@@ -9,9 +9,9 @@
 # both contexts.  Concretely:
 #   - [profile.ci-debug] here must exactly match [profile.ci-debug] in Cargo.toml.
 #   - [profile.ci] here must exactly match [profile.ci] in Cargo.toml.
-#   - [profile.test-release] here must exactly match [profile.test-release] in Cargo.toml.
+#   - [profile.ci-test-release] here must exactly match [profile.ci-test-release] in Cargo.toml.
 #   - [profile.release] here must exactly match [profile.release] in Cargo.toml
-#     (because [profile.ci] and [profile.test-release] inherit from it).
+#     (because [profile.ci] and [profile.ci-test-release] inherit from it).
 # Update both files together whenever you change a profile.
 
 # Goal: Fast compiles, but fast enough runtime to not be frustrated.
@@ -65,7 +65,7 @@ strip = "none"
 
 # Test-release: Full optimizations plus assertions for catching release-only bugs.
 # Must match workspace Cargo.toml
-[profile.test-release]
+[profile.ci-test-release]
 inherits = "release"
 debug = true            # Full debug info for accurate backtraces
 debug-assertions = true # Keep assertions enabled (critical for bug catching)
@@ -74,4 +74,3 @@ lto = false             # LTO too slow for CI, optimizations not needed for test
 codegen-units = 256     # Fast compilation
 incremental = true      # Enable sccache
 strip = "none"          # Keep symbols
-
