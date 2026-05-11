@@ -44,7 +44,7 @@ rpath = false
 [profile.ci-debug]
 inherits = "dev"
 debug = "line-tables-only" # Enough for backtraces, keeps compile fast
-incremental = true         # Enables sccache, matches dev
+incremental = false        # Enables sccache, matches dev
 codegen-units = 256        # Fast parallel compilation
 
 [profile.ci-debug.package."*"]
@@ -56,7 +56,7 @@ opt-level = 3
 inherits = "release"
 debug = "line-tables-only"
 lto = false                # LTO kills compile time, not needed for tests
-incremental = true         # Enables sccache
+incremental = false        # Enables sccache
 codegen-units = 256        # Fast parallel compilation
 opt-level = 2              # Good optimization, faster compile than 3
 debug-assertions = true    # Catch bugs in CI
@@ -72,5 +72,5 @@ debug-assertions = true # Keep assertions enabled (critical for bug catching)
 overflow-checks = true  # Keep overflow checks
 lto = false             # LTO too slow for CI, optimizations not needed for tests
 codegen-units = 256     # Fast compilation
-incremental = true      # Enable sccache
+incremental = false     # Enable sccache
 strip = "none"          # Keep symbols
