@@ -6,6 +6,7 @@ license = "Apache-2.0"
 
 [dependencies]
 mauricebarnum-oxia-common = { path = "../common" }
+http = "1"
 tokio = { version = "1.52.3", features = ["sync", "rt", "time"] }
 tokio-stream = "0.1.18"
 tonic = { version = "0.14.6", features = ["gzip", "channel", "zstd"] }

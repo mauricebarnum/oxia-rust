@@ -1011,6 +1011,7 @@ dependencies = [
  "fastrand",
  "futures",
  "getrandom 0.4.2",
+ "http",
  "itertools",
  "mauricebarnum-oxia-common",
  "nix",

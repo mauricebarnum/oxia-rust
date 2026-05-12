@@ -242,6 +242,18 @@ pub enum ClientError {
 
     #[error("Unsupported key comparison {0}")]
     UnsupportedKeyComparator(KeyComparisonType),
+
+    #[error("Invalid destination format '{dest}': {reason}")]
+    InvalidDestinationFormat { dest: String, reason: String },
+
+    #[error("Destination must not contain userinfo")]
+    DestinationContainsUserinfo,
+
+    #[error("Destination must have an authority (host:port)")]
+    DestinationMissingAuthority,
+
+    #[error("Destination contains unexpected URI component: {component}")]
+    DestinationContainsUnexpectedComponent { component: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
