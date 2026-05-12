@@ -83,6 +83,7 @@ COPY --from=chef /usr/local/cargo/bin/cargo-chef ${CARGO_HOME}/bin/cargo-chef
 ENV CARGO_HOME=${CARGO_HOME} \
     RUSTUP_HOME=${RUSTUP_HOME} \
     CARGO_TARGET_DIR=${HOME}/deps/target \
+    RUSTC_WRAPPER=sccache \
     PATH=${CARGO_HOME}/bin:${RUSTUP_HOME}/bin:$PATH
 
 COPY build/cargo-config.toml ${CARGO_HOME}/config.toml
