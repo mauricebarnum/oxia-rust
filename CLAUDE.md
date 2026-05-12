@@ -48,6 +48,14 @@ CI uses `--release --frozen`. Local: omit.
 - **Protos**: Auto from `./ext/oxia/common/proto`. No manual edits.
 - **Tests**: Spawn servers via `client/tests/common.rs`. [file:43]
 
+## Security & Trust Boundaries
+
+- **Public gRPC API**: Primary entry point for clients (`public_rpc_server.go`). Trust boundary for keys, values, and session management.
+- **Internal Coordination API**: Server-to-server communication (`internal_rpc_server.go`). Critical for cluster integrity (replication, heartbeats).
+- **CLI Arguments**: Entry point for user-supplied configuration (`cmd/src/main.rs`). Boundary for service addresses and timeouts.
+- **Service Discovery**: The client receives node lists from the coordinator (`discovery.rs`). Boundary for potentially untrusted network metadata.
+- **CI/CD Workflows**: Reusable workflows (`rust-build.yml`). Trust boundary for input-driven command execution.
+
 **Concurrency** (Hot Path: Lock-free):
 
 1. `ArcSwap::load` shards/clients.
