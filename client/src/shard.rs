@@ -348,7 +348,7 @@ impl Client {
             .get_leader()
             .ok_or_else(|| Error::NoShardMapping(self.data.shard_id))?;
         let channel = self.data.channel_pool.get(&leader).await?;
-        Ok(GrpcClient::new(channel))
+        Ok(GrpcClient::new(channel).max_decoding_message_size(crate::MAX_GRPC_DECODING_SIZE))
     }
 
     /// Invalidate the cached channel for the current leader.
