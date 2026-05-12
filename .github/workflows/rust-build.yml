@@ -41,9 +41,11 @@ jobs:
     steps:
       - name: set-extra-env
         if: inputs.extra_env != ''
+        env:
+          EXTRA_ENV: ${{ inputs.extra_env }}
         run: |
-          echo "Setting extra environment variables: ${{ inputs.extra_env }}"
-          for pair in ${{ inputs.extra_env }}; do
+          echo "Setting extra environment variables: $EXTRA_ENV"
+          for pair in $EXTRA_ENV; do
             echo "Exporting $pair"
             echo "$pair" >> $GITHUB_ENV
           done
@@ -55,9 +57,12 @@ jobs:
         run: cargo deny check
 
       - name: set-build-profile
+        env:
+          BUILD_MODE_INPUT: ${{ inputs.build_mode }}
+          EVENT_INPUT: ${{ inputs.caller_event_name || github.event_name }}
         run: |
-          BUILD_MODE="${{ inputs.build_mode }}"
-          EVENT="${{ inputs.caller_event_name || github.event_name }}"
+          BUILD_MODE="$BUILD_MODE_INPUT"
+          EVENT="$EVENT_INPUT"
           if [ "$BUILD_MODE" = "ci" ]; then
             echo "CARGO_PROFILE=ci" >> $GITHUB_ENV
             echo "RELEASE_FLAG=--profile ci" >> $GITHUB_ENV
