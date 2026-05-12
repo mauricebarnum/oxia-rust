@@ -826,7 +826,9 @@ impl Client {
             )));
         }
 
-        get_response_as_result(rsp.gets.into_iter().next().unwrap())
+        get_response_as_result(rsp.gets.into_iter().next().ok_or_else(|| {
+            Error::Custom("expected one GetResponse in read response but got none".to_string())
+        })?)
     }
 
     async fn demux_stream(
@@ -972,7 +974,9 @@ impl Client {
             return Err(e);
         }
 
-        let p = rsp.puts.into_iter().next().unwrap();
+        let p = rsp.puts.into_iter().next().ok_or_else(|| {
+            Error::Custom("expected one PutResponse in write response but got none".to_string())
+        })?;
         Ok(PutResponse::from_proto(p))
     }
 
