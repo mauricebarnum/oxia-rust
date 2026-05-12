@@ -699,6 +699,11 @@ fn validate_dest(dest: &str) -> Result<()> {
     Ok(())
 }
 
+/// Maximum size for a single incoming gRPC response message.
+/// Protects against OOM from oversized server responses (the Go server
+/// allows up to 256 MB per frame).
+pub(crate) const MAX_GRPC_DECODING_SIZE: usize = 64 * 1024 * 1024;
+
 pub(crate) async fn create_grpc_client(
     dest: &str,
     channel_pool: &ChannelPool,
@@ -713,7 +718,7 @@ pub(crate) async fn create_grpc_client(
         url
     };
     let channel = channel_pool.get(&url).await?;
-    Ok(GrpcClient::new(channel))
+    Ok(GrpcClient::new(channel).max_decoding_message_size(MAX_GRPC_DECODING_SIZE))
 }
 
 const fn extract_leader_hint(e: &Error) -> Option<&LeaderHint> {
