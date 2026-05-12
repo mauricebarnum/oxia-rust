@@ -38,6 +38,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::Streaming;
 use tonic::metadata::MetadataValue;
 use tracing::debug;
+use tracing::error;
 use tracing::info;
 use tracing::trace;
 use tracing::warn;
@@ -479,11 +480,22 @@ impl Client {
 
         let client = self.clone();
 
-        let mut seed = [0u8; 32];
-        getrandom::fill(&mut seed).unwrap();
-        let mut rng = StdRng::from_seed(seed);
-
         tokio::spawn(async move {
+            let mut seed = [0u8; 32];
+            loop {
+                match getrandom::fill(&mut seed) {
+                    Ok(()) => break,
+                    Err(e) => {
+                        // If getrandom fails, we can't get a secure seed for jitter.
+                        // Stalling here (retrying) is safer than falling back to a predictable
+                        // seed which could allow an attacker to synchronize heartbeats.
+                        error!(?e, "getrandom failed in heartbeat task; retrying in 10s");
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                    }
+                }
+            }
+            let mut rng = StdRng::from_seed(seed);
+
             // We'll send heartbeats a random time +/- X% of one quarter of session timeout.
             // This will allow us to miss a few heartbeats without losing the session
             let distr = {
@@ -493,7 +505,12 @@ impl Client {
                 let min_ms = (target_ms * (1.0 - JITTER)).round() as u32;
                 #[allow(clippy::cast_sign_loss)]
                 let max_ms = (target_ms * (1.0 + JITTER)).round() as u32;
-                Uniform::new_inclusive(min_ms, max_ms).unwrap()
+                // If min_ms > max_ms (e.g. session_timeout is 0), fallback to a small fixed value
+                if min_ms <= max_ms {
+                    Uniform::new_inclusive(min_ms, max_ms).unwrap()
+                } else {
+                    Uniform::new_inclusive(10, 100).unwrap()
+                }
             };
             loop {
                 tokio::select! {

@@ -62,6 +62,7 @@ Vulnerability #1: GO-2026-4918
 - **Description:** The `start_heartbeat` task uses `getrandom::fill(&mut seed).unwrap()`. If the system entropy source is temporarily unavailable or restricted (e.g., in a heavily restricted container or during system exhaustion), the background heartbeat task will panic, leading to session loss and potential client instability.
 - **Exploit scenario:** Under extreme system resource exhaustion, the heartbeat thread panics, causing the client to lose its Oxia session and abort all ephemeral keys.
 - **Remediation:** Replace `unwrap()` with proper error handling that retries or logs a warning before gracefully degrading.
+- **FIXED**
 
 ### [LOW] Insecure URL Construction for gRPC Clients
 
