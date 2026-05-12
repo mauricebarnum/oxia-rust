@@ -1,0 +1,9 @@
+- [x] Define the audit scope.
+- [x] SAST Recon on `client/src/lib.rs` (Rust Client Entry)
+- [x] SAST Recon on `client/src/shard.rs` (Sharding Logic)
+- [x] SAST Recon on `client/src/discovery.rs` (Service Discovery)
+- [x] SAST Recon on `cmd/src/main.rs` (CLI Entry)
+- [x] SAST Recon on `ext/oxia/oxia/client.go` (Go Client)
+- [x] SAST Recon on `ext/oxia/oxiad/dataserver/public_rpc_server.go` (Server Public API)
+- [x] SAST Recon on `ext/oxia/oxiad/dataserver/internal_rpc_server.go` (Server Internal API)
+- [x] Conduct the final review of all findings as per your **Minimizing False Positives** operating principle and generate the final report.
