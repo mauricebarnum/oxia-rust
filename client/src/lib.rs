@@ -655,10 +655,55 @@ impl LeaderHint {
 
 type GrpcClient = oxia_proto::OxiaClientClient<Channel>;
 
+fn validate_dest(dest: &str) -> Result<()> {
+    if dest.contains('#') {
+        let e = ClientError::DestinationContainsUnexpectedComponent {
+            component: "fragment".to_string(),
+        };
+        return Err(e.into());
+    }
+    // To properly validate, we need a scheme.
+    let url = format!("http://{dest}");
+    let uri = url
+        .parse::<http::Uri>()
+        .map_err(|e| ClientError::InvalidDestinationFormat {
+            dest: dest.to_string(),
+            reason: e.to_string(),
+        })?;
+
+    if let Some(auth) = uri.authority() {
+        if auth.as_str().contains('@') {
+            let e = ClientError::DestinationContainsUserinfo {};
+            return Err(e.into());
+        }
+    } else {
+        let e = ClientError::DestinationMissingAuthority {};
+        return Err(e.into());
+    }
+
+    if uri.path() != "" && uri.path() != "/" {
+        let e = ClientError::DestinationContainsUnexpectedComponent {
+            component: format!("path: '{}'", uri.path()),
+        };
+        return Err(e.into());
+    }
+
+    if uri.query().is_some() {
+        return Err(Error::Client(Arc::new(
+            ClientError::DestinationContainsUnexpectedComponent {
+                component: "query string".to_string(),
+            },
+        )));
+    }
+
+    Ok(())
+}
+
 pub(crate) async fn create_grpc_client(
     dest: &str,
     channel_pool: &ChannelPool,
 ) -> Result<GrpcClient> {
+    validate_dest(dest)?;
     let url = {
         // TODO: http v https
         const SCHEME: &str = "http://";
@@ -1370,5 +1415,69 @@ impl Client {
             Arc::clone(&shard_manager),
             options,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_dest() {
+        assert!(validate_dest("localhost:6648").is_ok());
+        assert!(validate_dest("127.0.0.1:6648").is_ok());
+        assert!(validate_dest("[::1]:6648").is_ok());
+
+        // userinfo
+        let r = validate_dest("user:pass@localhost:6648");
+        assert!(matches!(
+            r,
+            Err(Error::Client(e)) if matches!(*e, ClientError::DestinationContainsUserinfo)
+        ));
+
+        let r = validate_dest("user@localhost:6648");
+        assert!(matches!(
+            r,
+            Err(Error::Client(e)) if matches!(*e, ClientError::DestinationContainsUserinfo)
+        ));
+
+        // path
+        let r = validate_dest("localhost:6648/path");
+        if let Err(Error::Client(e)) = r {
+            if let ClientError::DestinationContainsUnexpectedComponent { component } = e.as_ref() {
+                assert!(component.contains("path"));
+            } else {
+                panic!("Expected DestinationContainsUnexpectedComponent, got {e:?}");
+            }
+        } else {
+            panic!("Expected Error::Client, got {r:?}");
+        }
+
+        assert!(validate_dest("localhost:6648/").is_ok());
+
+        // query
+        let r = validate_dest("localhost:6648?query=1");
+        if let Err(Error::Client(e)) = r {
+            if let ClientError::DestinationContainsUnexpectedComponent { component } = e.as_ref() {
+                assert!(component.contains("query"));
+            } else {
+                panic!("Expected DestinationContainsUnexpectedComponent, got {e:?}");
+            }
+        } else {
+            panic!("Expected Error::Client, got {r:?}");
+        }
+
+        // Invalid formats
+        assert!(validate_dest(" ").is_err());
+        let r = validate_dest("localhost:6648#frag");
+        if let Err(Error::Client(e)) = r {
+            if let ClientError::DestinationContainsUnexpectedComponent { component } = e.as_ref() {
+                assert!(component.contains("fragment"));
+            } else {
+                panic!("Expected DestinationContainsUnexpectedComponent, got {e:?}");
+            }
+        } else {
+            panic!("Expected Error::Client, got {r:?}");
+        }
     }
 }
