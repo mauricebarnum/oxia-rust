@@ -1,83 +1,23 @@
-# CLAUDE.md – Project Guidance for Claude Code
+# CLAUDE.md
 
-This CLAUDE.md guides Claude Code (`claude`) for this experimental Rust Oxia client repo. Follow strictly for safe, efficient collaboration. TITLE CLAUDE.md [file:43]
+Refer to the root `AGENTS.md` file for all project architectures, testing frameworks, and style constraints.
 
-## Safety & Workflow Rules (New)
+## Claude Code-Specific Safety & Workflow Rules
+- **Branches**: ALWAYS prefix branches with `claude-` (e.g., `git checkout -b claude-task-name`). Never commit or push directly to `main` or `origin/main`.
+- **Isolation**: Write to `./claude-temp/` first (create if needed: `mkdir claude-temp`). Propose diffs with `/diff`; confirm before main files.
+- **Git Safety**: 
+  - Pre-session: `git stash push -m "pre-claude"`
+  - Stash changes during session: `git stash push`
+  - Do not commit or push without using `/confirm` or getting explicit user approval.
+- **Tokens & Performance**: 
+  - Use `/rewind` (Esc Esc) for undos.
+  - Limit tools (`ENABLE_TOOL_SEARCH=auto:5%`).
+  - Summarize with `/compact`.
+  - Monitor `/cost`.
+- **Efficiency Prompts**:
+  - "Plan in `./claude-temp/`; diff before apply."
+  - "Verify with tests; /cost check."
 
-- **Branches**: ALWAYS prefix `claude-` (e.g., `claude-feature`). Check out new feature branch before edits: `git checkout -b claude-task-name`. Never touch `main`/`origin/main`. [file:43]
-- **Isolation**: Write to `./claude-temp/` first (create if needed: `mkdir claude-temp`). Propose diffs with `/diff`; confirm before main files. Read via `@file.rs` on-demand. [web:35]
-- **Git Safety**: Pre-session: `git stash push -m "pre-claude"`. Stash changes: `git stash push`. No commits/pushes without `/confirm`. Post: `git stash pop` selectively. Block destructives via hooks. [web:33]
-- **Tokens**: Use `/rewind` (Esc Esc) for undos. Limit tools (`ENABLE_TOOL_SEARCH=auto:5%`). Test incrementally; summarize with `/compact`. Monitor `/cost`. [web:10]
-- **Read-Only**: NEVER modify `./ext/oxia/` (vendored Oxia mirror). [file:43]
-- _Work in progress_: Always consider unmerged commits on the current branch
-  - Run `git log --oneline @{u}..` or `git status` at session start if relevant.
-  - Summarize unmerged changes before major tasks.
-
-## Project Overview
-
-Experimental Rust Oxia client: sharding, gRPC, notifications. Workspace: common (bindings), client (async API), cmd (CLI `oxia-cmd`), oxia-bin-util (server binary). [file:43]
-
-## Build & Test Commands
-
-| Task      | Command                                                    | Notes                       |
-| --------- | ---------------------------------------------------------- | --------------------------- |
-| Build     | `cargo build --all-targets`                                | All targets                 |
-| Tests     | `cargo nextest run`                                        | Full; or `--package client` |
-| Unit only | `cargo nextest run -E 'kind(lib)'`                         | Sandbox-safe; no sockets    |
-| ExtSyms   | `cargo nextest run -E 'binary(extsyms)'`                   | Public API types allowlist  |
-| Lint      | `cargo clippy --all-targets --all-features -- -D warnings` | Strict                      |
-| Format    | `cargo +nightly fmt --all` / `--check`                     | -                           |
-| Security  | `cargo deny check`                                         | Licenses                    |
-| Miri      | `+nightly cargo miri nextest run --package client`         | UB detection [file:43]      |
-
-CI uses `--release --frozen`. Local: omit.
-
-## Workspace Structure
-
-- `common`: gRPC protos (tonic-prost-build).
-- `client`: Async client (sharding, dispatch).
-- `cmd`: `oxia-cmd` CLI (get/put/delete/list/range/notifications/shell).
-- `oxia-bin-util`: Builds vendored Go Oxia server for tests. Binary at `target/oxia/oxia` after build. [file:43]
-
-## Key Architecture
-
-- **API**: `Client` struct; `put(key, value)` + `with_options()`. Zero-cost abstractions.
-- **Sharding**: XXHASH3 routing; dynamic via `shard.rs`.
-- **Pooling**: `pool.rs` per-shard gRPC; `ArcSwap` caches.
-- **Notifications**: Streaming key changes.
-- **Protos**: Auto from `./ext/oxia/common/proto`. No manual edits.
-- **Tests**: Spawn servers via `client/tests/common.rs`. [file:43]
-
-## Security & Trust Boundaries
-
-- **Public gRPC API**: Primary entry point for clients (`public_rpc_server.go`). Trust boundary for keys, values, and session management.
-- **Internal Coordination API**: Server-to-server communication (`internal_rpc_server.go`). Critical for cluster integrity (replication, heartbeats).
-- **CLI Arguments**: Entry point for user-supplied configuration (`cmd/src/main.rs`). Boundary for service addresses and timeouts.
-- **Service Discovery**: The client receives node lists from the coordinator (`discovery.rs`). Boundary for potentially untrusted network metadata.
-- **CI/CD Workflows**: Reusable workflows (`rust-build.yml`). Trust boundary for input-driven command execution.
-
-**Concurrency** (Hot Path: Lock-free):
-
-1. `ArcSwap::load` shards/clients.
-2. `RwLock::read` pool (misses).
-   Guidelines: ArcSwap > RwLock; tokio-sync; no locks pre-`.await`. [file:43]
-
-- **Async traits**: Use `BoxFuture` desugaring (see `notification.rs`, `address.rs`), not `async-trait` crate.
-
-## Coding Style
-
-- Clippy: Settings are in workspace Cargo.toml
-- **Imports**: Prefer unmerged `use` statements (one item per line). No `use std::{foo, bar};` merging.
-- Docs: Terse; Rust API guidelines; `const fn`.
-- GitHub: Draft PRs; `--force-with-lease`; tests/clippy pre-push. Ignore local `main`. [file:43]
-
-## Efficiency Prompts
-
-- "Plan in `./claude-temp/`; diff before apply."
-- "Verify with tests; /cost check."
-
-## Dependencies
-
-- Include minimal features when adding or managing dependencies
-- Do not add dependencies rejected by `cargo deny`
-- When making a module `pub`, update `allowed_external_types` in `client/Cargo.toml` for any newly exposed external types
+## Claude Code-Specific Overrides
+- When compacting history with `/compact`, always preserve the core task list.
+- Use subagents for complex research instead of inline exploration loops.
