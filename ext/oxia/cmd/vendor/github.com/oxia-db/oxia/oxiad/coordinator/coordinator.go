@@ -41,6 +41,7 @@ import (
 	"github.com/oxia-db/oxia/common/concurrent"
 	"github.com/oxia-db/oxia/common/process"
 	"github.com/oxia-db/oxia/common/proto"
+	oxiadcommonrpc "github.com/oxia-db/oxia/oxiad/common/rpc"
 )
 
 type Coordinator interface {
@@ -437,8 +438,8 @@ func (c *coordinator) computeNewAssignments() {
 func mergedAuthorities(status *model.ClusterStatus, servers []model.Server, extraAuthorities []string) []string {
 	authorities := linkedhashset.New[string]()
 	addServerAuthorities := func(server model.Server) {
-		authorities.Add(server.Public)
-		authorities.Add(server.Internal)
+		authorities.Add(oxiadcommonrpc.StripAuthorityScheme(server.Public))
+		authorities.Add(oxiadcommonrpc.StripAuthorityScheme(server.Internal))
 	}
 	for _, server := range servers {
 		addServerAuthorities(server)
@@ -454,7 +455,7 @@ func mergedAuthorities(status *model.ClusterStatus, servers []model.Server, extr
 		}
 	}
 	for _, authority := range extraAuthorities {
-		authorities.Add(authority)
+		authorities.Add(oxiadcommonrpc.StripAuthorityScheme(authority))
 	}
 	return authorities.Values()
 }
@@ -522,6 +523,7 @@ func (c *coordinator) InitiateSplit(namespace string, parentShardId int64, split
 	// Update cloned status with left child placement before selecting right child
 	cloned.Namespaces[namespace].Shards[leftChildId] = model.ShardMetadata{
 		Status:   model.ShardStatusSteadyState,
+		Term:     -1,
 		Ensemble: leftEnsemble,
 		Int32HashRange: model.Int32HashRange{
 			Min: parentMeta.Int32HashRange.Min,
@@ -549,7 +551,7 @@ func (c *coordinator) InitiateSplit(namespace string, parentShardId int64, split
 	// Create left child shard
 	nsCloned.Shards[leftChildId] = model.ShardMetadata{
 		Status:   model.ShardStatusSteadyState,
-		Term:     0,
+		Term:     -1,
 		Ensemble: leftEnsemble,
 		Int32HashRange: model.Int32HashRange{
 			Min: parentMeta.Int32HashRange.Min,
@@ -565,7 +567,7 @@ func (c *coordinator) InitiateSplit(namespace string, parentShardId int64, split
 	// Create right child shard
 	nsCloned.Shards[rightChildId] = model.ShardMetadata{
 		Status:   model.ShardStatusSteadyState,
-		Term:     0,
+		Term:     -1,
 		Ensemble: rightEnsemble,
 		Int32HashRange: model.Int32HashRange{
 			Min: sp + 1,
