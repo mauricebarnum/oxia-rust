@@ -62,6 +62,7 @@ use crate::SecondaryIndex;
 use crate::batch_get;
 use crate::config;
 use crate::create_grpc_client;
+use crate::metrics;
 use crate::pool::ChannelPool;
 
 #[repr(transparent)]
@@ -128,6 +129,14 @@ fn get_response_as_result(r: oxia_proto::GetResponse) -> Result<Option<GetRespon
         Ok(Status::KeyNotFound) => Ok(None),
         _ => Err(OxiaError::from(r.status).into()),
     }
+}
+
+#[cfg(feature = "metrics")]
+fn get_response_is_success(r: &oxia_proto::GetResponse) -> bool {
+    matches!(
+        oxia_proto::Status::try_from(r.status),
+        Ok(oxia_proto::Status::Ok | oxia_proto::Status::KeyNotFound)
+    )
 }
 
 const DIRECT_ID_SLOTS: u64 = 20;
@@ -289,6 +298,7 @@ fn apply_leader_hint_to_directory(leaders: &LeaderDirectory, hint: &crate::Leade
 #[derive(Debug)]
 struct ClientData {
     config: Arc<config::Config>,
+    metrics: metrics::Metrics,
     channel_pool: ChannelPool,
     shard_id: ShardId,
     /// Shared reference to leader directory - enables dynamic leader lookup.
@@ -302,7 +312,7 @@ struct ClientData {
 }
 
 impl ClientData {
-    const fn new(
+    fn new(
         config: Arc<config::Config>,
         channel_pool: ChannelPool,
         shard_id: ShardId,
@@ -310,8 +320,10 @@ impl ClientData {
         meta: tonic::metadata::MetadataMap,
         cancel_token: CancellationToken,
     ) -> Self {
+        let metrics = metrics::Metrics::new(config.meter_provider(), config.namespace());
         Self {
             config,
+            metrics,
             channel_pool,
             shard_id,
             leaders,
@@ -457,6 +469,20 @@ fn check_delete_range_response(r: &oxia_proto::WriteResponse) -> Option<Error> {
         return Some(OxiaError::from(d.status).into());
     }
     None
+}
+
+fn check_write_operation_response(
+    response: &oxia_proto::WriteResponse,
+    operation: metrics::Operation,
+) -> Option<Error> {
+    match operation {
+        metrics::Operation::Put => check_put_response(response),
+        metrics::Operation::Delete => check_delete_response(response),
+        metrics::Operation::DeleteRange => check_delete_range_response(response),
+        _ => Some(Error::Custom(format!(
+            "invalid write metrics operation: {operation:?}"
+        ))),
+    }
 }
 
 #[inline]
@@ -740,13 +766,16 @@ impl Client {
     async fn process_write(
         &self,
         write_req: oxia_proto::WriteRequest,
+        metrics_op: metrics::Operation,
     ) -> Result<oxia_proto::WriteResponse> {
         let data = &self.data;
+        let total_start = metrics::batch_start();
 
         let write_req = oxia_proto::WriteRequest {
             shard: Some(data.shard_id.0),
             ..write_req
         };
+        let (value_size, request_count) = write_metrics(&write_req, metrics_op);
 
         // Create a channel for the write stream with a buffer of 1 (only sending one request)
         let (tx, rx) = tokio::sync::mpsc::channel(1);
@@ -763,33 +792,53 @@ impl Client {
         let req = self.create_request(write_stream);
 
         // Get response stream with better error handling
-        let mut resp_stream = self
+        let exec_start = metrics::batch_start();
+        let rpc_result = self
             .rpc(|mut grpc| async move { grpc.write_stream(req).await })
-            .await?
-            .into_inner();
+            .await;
+        let (result, exec_duration) = match rpc_result {
+            Err(err) => (Err(err), metrics::batch_exec_duration(exec_start)),
+            Ok(response) => {
+                let mut resp_stream = response.into_inner();
 
-        // Get first response
-        let write_response = match resp_stream.next().await {
-            Some(Ok(response)) => response,
-            Some(Err(err)) => return Err(err.into()),
-            None => {
-                return Err(Error::Custom(
-                    "Server returned no write response".to_string(),
-                ));
+                // Server execution and response delivery happen while polling the stream.
+                let first_response = resp_stream.next().await;
+                let exec_duration = metrics::batch_exec_duration(exec_start);
+                let result = match first_response {
+                    Some(Ok(response)) => {
+                        // Close the stream by dropping the sender
+                        drop(tx);
+
+                        // Verify we received only one response
+                        if let Some(additional_response) = resp_stream.next().await {
+                            Err(Error::Custom(format!(
+                                "Expected exactly one response, but got additional response: {additional_response:?}"
+                            )))
+                        } else {
+                            Ok(response)
+                        }
+                    }
+                    Some(Err(err)) => Err(err.into()),
+                    None => Err(Error::Custom(
+                        "Server returned no write response".to_string(),
+                    )),
+                };
+                (result, exec_duration)
             }
         };
-
-        // Close the stream by dropping the sender
-        drop(tx);
-
-        // Verify we received only one response
-        if let Some(response) = resp_stream.next().await {
-            return Err(Error::Custom(format!(
-                "Expected exactly one response, but got additional response: {response:?}"
-            )));
-        }
-
-        Ok(write_response)
+        let result = result.and_then(|response| {
+            check_write_operation_response(&response, metrics_op).map_or_else(|| Ok(response), Err)
+        });
+        metrics::record_batch(
+            &data.metrics,
+            metrics_op,
+            metrics::result_kind(&result),
+            total_start,
+            exec_duration,
+            value_size,
+            request_count,
+        );
+        result
     }
 
     /// Retrieves a key with the given options
@@ -831,10 +880,13 @@ impl Client {
         })?)
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn demux_stream(
         context: Arc<ClientData>,
         keys: Vec<Arc<str>>,
         read_response: Result<tonic::Response<Streaming<oxia_proto::ReadResponse>>>,
+        total_start: metrics::BatchStart,
+        exec_start: metrics::BatchStart,
     ) -> impl Stream<Item = batch_get::ResponseItem> {
         enum State {
             Demuxing {
@@ -849,24 +901,70 @@ impl Client {
         }
 
         let keys_iter = keys.into_iter();
-        let state = match read_response {
+        let (result_kind, value_size, request_count, state) = match read_response {
             Ok(s) => match s.into_inner().next().await {
-                Some(Ok(rr)) => State::Demuxing {
-                    context,
-                    keys_iter,
-                    gets_iter: rr.gets.into_iter(),
-                },
-                Some(Err(status)) => State::Failing {
-                    keys_iter,
-                    err: status.into(),
-                },
-                None => State::Failing {
-                    keys_iter,
-                    err: no_response_error(context.get_leader().as_deref(), context.shard_id),
-                },
+                Some(Ok(rr)) => {
+                    let (result_kind, value_size, request_count) =
+                        read_metrics(&rr, keys_iter.len());
+                    (
+                        result_kind,
+                        value_size,
+                        request_count,
+                        State::Demuxing {
+                            context: Arc::clone(&context),
+                            keys_iter,
+                            gets_iter: rr.gets.into_iter(),
+                        },
+                    )
+                }
+                Some(Err(status)) => {
+                    let request_count = keys_iter.len() as u64;
+                    (
+                        metrics::ResultKind::Failure,
+                        0,
+                        request_count,
+                        State::Failing {
+                            keys_iter,
+                            err: status.into(),
+                        },
+                    )
+                }
+                None => {
+                    let request_count = keys_iter.len() as u64;
+                    (
+                        metrics::ResultKind::Failure,
+                        0,
+                        request_count,
+                        State::Failing {
+                            keys_iter,
+                            err: no_response_error(
+                                context.get_leader().as_deref(),
+                                context.shard_id,
+                            ),
+                        },
+                    )
+                }
             },
-            Err(err) => State::Failing { keys_iter, err },
+            Err(err) => {
+                let request_count = keys_iter.len() as u64;
+                (
+                    metrics::ResultKind::Failure,
+                    0,
+                    request_count,
+                    State::Failing { keys_iter, err },
+                )
+            }
         };
+        let exec_duration = metrics::batch_exec_duration(exec_start);
+        metrics::record_batch(
+            &context.metrics,
+            metrics::Operation::Get,
+            result_kind,
+            total_start,
+            exec_duration,
+            value_size,
+            request_count,
+        );
 
         futures::stream::unfold(state, move |mut state| async move {
             loop {
@@ -919,6 +1017,7 @@ impl Client {
         &self,
         batch_req: batch_get::Request,
     ) -> impl Stream<Item = batch_get::ResponseItem> + use<> {
+        let total_start = metrics::batch_start();
         let opts = match batch_req.opts {
             Some(o) => o.into(),
             None => GetOptions::default(),
@@ -935,6 +1034,7 @@ impl Client {
             gets,
         };
 
+        let exec_start = metrics::batch_start();
         let read_result = self
             .rpc(|mut grpc| {
                 let req = read_req.clone();
@@ -945,13 +1045,29 @@ impl Client {
         let read_result = match read_result {
             Err(Error::OxiaRpc(OxiaRpcError::NodeIsNotLeader { hint: Some(hint) })) => {
                 self.apply_leader_hint(&hint);
-                self.rpc(|mut grpc| async move { grpc.read(read_req).await })
-                    .await
+                let retry_result = self
+                    .rpc(|mut grpc| async move { grpc.read(read_req).await })
+                    .await;
+                return Self::demux_stream(
+                    Arc::clone(&self.data),
+                    batch_req.keys,
+                    retry_result,
+                    total_start,
+                    exec_start,
+                )
+                .await;
             }
             other => other,
         };
 
-        Self::demux_stream(Arc::clone(&self.data), batch_req.keys, read_result).await
+        Self::demux_stream(
+            Arc::clone(&self.data),
+            batch_req.keys,
+            read_result,
+            total_start,
+            exec_start,
+        )
+        .await
     }
 
     /// Puts a value with the given options
@@ -968,11 +1084,7 @@ impl Client {
         };
 
         let req = self.make_put_req(session_id, options, key, value);
-        let rsp = self.process_write(req).await?;
-
-        if let Some(e) = check_put_response(&rsp) {
-            return Err(e);
-        }
+        let rsp = self.process_write(req, metrics::Operation::Put).await?;
 
         let p = rsp.puts.into_iter().next().ok_or_else(|| {
             Error::Custom("expected one PutResponse in write response but got none".to_string())
@@ -983,12 +1095,7 @@ impl Client {
     /// Deletes a key with the given options
     pub(crate) async fn delete(&self, key: &str, options: &DeleteOptions) -> Result<()> {
         let req = self.make_delete_req(options, key);
-        let rsp = self.process_write(req).await?;
-
-        if let Some(e) = check_delete_response(&rsp) {
-            return Err(e);
-        }
-
+        self.process_write(req, metrics::Operation::Delete).await?;
         Ok(())
     }
 
@@ -1000,9 +1107,8 @@ impl Client {
         options: &DeleteRangeOptions,
     ) -> impl Future<Output = Result<()>> {
         let req = self.make_delete_range_req(options, start_inclusive, end_exclusive);
-        self.process_write(req).map(|r| {
-            r.and_then(|rsp| check_delete_range_response(&rsp).map_or_else(|| Ok(()), Err))
-        })
+        self.process_write(req, metrics::Operation::DeleteRange)
+            .map(|result| result.map(|_| ()))
     }
 
     /// Lists keys in the given range with options
@@ -1102,6 +1208,66 @@ impl Client {
             .await?;
         Ok(NotificationsStream::from_proto(rsp.into_inner()))
     }
+}
+
+#[cfg(feature = "metrics")]
+fn write_metrics(request: &oxia_proto::WriteRequest, metrics_op: metrics::Operation) -> (u64, u64) {
+    match metrics_op {
+        metrics::Operation::Put => debug_assert!(
+            !request.puts.is_empty()
+                && request.deletes.is_empty()
+                && request.delete_ranges.is_empty(),
+            "expected metrics::Operation::Put"
+        ),
+        metrics::Operation::Delete => debug_assert!(
+            request.puts.is_empty()
+                && !request.deletes.is_empty()
+                && request.delete_ranges.is_empty(),
+            "expected metrics::Operation::Delete"
+        ),
+        metrics::Operation::DeleteRange => debug_assert!(
+            request.puts.is_empty()
+                && request.deletes.is_empty()
+                && !request.delete_ranges.is_empty(),
+            "expected metrics::Operation::DeleteRange"
+        ),
+        _ => debug_assert!(false, "invalid op"),
+    }
+
+    let value_size = request.puts.iter().map(|put| put.value.len() as u64).sum();
+    let request_count =
+        (request.puts.len() + request.deletes.len() + request.delete_ranges.len()) as u64;
+    (value_size, request_count)
+}
+#[cfg(not(feature = "metrics"))]
+#[inline]
+const fn write_metrics(_: &oxia_proto::WriteRequest, _: metrics::Operation) -> (u64, u64) {
+    (0, 0)
+}
+
+#[cfg(feature = "metrics")]
+fn read_metrics(
+    response: &oxia_proto::ReadResponse,
+    expected_count: usize,
+) -> (metrics::ResultKind, u64, u64) {
+    let value_size = response
+        .gets
+        .iter()
+        .map(|get| get.value.as_ref().map_or(0, bytes::Bytes::len) as u64)
+        .sum();
+    let result = if response.gets.len() == expected_count
+        && response.gets.iter().all(get_response_is_success)
+    {
+        metrics::ResultKind::Success
+    } else {
+        metrics::ResultKind::Failure
+    };
+    (result, value_size, expected_count as u64)
+}
+#[cfg(not(feature = "metrics"))]
+#[inline]
+const fn read_metrics(_: &oxia_proto::ReadResponse, _: usize) -> (metrics::ResultKind, u64, u64) {
+    (metrics::ResultKind::Success, 0, 0)
 }
 
 /// Trait for a shardfmapping strategy.
@@ -1848,6 +2014,64 @@ mod tests {
     fn make_shard_id(x: u64) -> ShardId {
         #[allow(clippy::cast_possible_wrap)]
         (x as i64).into()
+    }
+
+    #[test]
+    fn write_operation_validation_rejects_oxia_failure() {
+        let response = oxia_proto::WriteResponse {
+            puts: vec![oxia_proto::PutResponse {
+                status: 2,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        assert!(check_write_operation_response(&response, metrics::Operation::Put).is_some());
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn read_metrics_rejects_per_key_failure() {
+        let response = oxia_proto::ReadResponse {
+            gets: vec![oxia_proto::GetResponse {
+                status: 2,
+                ..Default::default()
+            }],
+        };
+
+        let (result, _, request_count) = read_metrics(&response, 1);
+        assert_eq!(result, metrics::ResultKind::Failure);
+        assert_eq!(request_count, 1);
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn read_metrics_rejects_short_response() {
+        let response = oxia_proto::ReadResponse {
+            gets: vec![oxia_proto::GetResponse {
+                status: 0,
+                ..Default::default()
+            }],
+        };
+
+        let (result, _, request_count) = read_metrics(&response, 2);
+        assert_eq!(result, metrics::ResultKind::Failure);
+        assert_eq!(request_count, 2);
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn read_metrics_accepts_key_not_found() {
+        let response = oxia_proto::ReadResponse {
+            gets: vec![oxia_proto::GetResponse {
+                status: 1,
+                ..Default::default()
+            }],
+        };
+
+        let (result, _, request_count) = read_metrics(&response, 1);
+        assert_eq!(result, metrics::ResultKind::Success);
+        assert_eq!(request_count, 1);
     }
 
     #[test]

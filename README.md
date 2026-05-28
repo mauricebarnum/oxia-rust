@@ -58,6 +58,10 @@ Downsides:
 
 Switching to a trait interface should be doable with minimal changes to both the implementation and the callers. In the "this is an experiment" nature of the current code base, it made more sense to explore the generic decision space ("impl Into<T>"? "impl AsRef<T>"? concrete param? etc.). I'm considering putting in a test that will validate at compile time that the `Client` interface remains close to object safe. I haven't done it yet because I didn't want to deal with the maintenance overhead of the test, but the API is stable enough now that it shouldn't be a problem going forward. Maybe an LLM can generate it for me without making too much of a mess.
 
+## Metrics
+
+The client records semantic latency, size, and request count measurements as OpenTelemetry histogram instruments. Callers that provide their own `MeterProvider` must install SDK views for these instruments to receive `ExponentialHistogram` data points; otherwise the SDK default aggregation may be explicit buckets. The CLI metrics setup in [cmd/src/metrics.rs](cmd/src/metrics.rs) is the canonical example of configuring those views.
+
 # TODO
 
 1. Add robustness for transient errors
