@@ -31,13 +31,14 @@ pub struct Context {
 }
 
 impl Context {
-    pub(super) fn new(cli: &crate::Cli) -> Self {
+    pub(super) fn new(cli: &crate::Cli, metrics: Option<&crate::metrics::MetricsOutput>) -> Self {
         let config = config::Config::builder()
             .service_addr(cli.service_address.clone())
             .max_parallel_requests(cli.max_parallel_requests)
             .session_timeout(cli.session_timeout)
             .request_timeout(cli.request_timeout)
             .retry_on_stale_shard_map(cli.retry_on_stale_shard_map)
+            .maybe_meter_provider(metrics.map(crate::metrics::MetricsOutput::meter_provider))
             .build();
 
         let client = Client::new(config);

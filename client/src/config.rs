@@ -20,6 +20,11 @@ use bon::Builder;
 use crate::discovery::IntoServiceDiscovery;
 use crate::discovery::ServiceDiscovery;
 
+#[cfg(feature = "metrics")]
+pub type MeterProviderHandle = Arc<dyn opentelemetry::metrics::MeterProvider + Send + Sync>;
+#[cfg(not(feature = "metrics"))]
+pub type MeterProviderHandle = ();
+
 #[derive(Clone, Copy, Debug)]
 pub struct RetryConfig {
     pub(crate) attempts: usize,
@@ -38,7 +43,7 @@ impl RetryConfig {
     }
 }
 
-#[derive(Builder, Clone, Debug)]
+#[derive(Builder, Clone)]
 #[builder(finish_fn(name = do_build, vis = ""))]
 #[builder(on(String, into))]
 #[builder(state_mod(vis = "pub"))]
@@ -57,6 +62,8 @@ pub struct Config {
     retry: Option<RetryConfig>,
     #[builder(default = false)]
     retry_on_stale_shard_map: bool,
+    #[cfg(feature = "metrics")]
+    meter_provider: Option<MeterProviderHandle>,
 }
 
 impl Config {
@@ -98,6 +105,37 @@ impl Config {
     #[inline]
     pub const fn retry_on_stale_shard_map(&self) -> bool {
         self.retry_on_stale_shard_map
+    }
+
+    #[cfg(feature = "metrics")]
+    #[inline]
+    pub const fn meter_provider(&self) -> Option<&MeterProviderHandle> {
+        self.meter_provider.as_ref()
+    }
+
+    #[cfg(not(feature = "metrics"))]
+    #[inline]
+    #[expect(clippy::unused_self)]
+    pub(crate) const fn meter_provider(&self) -> Option<&MeterProviderHandle> {
+        None
+    }
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = f.debug_struct("Config");
+        debug
+            .field("service_discovery", &"<service discovery>")
+            .field("namespace", &self.namespace)
+            .field("identity", &self.identity)
+            .field("session_timeout", &self.session_timeout)
+            .field("max_parallel_requests", &self.max_parallel_requests)
+            .field("request_timeout", &self.request_timeout)
+            .field("retry", &self.retry)
+            .field("retry_on_stale_shard_map", &self.retry_on_stale_shard_map);
+        #[cfg(feature = "metrics")]
+        debug.field("meter_provider", &self.meter_provider.is_some());
+        debug.finish()
     }
 }
 

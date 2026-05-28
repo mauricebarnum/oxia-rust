@@ -22,14 +22,17 @@ xxhash-rust = { version = "0.8.15", default-features = false, features = [
 backon = "1.6.0"
 arc-swap = "1.9"
 tokio-util = "0.7.18"
-bon = { version = "3.9.1", features = ["implied-bounds"] }
+bon = { version = "3.9.2", features = ["implied-bounds"] }
 dashmap = { version = "6", optional = true }
 fastrand = "2.4.1"
 prost = "0.14.4"
 prost-types = "0.14.4"
+opentelemetry = { version = "0.32.0", features = ["metrics"], optional = true }
 
 [features]
 bench-dashmap = ["dep:dashmap"]
+go-metrics-compat = ["metrics"]
+metrics = ["dep:opentelemetry"]
 
 [dev-dependencies]
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros"] }
@@ -42,6 +45,10 @@ tempfile = "3.27.0"
 anyhow = "1.0.102"
 itertools = "0.14.0"
 nix = { version = "0.31", default-features = false, features = ["signal"] }
+opentelemetry_sdk = { version = "0.32.1", default-features = false, features = [
+    "metrics",
+    "testing",
+] }
 
 [[bench]]
 name = "shard_lookup"
@@ -65,4 +72,5 @@ allowed_external_types = [
     "futures_core::stream::Stream",
     "bon::builder_state::IsSet",
     "bon::builder_state::IsUnset",
+    "opentelemetry::metrics::meter::MeterProvider",
 ]

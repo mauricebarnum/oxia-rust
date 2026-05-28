@@ -127,14 +127,14 @@ jobs:
           cargo fetch --locked   # fetch dependencies: last network dependency
 
       - name: build
-        run: cargo build $RELEASE_FLAG --frozen --all-targets
+        run: cargo build $RELEASE_FLAG --frozen --all-targets --features metrics
 
       - name: clippy
-        run: cargo clippy $RELEASE_FLAG --no-deps --all-targets --frozen -- -D warnings
+        run: cargo clippy $RELEASE_FLAG --no-deps --frozen --all-targets --features metrics -- -D warnings
 
       - name: test
         timeout-minutes: 15 # release builds may be slower
-        run: cargo nextest run $NEXTEST_FLAG --frozen --no-fail-fast --verbose
+        run: cargo nextest run $NEXTEST_FLAG --frozen --features metrics --no-fail-fast --verbose
 
       - name: doc-test
         if: env.CARGO_PROFILE == 'ci-test-release'
@@ -143,7 +143,7 @@ jobs:
       - name: miri-client
         run: |
           unset RUSTC_WRAPPER
-          cargo +nightly miri nextest run --package mauricebarnum-oxia-client --frozen
+          cargo +nightly miri nextest run --package mauricebarnum-oxia-client --features metrics --frozen
         env:
           MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-disable-isolation
 

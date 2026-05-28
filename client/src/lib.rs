@@ -16,7 +16,9 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Display;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Context;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -26,6 +28,7 @@ use futures::stream::StreamExt;
 use futures::stream::TryStreamExt;
 use mauricebarnum_oxia_common::proto as oxia_proto;
 use tonic::transport::Channel;
+use tracing::Instrument;
 
 use crate::notification::NotificationsStream;
 use crate::pool::ChannelPool;
@@ -35,6 +38,7 @@ pub mod batch_get;
 pub mod config;
 pub mod discovery;
 pub mod errors;
+mod metrics;
 mod notification;
 mod pool;
 mod shard;
@@ -44,6 +48,18 @@ pub use errors::*;
 pub use shard::ShardId;
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[inline]
+fn instrument_stream<S>(stream: S, span: tracing::Span) -> impl futures::Stream<Item = S::Item>
+where
+    S: futures::Stream,
+{
+    let mut stream = Box::pin(stream);
+    futures::stream::poll_fn(move |context: &mut Context<'_>| {
+        let _entered = span.enter();
+        Pin::as_mut(&mut stream).poll_next(context)
+    })
+}
 
 #[derive(Clone, Debug)]
 pub struct SecondaryIndex(oxia_proto::SecondaryIndex);
@@ -862,14 +878,17 @@ where
 pub struct Client {
     shard_manager: Option<Arc<shard::Manager>>,
     config: Arc<config::Config>,
+    metrics: metrics::Metrics,
 }
 
 impl Client {
     #[inline]
-    pub const fn new(config: Arc<config::Config>) -> Self {
+    pub fn new(config: Arc<config::Config>) -> Self {
+        let metrics = metrics::Metrics::new(config.meter_provider(), config.namespace());
         Self {
             shard_manager: None,
             config,
+            metrics,
         }
     }
 
@@ -884,11 +903,26 @@ impl Client {
     }
 
     pub async fn connect(&mut self) -> Result<()> {
-        if !self.is_connected() {
-            let sm = shard::Manager::new(&self.config).await?;
-            self.shard_manager = Some(Arc::new(sm));
+        if self.is_connected() {
+            return Ok(());
         }
-        Ok(())
+
+        let span = tracing::info_span!(
+            target: metrics::SCOPE_NAME,
+            "client.connect",
+            "db.system" = metrics::DB_SYSTEM,
+            "db.name" = self.config.namespace(),
+            "error.type" = tracing::field::Empty,
+        );
+        async {
+            let result = shard::Manager::new(&self.config).await.map(|sm| {
+                self.shard_manager = Some(Arc::new(sm));
+            });
+            metrics::record_error_type(&result);
+            result
+        }
+        .instrument(span)
+        .await
     }
 
     #[inline]
@@ -970,56 +1004,82 @@ impl Client {
         self.get_internal(Arc::from(key.into()), options)
     }
 
+    #[allow(clippy::large_futures)]
+    #[tracing::instrument(
+        target = "mauricebarnum_oxia_client",
+        name = "db.operation.get",
+        skip(self, key, options),
+        fields(
+            db.system = metrics::DB_SYSTEM,
+            db.name = %self.config.namespace(),
+            db.operation = metrics::Operation::Get.as_str(),
+            db.oxia.shard_id = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+        )
+    )]
     async fn get_internal(
         &self,
         key: Arc<str>,
         options: GetOptions,
     ) -> Result<Option<GetResponse>> {
-        // Define the core operation with retry/timeout wrapper
-        let execute_get = |shard: shard::Client, key: Arc<str>, options: GetOptions| async move {
-            execute_with_retry(&self.config, self.shard_manager.as_ref(), move || {
-                let shard = shard.clone();
-                let key = Arc::clone(&key);
-                let options = options.clone();
-                async move { shard.get(&key, &options).await }
-            })
-            .await
-        };
+        let start = metrics::operation_start();
+        let result = async {
+            // Define the core operation with retry/timeout wrapper
+            let execute_get =
+                |shard: shard::Client, key: Arc<str>, options: GetOptions| async move {
+                    execute_with_retry(&self.config, self.shard_manager.as_ref(), move || {
+                        let shard = shard.clone();
+                        let key = Arc::clone(&key);
+                        let options = options.clone();
+                        async move { shard.get(&key, &options).await }
+                    })
+                    .await
+                };
 
-        // Single shard case: exact match with partition key OR exact match without secondary index
-        let use_single_shard = options.partition_key.is_some()
-            || (options.comparison_type == KeyComparisonType::Equal
-                && options.secondary_index_name.is_none());
+            // Single shard case: exact match with partition key OR exact match without secondary index
+            let use_single_shard = options.partition_key.is_some()
+                || (options.comparison_type == KeyComparisonType::Equal
+                    && options.secondary_index_name.is_none());
 
-        if use_single_shard {
-            let selector = options.partition_key.as_deref().unwrap_or(&key);
-            let shard = self.get_shard(selector)?;
-            return execute_get(shard, key, options).await;
-        }
+            if use_single_shard {
+                let selector = options.partition_key.as_deref().unwrap_or(&key);
+                let shard = self.get_shard(selector)?;
+                tracing::Span::current().record("db.oxia.shard_id", i64::from(shard.id()));
+                return execute_get(shard, key, options).await;
+            }
 
-        // Multi-shard case: query all shards and select the best response
-        let max_parallel = match self.config.max_parallel_requests() {
-            0 => usize::MAX,
-            n => n,
-        };
+            // Multi-shard case: query all shards and select the best response
+            let max_parallel = match self.config.max_parallel_requests() {
+                0 => usize::MAX,
+                n => n,
+            };
 
-        let best_response = futures::stream::iter(self.get_shard_manager()?.get_shard_clients())
-            .map(|shard| execute_get(shard, Arc::clone(&key), options.clone()))
-            .buffer_unordered(max_parallel)
-            .try_fold(None, |best, response| async {
-                Ok(match response {
-                    Some(candidate) => Some(match best {
-                        None => candidate,
-                        Some(prev) => {
-                            util::select_response(Some(prev), candidate, options.comparison_type)
-                        }
-                    }),
-                    None => best,
+            futures::stream::iter(self.get_shard_manager()?.get_shard_clients())
+                .map(|shard| execute_get(shard, Arc::clone(&key), options.clone()))
+                .buffer_unordered(max_parallel)
+                .try_fold(None, |best, response| async {
+                    Ok(match response {
+                        Some(candidate) => Some(match best {
+                            None => candidate,
+                            Some(prev) => {
+                                util::select_response(Some(prev), candidate, options.comparison_type)
+                            }
+                        }),
+                        None => best,
+                    })
                 })
-            })
-            .await?;
-
-        Ok(best_response)
+                .await
+        }
+        .await;
+        metrics::record_operation_result_with_size(
+            &self.metrics,
+            metrics::Operation::Get,
+            metrics::get_result_kind,
+            metrics::get_response_size,
+            start,
+            &result,
+        );
+        result
     }
 
     /// `batch_get` request multiple keys, minimizing requests to the backend
@@ -1035,52 +1095,68 @@ impl Client {
         use futures::future::Either::Left;
         use futures::future::Either::Right;
 
-        let shard_manager = self.get_shard_manager()?;
-        let (batch_get_futures, failures) = batch_get::prepare_requests(req, &shard_manager);
+        let span = tracing::info_span!(
+            target: metrics::SCOPE_NAME,
+            "db.operation.batch_get",
+            "db.system" = metrics::DB_SYSTEM,
+            "db.name" = self.config.namespace(),
+            "db.operation" = metrics::Operation::BatchGet.as_str(),
+            "error.type" = tracing::field::Empty,
+        );
+        let (start, final_stream) = {
+            let span: &tracing::Span = &span;
+            span.in_scope(|| {
+                let start = metrics::operation_start();
+                let shard_manager = match self.get_shard_manager() {
+                    Ok(manager) => manager,
+                    Err(error) => {
+                        let result = Err(error);
+                        metrics::record_operation_result(
+                            &self.metrics,
+                            metrics::Operation::BatchGet,
+                            metrics::result_kind,
+                            start,
+                            &result,
+                        );
+                        return result;
+                    }
+                };
+                let (batch_get_futures, failures) =
+                    batch_get::prepare_requests(req, &shard_manager);
 
-        // Send the request to all of the shards in parallel.  This will block until the initial
-        // backend calls return either a stream or an error.  A remote error will be demuxed into
-        // per-key errors, see shard::Client::batch_get()
-        let batch_get_stream = if batch_get_futures.is_empty() {
-            None
-        } else {
-            Some(
-                futures::stream::iter(batch_get_futures)
-                    .buffer_unordered(self.config.max_parallel_requests())
-                    .flatten_unordered(None)
-                    .boxed(),
-            )
-        };
+                let batch_get_stream = if batch_get_futures.is_empty() {
+                    None
+                } else {
+                    Some(
+                        futures::stream::iter(batch_get_futures)
+                            .buffer_unordered(self.config.max_parallel_requests())
+                            .flatten_unordered(None)
+                            .boxed(),
+                    )
+                };
 
-        let failures_stream = if failures.is_empty() {
-            None
-        } else {
-            Some(futures::stream::iter(failures))
-        };
+                let failures_stream = if failures.is_empty() {
+                    None
+                } else {
+                    Some(futures::stream::iter(failures))
+                };
 
-        // Finally, return a stream that will collect results from each shard as they become
-        // available.  Per-shard ordering is defined by the Oxia server (as of this writing,
-        // they should be in the same order).  The ordering of responses between shards and the early failures
-        // already collected is unspecified.
-        //
-        // All of this syntatic mess lets us return precisely the stream we need without boxing it.
-        // The only overhead is reading it, which hopefully will be done just this once.
+                let final_stream = match (batch_get_stream, failures_stream) {
+                    (Some(b), None) => Left(b),
+                    (Some(b), Some(f)) => Right(Left(Left(futures::stream::select(b, f)))),
+                    (None, Some(f)) => Right(Left(Right(f))),
+                    (None, None) => Right(Right(futures::stream::empty())),
+                };
+                Ok((start, final_stream))
+            })
+        }?;
+        let final_stream = instrument_stream(final_stream, span);
 
-        let final_stream = match (batch_get_stream, failures_stream) {
-            // Requests, no early failures
-            (Some(b), None) => Left(b),
-
-            // Requests and early failures
-            (Some(b), Some(f)) => Right(Left(Left(futures::stream::select(b, f)))),
-
-            // All failures
-            (None, Some(f)) => Right(Left(Right(f))),
-
-            // Empty requests? Should be rare
-            (None, None) => Right(Right(futures::stream::empty())),
-        };
-
-        Ok(final_stream)
+        Ok(metrics::record_batch_get_stream(
+            self.metrics.clone(),
+            start,
+            final_stream,
+        ))
     }
 
     #[inline]
@@ -1102,22 +1178,50 @@ impl Client {
         self.put_internal(Arc::from(key.into()), value.into(), options)
     }
 
+    #[allow(clippy::large_futures)]
+    #[tracing::instrument(
+        target = "mauricebarnum_oxia_client",
+        name = "db.operation.put",
+        skip(self, key, value, options),
+        fields(
+            db.system = metrics::DB_SYSTEM,
+            db.name = %self.config.namespace(),
+            db.operation = metrics::Operation::Put.as_str(),
+            db.oxia.shard_id = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+        )
+    )]
     async fn put_internal(
         &self,
         key: Arc<str>,
         value: Bytes,
         options: PutOptions,
     ) -> Result<PutResponse> {
-        let selector = options.partition_key.as_deref().unwrap_or(&key);
-        let shard = self.get_shard(selector)?;
-        execute_with_retry(&self.config, self.shard_manager.as_ref(), move || {
-            let shard = shard.clone();
-            let key = Arc::clone(&key);
-            let value = value.clone();
-            let options = options.clone();
-            async move { shard.put(&key, value, &options).await }
-        })
-        .await
+        let value_size = value.len() as u64;
+        let start = metrics::operation_start();
+        let result = async {
+            let selector = options.partition_key.as_deref().unwrap_or(&key);
+            let shard = self.get_shard(selector)?;
+            tracing::Span::current().record("db.oxia.shard_id", i64::from(shard.id()));
+            execute_with_retry(&self.config, self.shard_manager.as_ref(), move || {
+                let shard = shard.clone();
+                let key = Arc::clone(&key);
+                let value = value.clone();
+                let options = options.clone();
+                async move { shard.put(&key, value, &options).await }
+            })
+            .await
+        }
+        .await;
+        metrics::record_operation_result_with_size(
+            &self.metrics,
+            metrics::Operation::Put,
+            metrics::result_kind,
+            |_| value_size,
+            start,
+            &result,
+        );
+        result
     }
 
     #[inline]
@@ -1134,16 +1238,42 @@ impl Client {
         self.delete_internal(Arc::from(key.into()), options)
     }
 
+    #[allow(clippy::large_futures)]
+    #[tracing::instrument(
+        target = "mauricebarnum_oxia_client",
+        name = "db.operation.delete",
+        skip(self, key, options),
+        fields(
+            db.system = metrics::DB_SYSTEM,
+            db.name = %self.config.namespace(),
+            db.operation = metrics::Operation::Delete.as_str(),
+            db.oxia.shard_id = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+        )
+    )]
     async fn delete_internal(&self, key: Arc<str>, options: DeleteOptions) -> Result<()> {
-        let selector = options.partition_key.as_deref().unwrap_or(&key);
-        let shard = self.get_shard(selector)?;
-        execute_with_retry(&self.config, self.shard_manager.as_ref(), move || {
-            let shard = shard.clone();
-            let key = Arc::clone(&key);
-            let options = options.clone();
-            async move { shard.delete(&key, &options).await }
-        })
-        .await
+        let start = metrics::operation_start();
+        let result = async {
+            let selector = options.partition_key.as_deref().unwrap_or(&key);
+            let shard = self.get_shard(selector)?;
+            tracing::Span::current().record("db.oxia.shard_id", i64::from(shard.id()));
+            execute_with_retry(&self.config, self.shard_manager.as_ref(), move || {
+                let shard = shard.clone();
+                let key = Arc::clone(&key);
+                let options = options.clone();
+                async move { shard.delete(&key, &options).await }
+            })
+            .await
+        }
+        .await;
+        metrics::record_operation_result(
+            &self.metrics,
+            metrics::Operation::Delete,
+            metrics::result_kind,
+            start,
+            &result,
+        );
+        result
     }
 
     #[inline]
@@ -1173,69 +1303,95 @@ impl Client {
         )
     }
 
+    #[allow(clippy::large_futures)]
+    #[tracing::instrument(
+        target = "mauricebarnum_oxia_client",
+        name = "db.operation.delete_range",
+        skip(self, start_inclusive, end_exclusive, options),
+        fields(
+            db.system = metrics::DB_SYSTEM,
+            db.name = %self.config.namespace(),
+            db.operation = metrics::Operation::DeleteRange.as_str(),
+            db.oxia.shard_id = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+        )
+    )]
     async fn delete_range_internal(
         &self,
         start_inclusive: Arc<str>,
         end_exclusive: Arc<str>,
         options: DeleteRangeOptions,
     ) -> Result<()> {
-        let do_delete_range = |shard: shard::Client,
-                               start: Arc<str>,
-                               end: Arc<str>,
-                               options: DeleteRangeOptions| async move {
-            execute_with_retry(&self.config, self.shard_manager.as_ref(), move || {
-                let shard = shard.clone();
-                let start = Arc::clone(&start);
-                let end = Arc::clone(&end);
-                let options = options.clone();
-                async move { shard.delete_range(&start, &end, &options).await }
-            })
-            .await
-        };
-
-        if let Some(shard) = {
-            if let Some(pk) = options.partition_key.as_deref() {
-                Some(self.get_shard(pk)?)
-            } else if let Some(id) = options.shard {
-                Some(self.get_shard_by_id(id.into())?)
-            } else {
-                None
-            }
-        } {
-            return do_delete_range(shard, start_inclusive, end_exclusive, options).await;
-        }
-
-        let n = match self.config.max_parallel_requests() {
-            0 => usize::MAX,
-            n => n,
-        };
-
-        let mut result_stream =
-            futures::stream::iter(self.get_shard_manager()?.get_shard_clients())
-                .map(|shard| {
-                    do_delete_range(
-                        shard,
-                        Arc::clone(&start_inclusive),
-                        Arc::clone(&end_exclusive),
-                        options.clone(),
-                    )
+        let start = metrics::operation_start();
+        let result = async {
+            let do_delete_range = |shard: shard::Client,
+                                   start: Arc<str>,
+                                   end: Arc<str>,
+                                   options: DeleteRangeOptions| async move {
+                execute_with_retry(&self.config, self.shard_manager.as_ref(), move || {
+                    let shard = shard.clone();
+                    let start = Arc::clone(&start);
+                    let end = Arc::clone(&end);
+                    let options = options.clone();
+                    async move { shard.delete_range(&start, &end, &options).await }
                 })
-                .buffer_unordered(n);
+                .await
+            };
 
-        let mut errs = Vec::new();
-        while let Some(shard_result) = result_stream.next().await {
-            match shard_result {
-                Err(Error::ShardError(e)) => errs.push(e),
-                Err(_) => return shard_result,
-                Ok(()) => (),
+            if let Some(shard) = {
+                if let Some(pk) = options.partition_key.as_deref() {
+                    Some(self.get_shard(pk)?)
+                } else if let Some(id) = options.shard {
+                    Some(self.get_shard_by_id(id.into())?)
+                } else {
+                    None
+                }
+            } {
+                tracing::Span::current().record("db.oxia.shard_id", i64::from(shard.id()));
+                return do_delete_range(shard, start_inclusive, end_exclusive, options).await;
             }
-        }
 
-        if !errs.is_empty() {
-            return Err(Error::MultipleShardError(errs.into()));
-        }
+            let n = match self.config.max_parallel_requests() {
+                0 => usize::MAX,
+                n => n,
+            };
 
-        Ok(())
+            let mut result_stream =
+                futures::stream::iter(self.get_shard_manager()?.get_shard_clients())
+                    .map(|shard| {
+                        do_delete_range(
+                            shard,
+                            Arc::clone(&start_inclusive),
+                            Arc::clone(&end_exclusive),
+                            options.clone(),
+                        )
+                    })
+                    .buffer_unordered(n);
+
+            let mut errs = Vec::new();
+            while let Some(shard_result) = result_stream.next().await {
+                match shard_result {
+                    Err(Error::ShardError(e)) => errs.push(e),
+                    Err(_) => return shard_result,
+                    Ok(()) => (),
+                }
+            }
+
+            if !errs.is_empty() {
+                return Err(Error::MultipleShardError(errs.into()));
+            }
+
+            Ok(())
+        }
+        .await;
+        metrics::record_operation_result(
+            &self.metrics,
+            metrics::Operation::DeleteRange,
+            metrics::result_kind,
+            start,
+            &result,
+        );
+        result
     }
 
     #[inline]
@@ -1261,64 +1417,90 @@ impl Client {
         )
     }
 
+    #[allow(clippy::large_futures)]
+    #[tracing::instrument(
+        target = "mauricebarnum_oxia_client",
+        name = "db.operation.list",
+        skip(self, start_inclusive, end_exclusive, options),
+        fields(
+            db.system = metrics::DB_SYSTEM,
+            db.name = %self.config.namespace(),
+            db.operation = metrics::Operation::List.as_str(),
+            db.oxia.shard_id = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+        )
+    )]
     async fn list_internal(
         &self,
         start_inclusive: Arc<str>,
         end_exclusive: Arc<str>,
         options: ListOptions,
     ) -> Result<ListResponse> {
-        let do_list = |shard: shard::Client,
-                       start: Arc<str>,
-                       end: Arc<str>,
-                       options: ListOptions| async move {
-            execute_with_retry(&self.config, self.shard_manager.as_ref(), move || {
-                let shard = shard.clone();
-                let start = Arc::clone(&start);
-                let end = Arc::clone(&end);
-                let options = options.clone();
-                async move { shard.list(&start, &end, &options).await }
-            })
-            .await
-        };
-
-        if let Some(pk) = options.partition_key.as_deref() {
-            let shard = self.get_shard(pk)?;
-            return do_list(shard, start_inclusive, end_exclusive, options).await;
-        }
-
-        let n = match self.config.max_parallel_requests() {
-            0 => usize::MAX,
-            n => n,
-        };
-
-        let mut result_stream =
-            futures::stream::iter(self.get_shard_manager()?.get_shard_clients())
-                .map(|shard| {
-                    do_list(
-                        shard,
-                        Arc::clone(&start_inclusive),
-                        Arc::clone(&end_exclusive),
-                        options.clone(),
-                    )
+        let start = metrics::operation_start();
+        let result = async {
+            let do_list = |shard: shard::Client,
+                           start: Arc<str>,
+                           end: Arc<str>,
+                           options: ListOptions| async move {
+                execute_with_retry(&self.config, self.shard_manager.as_ref(), move || {
+                    let shard = shard.clone();
+                    let start = Arc::clone(&start);
+                    let end = Arc::clone(&end);
+                    let options = options.clone();
+                    async move { shard.list(&start, &end, &options).await }
                 })
-                .buffer_unordered(n);
+                .await
+            };
 
-        let mut response = ListResponse::default();
-        while let Some(shard_result) = result_stream.next().await {
-            if let Ok(shard_response) = shard_result {
-                response.merge(shard_response);
-            } else if options.partial_ok {
-                response.partial = true;
-            } else {
-                return shard_result;
+            if let Some(pk) = options.partition_key.as_deref() {
+                let shard = self.get_shard(pk)?;
+                tracing::Span::current().record("db.oxia.shard_id", i64::from(shard.id()));
+                return do_list(shard, start_inclusive, end_exclusive, options).await;
             }
-        }
 
-        if options.sort {
-            response.sort();
-        }
+            let n = match self.config.max_parallel_requests() {
+                0 => usize::MAX,
+                n => n,
+            };
 
-        Ok(response)
+            let mut result_stream =
+                futures::stream::iter(self.get_shard_manager()?.get_shard_clients())
+                    .map(|shard| {
+                        do_list(
+                            shard,
+                            Arc::clone(&start_inclusive),
+                            Arc::clone(&end_exclusive),
+                            options.clone(),
+                        )
+                    })
+                    .buffer_unordered(n);
+
+            let mut response = ListResponse::default();
+            while let Some(shard_result) = result_stream.next().await {
+                if let Ok(shard_response) = shard_result {
+                    response.merge(shard_response);
+                } else if options.partial_ok {
+                    response.partial = true;
+                } else {
+                    return shard_result;
+                }
+            }
+
+            if options.sort {
+                response.sort();
+            }
+
+            Ok(response)
+        }
+        .await;
+        metrics::record_operation_result(
+            &self.metrics,
+            metrics::Operation::List,
+            metrics::result_kind,
+            start,
+            &result,
+        );
+        result
     }
 
     #[inline]
@@ -1344,64 +1526,91 @@ impl Client {
         )
     }
 
+    #[allow(clippy::large_futures)]
+    #[tracing::instrument(
+        target = "mauricebarnum_oxia_client",
+        name = "db.operation.range_scan",
+        skip(self, start_inclusive, end_exclusive, options),
+        fields(
+            db.system = metrics::DB_SYSTEM,
+            db.name = %self.config.namespace(),
+            db.operation = metrics::Operation::RangeScan.as_str(),
+            db.oxia.shard_id = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+        )
+    )]
     async fn range_scan_internal(
         &self,
         start_inclusive: Arc<str>,
         end_exclusive: Arc<str>,
         options: RangeScanOptions,
     ) -> Result<RangeScanResponse> {
-        let do_range_scan = |shard: shard::Client,
-                             start: Arc<str>,
-                             end: Arc<str>,
-                             options: RangeScanOptions| async move {
-            execute_with_retry(&self.config, self.shard_manager.as_ref(), move || {
-                let shard = shard.clone();
-                let start = Arc::clone(&start);
-                let end = Arc::clone(&end);
-                let options = options.clone();
-                async move { shard.range_scan(&start, &end, &options).await }
-            })
-            .await
-        };
-
-        if let Some(pk) = options.partition_key.as_deref() {
-            let shard = self.get_shard(pk)?;
-            return do_range_scan(shard, start_inclusive, end_exclusive, options).await;
-        }
-
-        let n = match self.config.max_parallel_requests() {
-            0 => usize::MAX,
-            n => n,
-        };
-
-        let mut result_stream =
-            futures::stream::iter(self.get_shard_manager()?.get_shard_clients())
-                .map(|shard| {
-                    do_range_scan(
-                        shard,
-                        Arc::clone(&start_inclusive),
-                        Arc::clone(&end_exclusive),
-                        options.clone(),
-                    )
+        let start = metrics::operation_start();
+        let result = async {
+            let do_range_scan = |shard: shard::Client,
+                                 start: Arc<str>,
+                                 end: Arc<str>,
+                                 options: RangeScanOptions| async move {
+                execute_with_retry(&self.config, self.shard_manager.as_ref(), move || {
+                    let shard = shard.clone();
+                    let start = Arc::clone(&start);
+                    let end = Arc::clone(&end);
+                    let options = options.clone();
+                    async move { shard.range_scan(&start, &end, &options).await }
                 })
-                .buffer_unordered(n);
+                .await
+            };
 
-        let mut response = RangeScanResponse::default();
-        while let Some(shard_result) = result_stream.next().await {
-            if let Ok(shard_response) = shard_result {
-                response.merge(shard_response);
-            } else if options.partial_ok {
-                response.partial = true;
-            } else {
-                return shard_result;
+            if let Some(pk) = options.partition_key.as_deref() {
+                let shard = self.get_shard(pk)?;
+                tracing::Span::current().record("db.oxia.shard_id", i64::from(shard.id()));
+                return do_range_scan(shard, start_inclusive, end_exclusive, options).await;
             }
-        }
 
-        if options.sort {
-            response.sort();
-        }
+            let n = match self.config.max_parallel_requests() {
+                0 => usize::MAX,
+                n => n,
+            };
 
-        Ok(response)
+            let mut result_stream =
+                futures::stream::iter(self.get_shard_manager()?.get_shard_clients())
+                    .map(|shard| {
+                        do_range_scan(
+                            shard,
+                            Arc::clone(&start_inclusive),
+                            Arc::clone(&end_exclusive),
+                            options.clone(),
+                        )
+                    })
+                    .buffer_unordered(n);
+
+            let mut response = RangeScanResponse::default();
+            while let Some(shard_result) = result_stream.next().await {
+                if let Ok(shard_response) = shard_result {
+                    response.merge(shard_response);
+                } else if options.partial_ok {
+                    response.partial = true;
+                } else {
+                    return shard_result;
+                }
+            }
+
+            if options.sort {
+                response.sort();
+            }
+
+            Ok(response)
+        }
+        .await;
+        metrics::record_operation_result_with_size(
+            &self.metrics,
+            metrics::Operation::RangeScan,
+            metrics::result_kind,
+            metrics::range_scan_response_size,
+            start,
+            &result,
+        );
+        result
     }
 
     /// Create a notifications stream with default options.
