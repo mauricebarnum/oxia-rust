@@ -4,6 +4,10 @@ version = "0.1.0"
 edition.workspace = true
 license = "Apache-2.0"
 
+[features]
+default = ["otlp-json-compat"]
+otlp-json-compat = []
+
 [[bin]]
 name = "oxia-cmd"
 path = "src/main.rs"
@@ -18,8 +22,20 @@ clap_complete = "4.6.5"
 futures = "0.3.32"
 hex = "0.4.3"
 humantime = "2.3.0"
-mauricebarnum-oxia-client = { path = "../client" }
+mauricebarnum-oxia-client = { path = "../client", features = ["metrics"] }
 num_cpus = "1.17.0"
+opentelemetry = { version = "0.27.0", default-features = false }
+opentelemetry_sdk = { version = "0.27.0", default-features = false, features = [
+    "metrics",
+    "spec_unstable_metrics_views",
+] }
+opentelemetry-proto = { version = "0.27.0", default-features = false, features = [
+    "gen-tonic-messages",
+    "metrics",
+    "with-serde",
+] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
 rustyline = "18.0.0"
 shlex = "2.0.1"
 thiserror = "2.0.18"

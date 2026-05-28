@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::Parser;
+use clap::ValueEnum;
 use mauricebarnum_oxia_client as client_lib;
 
 mod commands;
@@ -26,6 +28,9 @@ use context::Context;
 
 mod log;
 use log::LogArgs;
+
+mod metrics;
+use metrics::MetricsOutput;
 
 mod utils;
 
@@ -52,6 +57,28 @@ pub struct Cli {
 
     #[arg(long, default_value_t = false)]
     retry_on_stale_shard_map: bool,
+
+    #[arg(
+        long,
+        value_enum,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "text",
+        help = "Export collected metrics",
+        long_help = "Export collected metrics. Machine-readable output should use a dedicated file.\n\nFormats:\n  text       Human-readable diagnostic output\n  om2        Experimental OpenMetrics 2.0 text format\n  otlp-json  Canonical OTLP/JSON ExportMetricsServiceRequest"
+    )]
+    metrics: Option<MetricsFormat>,
+
+    /// Metrics destination: stderr by default, stdout for '-', or a file path.
+    #[arg(long, requires = "metrics")]
+    metrics_output: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum MetricsFormat {
+    Text,
+    OtlpJson,
+    Om2,
 }
 
 #[tokio::main]
@@ -59,6 +86,73 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     cli.log.setup("off")?;
 
-    let ctx = Context::new(&cli);
-    cli.command.run(ctx).await
+    let metrics = cli
+        .metrics
+        .map(|format| MetricsOutput::new(format, cli.metrics_output.as_deref()))
+        .transpose()?;
+    let ctx = Context::new(&cli, metrics.as_ref());
+    let result = cli.command.run(ctx).await;
+
+    let export_result = if let Some(metrics) = metrics {
+        metrics.export()
+    } else {
+        Ok(())
+    };
+
+    match (result, export_result) {
+        (Ok(()), export) => export,
+        (Err(command_error), Ok(())) => Err(command_error),
+        (Err(command_error), Err(export_error)) => {
+            eprintln!("failed to export metrics: {export_error:#}");
+            Err(command_error)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory as _;
+    use clap::Parser as _;
+
+    use super::*;
+
+    #[test]
+    fn parses_metrics_formats() {
+        for (argument, expected) in [
+            ("--metrics", MetricsFormat::Text),
+            ("--metrics=text", MetricsFormat::Text),
+            ("--metrics=otlp-json", MetricsFormat::OtlpJson),
+            ("--metrics=om2", MetricsFormat::Om2),
+        ] {
+            let cli = Cli::try_parse_from(["oxia-cmd", argument, "get", "key"])
+                .expect("valid metrics argument");
+            assert_eq!(cli.metrics, Some(expected));
+        }
+    }
+
+    #[test]
+    fn metrics_help_describes_formats() {
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("text       Human-readable diagnostic output"));
+        assert!(help.contains("om2        Experimental OpenMetrics 2.0 text format"));
+        assert!(help.contains("otlp-json  Canonical OTLP/JSON ExportMetricsServiceRequest"));
+    }
+
+    #[test]
+    fn metrics_value_requires_equals() {
+        let cli = Cli::try_parse_from(["oxia-cmd", "--metrics", "get", "key"])
+            .expect("subcommand is not consumed as a metrics format");
+        assert_eq!(cli.metrics, Some(MetricsFormat::Text));
+    }
+
+    #[test]
+    fn rejects_invalid_metrics_format() {
+        assert!(Cli::try_parse_from(["oxia-cmd", "--metrics=yaml", "get", "key"]).is_err());
+        assert!(Cli::try_parse_from(["oxia-cmd", "--metrics=json", "get", "key"]).is_err());
+    }
+
+    #[test]
+    fn metrics_output_requires_metrics() {
+        assert!(Cli::try_parse_from(["oxia-cmd", "--metrics-output", "-", "get", "key"]).is_err());
+    }
 }
