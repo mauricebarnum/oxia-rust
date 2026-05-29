@@ -170,9 +170,9 @@ This document provides a detailed design and implementation specification for ad
   - **Rejected Alternative:** Directly use the `opentelemetry::trace::Tracer` API in-crate.
   - **Reason for Rejection:** Direct OTel trace API makes logs harder to correlate and diverges from the existing `tracing` macros already used in the codebase.
 - **Decision 2: Latency metrics implementation**
-  - **Selected Approach:** Use OTel `Histogram` for operation latencies.
-  - **Rejected Alternative:** Translate Go's dual-counter Timer approach literally (making a count counter and a latency sum counter).
-  - **Reason for Rejection:** A dual-counter Timer is not idiomatic in modern OpenTelemetry and is rejected by the OTel API in favor of histograms, which natively provide percentiles, counts, and sums.
+  - **Selected Approach (default / OTel mode):** Use OTel `Histogram` for operation latencies. A histogram provides percentiles, count, and sum natively without duplicating instruments.
+  - **Selected Approach (`go-metrics-compat` mode):** Register a `Float64Counter` (`_sum`) and an `Int64Counter` (`_count`) as separate instruments to exactly replicate the Go wire format. This is intentional: dashboards built against the Go client expect two distinct series.
+  - **Rejected Alternative for default mode:** Translate Go's dual-counter Timer approach literally. Rejected because it is not idiomatic in modern OpenTelemetry.
 
 ---
 
@@ -270,48 +270,58 @@ This document provides a detailed design and implementation specification for ad
 
 ### 8.3 Metric Naming Feature Flag: `go-metrics-compat`
 
-- **Proposed:** Add a second Cargo feature, `go-metrics-compat`, that selects the Go reference client's legacy metric name strings at **compile time** rather than at runtime.
-- **Rationale:** The two naming schemes (`db.client.operation.duration` vs `oxia_client_op`) differ only in the string constants used at histogram/counter creation. Selecting between them with `#[cfg(feature = "go-metrics-compat")]` eliminates all branching and string comparisons at runtime — the unused name is never materialized in the binary. This satisfies the requirement of zero runtime overhead.
-- **Feature independence:** `go-metrics-compat` is orthogonal to `telemetry`. Enabling `go-metrics-compat` without `telemetry` is meaningless and the implementation should emit a `compile_error!` or at minimum a `#[cfg(all(feature = "go-metrics-compat", not(feature = "telemetry")))]` warning.
+- **Resolved:** Add a second Cargo feature, `go-metrics-compat`, that selects the Go reference client's legacy metric name strings **and instrument types** at **compile time** rather than at runtime.
+- **Rationale:** The two naming schemes (`db.client.operation.duration` vs `oxia_client_op`) differ in both string constants and instrument shape. Selecting between them with `#[cfg(feature = "go-metrics-compat")]` eliminates all branching at runtime — the unused variant is never materialized in the binary. This satisfies the requirement of zero runtime overhead.
+- **Resolved:** `go-metrics-compat` implies `telemetry` in the Cargo feature graph. This prevents silent no-ops and makes the dependency relationship explicit.
+- **Resolved:** `go-metrics-compat` mode registers **two separate instruments** per timer concept (a `Float64Counter` for `_sum` and an `Int64Counter` for `_count`) to exactly replicate Go wire format. Default (OTel) mode uses a single `Histogram`.
 - **Proposed:** The Cargo feature declaration:
 
   ```toml
   # client/Cargo.toml  (illustrative — not yet implemented)
   [features]
-  telemetry        = ["dep:opentelemetry"]
-  go-metrics-compat = ["telemetry"]   # implies telemetry; names only change when metrics are active
+  telemetry         = ["dep:opentelemetry"]
+  go-metrics-compat = ["telemetry"]   # implies telemetry
   ```
 
-  Declaring `go-metrics-compat` as implying `telemetry` is the cleanest approach: it prevents silent no-ops and makes the dependency relationship explicit in the feature graph.
-
-- **Proposed:** Inside `client/src/telemetry.rs`, define the metric name strings as compile-time constants selected by the feature flag:
+- **Proposed:** Inside `client/src/telemetry.rs`, the instrument types and name strings are both selected by the feature flag:
 
   ```rust
   // Illustrative — not yet implemented
+
+  // ── Default (OTel) mode ──────────────────────────────────────────────────
   #[cfg(not(feature = "go-metrics-compat"))]
   mod names {
-      pub const OP_DURATION:        &str = "db.client.operation.duration";
-      pub const OP_SIZE:            &str = "db.client.operation.size";     // proposed OTel extension
-      pub const BATCH_TOTAL:        &str = "db.client.batch.duration";
-      pub const BATCH_EXEC:         &str = "db.client.batch.exec_duration";
-      pub const BATCH_SIZE:         &str = "db.client.batch.size";
-      pub const BATCH_REQUEST_COUNT:&str = "db.client.batch.request_count";
+      pub const OP_DURATION:         &str = "db.client.operation.duration";
+      pub const OP_SIZE:             &str = "db.client.operation.size";  // proposed OTel extension
+      pub const BATCH_TOTAL:         &str = "db.client.batch.duration";
+      pub const BATCH_EXEC:          &str = "db.client.batch.exec_duration";
+      pub const BATCH_SIZE:          &str = "db.client.batch.size";
+      pub const BATCH_REQUEST_COUNT: &str = "db.client.batch.request_count";
   }
 
+  // ── go-metrics-compat mode ───────────────────────────────────────────────
+  // Timer concepts split into _sum (Float64Counter) + _count (Int64Counter)
+  // matching the Go client's wire format exactly.
   #[cfg(feature = "go-metrics-compat")]
   mod names {
-      pub const OP_DURATION:        &str = "oxia_client_op_sum";          // Go: sum counter
-      pub const OP_SIZE:            &str = "oxia_client_op_value";
-      pub const BATCH_TOTAL:        &str = "oxia_client_batch_total_sum";
-      pub const BATCH_EXEC:         &str = "oxia_client_batch_exec_sum";
-      pub const BATCH_SIZE:         &str = "oxia_client_batch_value";
-      pub const BATCH_REQUEST_COUNT:&str = "oxia_client_batch_request";
+      // sum counters
+      pub const OP_DURATION_SUM:         &str = "oxia_client_op_sum";
+      pub const BATCH_TOTAL_SUM:         &str = "oxia_client_batch_total_sum";
+      pub const BATCH_EXEC_SUM:          &str = "oxia_client_batch_exec_sum";
+      // count counters
+      pub const OP_DURATION_COUNT:       &str = "oxia_client_op_count";
+      pub const BATCH_TOTAL_COUNT:       &str = "oxia_client_batch_total_count";
+      pub const BATCH_EXEC_COUNT:        &str = "oxia_client_batch_exec_count";
+      // histograms (same in both modes)
+      pub const OP_SIZE:                 &str = "oxia_client_op_value";
+      pub const BATCH_SIZE:              &str = "oxia_client_batch_value";
+      pub const BATCH_REQUEST_COUNT:     &str = "oxia_client_batch_request";
   }
   ```
 
-  All histogram registrations reference `names::OP_DURATION`, etc., so no further code changes are needed when toggling the feature.
+  In default mode, all registrations use `Histogram`. In `go-metrics-compat` mode, timer-concept registrations create one `Float64Counter` (sum) and one `Int64Counter` (count); size/request-count concepts remain `Histogram`.
 
-- **Data migration:** Explicitly out of scope. Users switching between the two feature sets will see a gap or duplicate metric series in their observability backend. Documentation should note this; no migration tooling is provided by this library.
+- **Data migration:** Explicitly out of scope. Users switching feature sets will see a gap or duplicate series in their observability backend. The library documentation should note this.
 
 ---
 
@@ -330,17 +340,20 @@ This document provides a detailed design and implementation specification for ad
 
 The table below is the authoritative mapping between the two naming regimes. The **`go-metrics-compat` name** column lists the exact string constants the Go reference client records metrics under; see Section 2.2 for observation source references.
 
-| Concept                  | Default (OTel v1.41.0) name                       | `go-metrics-compat` name                      | Notes                                                             |
-| ------------------------ | ------------------------------------------------- | --------------------------------------------- | ----------------------------------------------------------------- |
-| Operation latency        | `db.client.operation.duration`                    | `oxia_client_op_sum` / `oxia_client_op_count` | Go uses dual counters; Rust uses a single Histogram in both modes |
-| Operation payload size   | `db.client.operation.size` _(proposed extension)_ | `oxia_client_op_value`                        | —                                                                 |
-| Batch total duration     | `db.client.batch.duration`                        | `oxia_client_batch_total_sum`                 | —                                                                 |
-| Batch execution duration | `db.client.batch.exec_duration`                   | `oxia_client_batch_exec_sum`                  | —                                                                 |
-| Batch payload size       | `db.client.batch.size`                            | `oxia_client_batch_value`                     | —                                                                 |
-| Batch request count      | `db.client.batch.request_count`                   | `oxia_client_batch_request`                   | —                                                                 |
+| Concept                           | Default (OTel v1.41.0) name                       | `go-metrics-compat` instrument(s)                                            | Notes                                                                          |
+| --------------------------------- | ------------------------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| Operation latency (sum)           | `db.client.operation.duration` (Histogram)        | `oxia_client_op_sum` (Float64Counter)                                        | Default: single Histogram. Compat: separate sum + count counters               |
+| Operation latency (count)         | _(provided by Histogram internally)_              | `oxia_client_op_count` (Int64Counter)                                        | Compat-mode only; not a separate instrument in default mode                    |
+| Operation payload size            | `db.client.operation.size` _(proposed extension)_ (Histogram) | `oxia_client_op_value` (Histogram)                              | Histogram in both modes                                                        |
+| Batch total duration (sum)        | `db.client.batch.duration` (Histogram)            | `oxia_client_batch_total_sum` (Float64Counter)                               | Default: single Histogram. Compat: separate sum + count counters               |
+| Batch total duration (count)      | _(provided by Histogram internally)_              | `oxia_client_batch_total_count` (Int64Counter)                               | Compat-mode only                                                               |
+| Batch execution duration (sum)    | `db.client.batch.exec_duration` (Histogram)       | `oxia_client_batch_exec_sum` (Float64Counter)                                | Default: single Histogram. Compat: separate sum + count counters               |
+| Batch execution duration (count)  | _(provided by Histogram internally)_              | `oxia_client_batch_exec_count` (Int64Counter)                                | Compat-mode only                                                               |
+| Batch payload size                | `db.client.batch.size` (Histogram)                | `oxia_client_batch_value` (Histogram)                                        | Histogram in both modes                                                        |
+| Batch request count               | `db.client.batch.request_count` (Histogram)       | `oxia_client_batch_request` (Histogram)                                      | Histogram in both modes                                                        |
 
 > [!NOTE]
-> The Go client splits each timer into a `_sum` counter and a `_count` counter. The Rust implementation collapses these into a single `Histogram` regardless of which naming mode is active, because OTel Histograms provide both sum and count natively. The `go-metrics-compat` names therefore reference only the sum counter's name as the histogram instrument name. Backends that expected a separate count counter will need to use the histogram's built-in count aggregation.
+> In **default mode** a single OTel `Histogram` covers each timer concept; count and sum are derived from the histogram's built-in aggregation. In **`go-metrics-compat` mode** each timer concept is split into a `Float64Counter` (`_sum`) and an `Int64Counter` (`_count`) to exactly replicate the Go client's wire format. Size and request-count concepts use `Histogram` in both modes.
 
 ### 9.3 Switching Overhead Analysis
 
@@ -399,9 +412,9 @@ The table below is the authoritative mapping between the two naming regimes. The
 - [x] Use OTel `Histogram` for operation latencies instead of Go's counter-based timer approach.
 - [x] Prohibit dynamic user keys or values in metric attributes.
 - [x] Expose `meter_provider` setter on the `Config` builder when the `telemetry` feature flag is active.
-- [x] Add `go-metrics-compat` Cargo feature to select Go reference client metric name strings at compile time (zero runtime overhead). Default build uses OTel `v1.41.0` semantic convention names.
-- [x] `go-metrics-compat` should imply `telemetry` in the feature graph.
-- [x] `go-metrics-compat` mode will not register separate `_sum`/`_count` instruments to exactly replicate Go wire format
+- [x] Add `go-metrics-compat` Cargo feature to select Go reference client metric name strings and instrument types at compile time (zero runtime overhead). Default build uses OTel `v1.41.0` semantic convention names.
+- [x] `go-metrics-compat` implies `telemetry` in the Cargo feature graph.
+- [x] `go-metrics-compat` mode registers separate `Float64Counter` (`_sum`) and `Int64Counter` (`_count`) instruments per timer concept to exactly replicate Go wire format. Default (OTel) mode uses a single `Histogram` per concept.
 
 ## B.2 Assumptions
 
@@ -475,16 +488,32 @@ The table below is the authoritative mapping between the two naming regimes. The
 ## B.4 Metric Inventory
 
 > [!IMPORTANT]
-> Metric names are selected at compile time. The **Default name** column applies when `go-metrics-compat` is **not** enabled. The **`go-metrics-compat` name** column applies when that feature is enabled. Instrument type, unit, and attributes are identical regardless of naming mode.
+> Metric names **and instrument types** are selected at compile time. The **Default** columns apply when `go-metrics-compat` is **not** enabled. The **`go-metrics-compat`** columns apply when it is. In compat mode, timer concepts emit two instruments; size/count concepts remain Histograms.
 
-| Concept                | Default name (OTel v1.41.0)     | `go-metrics-compat` name      | Instrument | Unit   | Attributes                                       | Cardinality | Lifecycle                   |
-| ---------------------- | ------------------------------- | ----------------------------- | ---------- | ------ | ------------------------------------------------ | ----------- | --------------------------- |
-| Operation latency      | `db.client.operation.duration`  | `oxia_client_op_sum`          | Histogram  | `"s"`  | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
-| Operation payload size | `db.client.operation.size`      | `oxia_client_op_value`        | Histogram  | `"By"` | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
-| Batch total duration   | `db.client.batch.duration`      | `oxia_client_batch_total_sum` | Histogram  | `"s"`  | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
-| Batch exec duration    | `db.client.batch.exec_duration` | `oxia_client_batch_exec_sum`  | Histogram  | `"s"`  | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
-| Batch payload size     | `db.client.batch.size`          | `oxia_client_batch_value`     | Histogram  | `"By"` | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
-| Batch request count    | `db.client.batch.request_count` | `oxia_client_batch_request`   | Histogram  | `"1"`  | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
+**Default mode (OTel v1.41.0)**
+
+| Concept                | Instrument name                  | Type      | Unit   | Attributes                                       | Cardinality | Lifecycle                   |
+| ---------------------- | -------------------------------- | --------- | ------ | ------------------------------------------------ | ----------- | --------------------------- |
+| Operation latency      | `db.client.operation.duration`   | Histogram | `"s"`  | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
+| Operation payload size | `db.client.operation.size`       | Histogram | `"By"` | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
+| Batch total duration   | `db.client.batch.duration`       | Histogram | `"s"`  | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
+| Batch exec duration    | `db.client.batch.exec_duration`  | Histogram | `"s"`  | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
+| Batch payload size     | `db.client.batch.size`           | Histogram | `"By"` | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
+| Batch request count    | `db.client.batch.request_count`  | Histogram | `"1"`  | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
+
+**`go-metrics-compat` mode**
+
+| Concept                          | Instrument name                      | Type             | Unit    | Attributes                                       | Cardinality | Lifecycle                   |
+| -------------------------------- | ------------------------------------ | ---------------- | ------- | ------------------------------------------------ | ----------- | --------------------------- |
+| Operation latency — sum          | `oxia_client_op_sum`                 | Float64Counter   | `"s"`   | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
+| Operation latency — count        | `oxia_client_op_count`               | Int64Counter     | `"1"`   | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
+| Operation payload size           | `oxia_client_op_value`               | Histogram        | `"By"`  | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
+| Batch total duration — sum       | `oxia_client_batch_total_sum`        | Float64Counter   | `"s"`   | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
+| Batch total duration — count     | `oxia_client_batch_total_count`      | Int64Counter     | `"1"`   | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
+| Batch exec duration — sum        | `oxia_client_batch_exec_sum`         | Float64Counter   | `"s"`   | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
+| Batch exec duration — count      | `oxia_client_batch_exec_count`       | Int64Counter     | `"1"`   | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
+| Batch payload size               | `oxia_client_batch_value`            | Histogram        | `"By"`  | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
+| Batch request count              | `oxia_client_batch_request`          | Histogram        | `"1"`   | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
 
 ---
 
@@ -492,11 +521,12 @@ The table below is the authoritative mapping between the two naming regimes. The
 
 - **[NEW] `client/src/telemetry.rs`**: Contains all metrics wrappers, declarations, and feature-conditional definitions.
   - When `telemetry` feature is off: compile as a zero-overhead ZST.
-  - When `telemetry` is on: defines `pub(crate) mod names` with `const &str` metric name constants selected via `#[cfg(feature = "go-metrics-compat")]` (see Section 8.3). All histogram registrations reference these constants. No `if` branches or runtime dispatch.
+  - When `telemetry` is on and `go-metrics-compat` is **off**: defines `pub(crate) mod names` with `const &str` name constants for OTel instruments; all timer concepts use `Histogram`.
+  - When `telemetry` is on and `go-metrics-compat` is **on**: defines `pub(crate) mod names` with separate `_sum`/`_count` name constants; timer concepts register a `Float64Counter` (sum) and an `Int64Counter` (count) each. Size/count concepts remain `Histogram`. No `if` branches or runtime dispatch in either path.
 - **[MODIFY] `client/Cargo.toml`**:
   - Add optional dependency `opentelemetry = { version = "0.27.0", features = ["metric"] }` (or matching latest stable version).
   - Add feature `telemetry = ["dep:opentelemetry"]`.
-  - Add feature `go-metrics-compat = ["telemetry"]` (implies `telemetry`; see Open Question 1 for the alternative).
+  - Add feature `go-metrics-compat = ["telemetry"]` (implies `telemetry`).
 - **[MODIFY] `client/src/lib.rs`**:
   - Integrate operations tracing using `tracing::info_span!` macros inside `put_internal`, `get_internal`, `delete_internal`, etc.
   - Record execution metrics inside completion handlers.
