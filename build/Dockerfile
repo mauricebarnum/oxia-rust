@@ -2,7 +2,7 @@
 ARG CARGO_HOME=/root/.cargo
 ARG RUSTUP_HOME=/root/.rustup
 ARG HOME=/root
-ARG RUST_VERSION=1.95.0
+ARG RUST_VERSION=1.96.0
 ARG GO_VERSION=1.26.3
 
 # ===== 1. Pull Official Images =====
