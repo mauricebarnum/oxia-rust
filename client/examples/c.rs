@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
 
     let result = client.range_scan("", "").await?;
     for (i, v) in result.records.iter().enumerate() {
-        println!("scan {} {:?}", i, &v);
+        println!("scan {i} {v:?}");
     }
 
     // And do another get, this time expecting KeyNotFound
