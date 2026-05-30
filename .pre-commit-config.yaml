@@ -43,4 +43,12 @@ repos:
         language: system
         types: [rust]
         args: []
+
+  - repo: local
+    hooks:
+      - id: cargo-check-external-types
+        name: Cargo Check External Types
+        entry: cd client && cargo +nightly-2025-10-18 check-external-types
+        language: system
+        files: \.rs$
         pass_filenames: false
