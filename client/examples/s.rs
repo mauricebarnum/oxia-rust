@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
 async fn scan_dump(client: &Client) -> Result<()> {
     let result = client.range_scan("", "").await?;
     for (i, v) in result.records.iter().enumerate() {
-        println!("scan {} {:?}", i, &v);
+        println!("scan {i} {v:?}");
     }
     Ok(())
 }
