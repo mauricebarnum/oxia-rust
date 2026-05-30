@@ -17,10 +17,6 @@ RUN rustup component add clippy && \
     rustup component add --toolchain nightly miri rust-src && \
     cargo +nightly miri setup
 
-ARG CARGO_CHECK_EXTERNAL_TYPES_VERSION=nightly-2025-10-18
-RUN rustup toolchain install ${CARGO_CHECK_EXTERNAL_TYPES_VERSION} --profile minimal && \
-    cargo +${CARGO_CHECK_EXTERNAL_TYPES_VERSION} install cargo-check-external-types
-
 RUN curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash && \
     cargo binstall -y cargo-deny cargo-nextest sccache
 
