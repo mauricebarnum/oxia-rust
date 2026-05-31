@@ -185,6 +185,7 @@ mod tests {
 
     #[test_log::test(tokio::test)]
     #[cfg_attr(miri, ignore)]
+    #[allow(clippy::items_after_statements)]
     async fn test_with_retry() -> Result<()> {
         const RETRIES: usize = 3;
         const EXPECTED: usize = RETRIES + 2;

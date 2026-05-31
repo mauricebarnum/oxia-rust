@@ -220,6 +220,7 @@ async fn test_concurrent_ops_during_shutdown() -> anyhow::Result<()> {
 
 /// Test that dropping a notifications stream completes without hanging.
 #[test_log::test(tokio::test)]
+#[allow(clippy::items_after_statements)]
 async fn test_notifications_stream_drop_completes() -> anyhow::Result<()> {
     use futures::StreamExt;
 
