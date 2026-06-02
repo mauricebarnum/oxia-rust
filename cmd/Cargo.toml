@@ -18,8 +18,10 @@ clap_complete = "4.6.5"
 futures = "0.3.32"
 hex = "0.4.3"
 humantime = "2.3.0"
-mauricebarnum-oxia-client = { path = "../client" }
+mauricebarnum-oxia-client = { path = "../client", features = ["metrics"] }
 num_cpus = "1.17.0"
+opentelemetry-stdout = { version = "0.27.0", default-features = false, features = ["metrics"] }
+opentelemetry_sdk = { version = "0.27.0", default-features = false, features = ["metrics"] }
 rustyline = "18.0.0"
 shlex = "2.0.1"
 thiserror = "2.0.18"
