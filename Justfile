@@ -3,8 +3,18 @@ default: build
 build:
     cargo build --all-targets --all-features
 
+build-all:
+    cargo build --all-targets
+    cargo build --all-targets --features metrics
+    cargo build --all-targets --features go-metrics-compat
+
 test:
     cargo nextest run
+
+test-all:
+    cargo nextest run
+    cargo nextest run --features mauricebarnum-oxia-client/metrics
+    cargo nextest run --features mauricebarnum-oxia-client/go-metrics-compat
 
 check:
     cargo check --all-targets --all-features
