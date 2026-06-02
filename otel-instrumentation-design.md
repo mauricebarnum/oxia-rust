@@ -17,6 +17,15 @@ This document provides a detailed design and implementation specification for ad
   - Configuring exporters, tracing subscribers, or SDK pipelines within the library. The client library will only depend on telemetry APIs/facades.
   - System-level resource monitoring (CPU, memory), which is the responsibility of the server or the consumer application.
 
+### 1.1 Current Implementation Summary
+
+- **Implemented:** Direct OpenTelemetry metrics are compiled behind the optional `metrics` Cargo feature. The default build has no `opentelemetry` dependency and no metric timing, duration math, size extraction, or metric recording work.
+- **Implemented:** Public operation metrics are centralized in `client/src/metrics.rs` through `operation_start`, `record_operation_result`, `record_operation_result_with_size`, and `record_operation_sync`.
+- **Implemented:** Shard batch metrics are centralized in `client/src/metrics.rs` through `batch_start`, `batch_exec_duration`, and `record_batch`, preserving total duration, execution duration, payload size, and request count.
+- **Implemented:** Operation spans use `#[tracing::instrument]` where practical. `Client::connect` and `Client::batch_get` keep manual spans because their setup flow is more awkward to express with the attribute macro.
+- **Implemented:** `error.type` recording remains unconditional through `metrics::record_error_type`, including default builds where the `metrics` feature is disabled.
+- **Implemented:** `go-metrics-compat` implies `metrics` and selects Go-compatible metric names and timer instrument shapes at compile time.
+
 ---
 
 ## 2. Repository Findings
@@ -130,7 +139,7 @@ This document provides a detailed design and implementation specification for ad
   - `Client::reconnect` (file `client/src/lib.rs`, line 895).
   - `stale_shard_map_retry` (file `client/src/lib.rs`, line 803) - explicit stale-map wait loop in Rust client.
 - **Observed:** **Go instrumentation with no Rust equivalent:**
-  - Go's custom `Timer` metric type (split into a sum Float64Counter and a count Int64Counter under the same name).
+  - Go's custom `Timer` metric type (represented in Rust compat mode as a sum `Float64Counter` and a count `Counter<u64>`).
   - Go's unstructured/slog logger. Rust utilizes `tracing` exclusively.
 
 ---
@@ -139,14 +148,14 @@ This document provides a detailed design and implementation specification for ad
 
 ### 3.1 Telemetry Framework Choice
 
-- **Proposed:** The library will use the **`tracing` crate** (already present in `client/Cargo.toml#L15`) as its tracing and logging facade, and the **`opentelemetry` API crate** (with the `metric` feature) as its metrics facade.
+- **Implemented:** The library uses the **`tracing` crate** as its tracing and logging facade, and the optional **`opentelemetry` API crate** with its `metrics` feature as its metrics facade.
 - **Justification:**
   1. The `tracing` crate is the de facto standard in Rust. Using it ensures all spans and logs integrate out-of-the-box with downstream subscriber ecosystems (such as `tracing-opentelemetry`).
   2. Direct instrumentation using the `opentelemetry` tracing API inside a Rust library requires handling a heavy API layer, which is less idiomatic and more difficult to format and correlate than Rust's native `tracing::Span` structures.
   3. Spans can be bridged downstream using the standard `tracing-opentelemetry` subscriber.
-- **Proposed:** The library will interact only with the _facade/API layers_ (`tracing` and `opentelemetry::metric`). It will not instantiate or configure exporters, tracer providers, or meter providers internally, but it _will_ support user-supplied `MeterProvider` configurations.
-- **Assumption:** If no OTel SDK or `tracing` subscriber is registered by the parent application, all instrumentation calls compile down to no-ops with negligible runtime overhead.
-- **Proposed:** To ensure zero overhead when telemetry is disabled, the OTel metrics logic will be conditionally compiled behind a feature flag (see Section 8).
+- **Implemented:** The library interacts only with the facade/API layers (`tracing` and `opentelemetry::metrics`). It does not instantiate or configure exporters, tracing subscribers, SDK pipelines, or metric exporters internally, but it supports user-supplied `MeterProvider` configurations.
+- **Assumption:** If no `tracing` subscriber is registered by the parent application, tracing calls are handled by the normal `tracing` no-subscriber fast path.
+- **Implemented:** To ensure zero OTel metric overhead when metrics are disabled, direct OTel metrics logic is conditionally compiled behind the `metrics` feature flag (see Section 8).
 
 ---
 
@@ -154,9 +163,12 @@ This document provides a detailed design and implementation specification for ad
 
 ### 4.1 Boundary Scope
 
-- **Proposed:** **Instrumented operations:**
-  - `Client::connect` and `Client::reconnect` (to track cluster connectivity).
+- **Implemented:** **Instrumented operations:**
+  - `Client::connect` (to track cluster connectivity).
   - Main KV API entry points (`get`, `put`, `delete`, `delete_range`, `list`, `range_scan`, `batch_get`).
+  - Shard read/write batch paths.
+- **Planned:** **Additional instrumentation boundaries:**
+  - `Client::reconnect`.
   - Coordinator discovery requests (`discovery::CoordinatorServiceDiscovery::addresses`).
   - Heartbeat loop cycles (to monitor session health).
   - Background shard assignment sync loop runs.
@@ -171,7 +183,7 @@ This document provides a detailed design and implementation specification for ad
   - **Reason for Rejection:** Direct OTel trace API makes logs harder to correlate and diverges from the existing `tracing` macros already used in the codebase.
 - **Decision 2: Latency metrics implementation**
   - **Selected Approach (default / OTel mode):** Use OTel `Histogram` for operation latencies. A histogram provides percentiles, count, and sum natively without duplicating instruments.
-  - **Selected Approach (`go-metrics-compat` mode):** Register a `Float64Counter` (`_sum`) and an `Int64Counter` (`_count`) as separate instruments to exactly replicate the Go wire format. This is intentional: dashboards built against the Go client expect two distinct series.
+  - **Selected Approach (`go-metrics-compat` mode):** Register a `Float64Counter` (`_sum`) and a `Counter<u64>` (`_count`) as separate instruments to exactly replicate the Go wire format. This is intentional: dashboards built against the Go client expect two distinct series.
   - **Rejected Alternative for default mode:** Translate Go's dual-counter Timer approach literally. Rejected because it is not idiomatic in modern OpenTelemetry.
 
 ---
@@ -180,8 +192,8 @@ This document provides a detailed design and implementation specification for ad
 
 ### 5.1 Naming and Scope
 
-- **Proposed:** The tracer/telemetry scope name will be `"mauricebarnum_oxia_client"`.
-- **Proposed:** Spans will map to operations:
+- **Implemented:** The tracing and metrics scope name is `"mauricebarnum_oxia_client"`.
+- **Implemented:** Spans map to operations:
   - `"client.connect"` (SpanKind::Client)
   - `"db.operation.get"` (SpanKind::Client)
   - `"db.operation.put"` (SpanKind::Client)
@@ -190,30 +202,30 @@ This document provides a detailed design and implementation specification for ad
   - `"db.operation.list"` (SpanKind::Client)
   - `"db.operation.range_scan"` (SpanKind::Client)
   - `"db.operation.batch_get"` (SpanKind::Client)
-  - `"shard.heartbeat"` (SpanKind::Internal)
-  - `"shard.assignment_sync"` (SpanKind::Internal)
+  - `"shard.heartbeat"` (SpanKind::Internal, planned)
+  - `"shard.assignment_sync"` (SpanKind::Internal, planned)
 
 ### 5.2 Attributes (OpenTelemetry Semantic Conventions v1.41.0)
 
-- **Proposed:** All spans representing database operations must carry:
+- **Implemented:** Spans representing database operations carry:
   - `db.system`: `"oxia"` (static string)
   - `db.name`: Namespace name from configuration (e.g., `"default"`)
   - `db.operation`: Operation identifier (`"get"`, `"put"`, `"delete"`, etc.)
-  - `db.oxia.shard_id`: The ID of the shard targeted by the routing key
-  - `server.address`: Leader endpoint host (if resolved)
-  - `server.port`: Leader endpoint port
+  - `db.oxia.shard_id`: The ID of the shard targeted by the routing key, when known
   - `error.type`: The error string code on failure (e.g., `"KeyNotFound"`, `"TransportError"`)
+
+`server.address` and `server.port` are not currently recorded on public operation spans.
 
 ### 5.3 Error and Status Rules
 
-- **Proposed:** If an operation returns an `Err(Error::Oxia(OxiaError::KeyNotFound))` on a `get` operation, the span status remains `Ok` (this is a standard lookup result, not a system failure).
-- **Proposed:** For all other `Err` results, the span status must be set to `Error`, and the error description must be recorded in the `exception.message` event.
-- **Proposed:** Panics must be caught using `std::panic::AssertUnwindSafe` to set the span status to `Error` before resuming panic propagation.
+- **Implemented:** `error.type` is recorded on the current `tracing` span for `Err` results through `metrics::record_error_type`, regardless of whether the `metrics` feature is enabled.
+- **Implemented:** `get` treats `Err(Error::Oxia(OxiaError::KeyNotFound))` as a metrics success while still preserving the returned error and `error.type` span field.
+- **Not Implemented:** Span status mutation and `exception.message` events are not currently recorded by the client instrumentation.
+- **Not Implemented:** Operation wrappers do not catch panics. Panics propagate normally.
 
 ### 5.4 Sampling and Logging Integration
 
-- **Proposed:** Attributes requiring allocations (like formatting the server address) must be lazily computed only if the span is active (`Span::is_disabled` checks).
-- **Proposed:** Existing logs will automatically inherit `trace_id` and `span_id` context when executed within the scope of active tracing spans.
+- **Implemented:** Existing logs inherit active `tracing` span context when the caller installs a compatible subscriber.
 
 ---
 
@@ -221,22 +233,22 @@ This document provides a detailed design and implementation specification for ad
 
 ### 6.1 Metrics Specifications
 
-- **Proposed:** The client will register the following metrics:
-  - `"oxia.client.op.duration"` (Histogram, unit: `"s"`): Measures operation execution duration.
-  - `"oxia.client.op.size"` (Histogram, unit: `"By"`): Measures payload sizes of `put` values and `get` returned values.
-  - `"oxia.client.batch.total_duration"` (Histogram, unit: `"s"`): Measures total duration of batched requests (queueing + execution).
-  - `"oxia.client.batch.exec_duration"` (Histogram, unit: `"s"`): Measures actual network execution duration of batches.
-  - `"oxia.client.batch.size"` (Histogram, unit: `"By"`): Measures total payload size in a batch.
-  - `"oxia.client.batch.request_count"` (Histogram, unit: `"1"`): Measures count of operations packed in a batch.
+- **Implemented:** In default mode, the client registers the following metrics when the `metrics` feature is enabled:
+  - `"db.client.operation.duration"` (Histogram, unit: `"ms"`): Measures operation execution duration.
+  - `"db.client.operation.size"` (Histogram, unit: `"By"`): Measures payload sizes of `put` values and `get`/`range_scan` returned values.
+  - `"db.client.batch.duration"` (Histogram, unit: `"ms"`): Measures total duration of batched requests (queueing + execution).
+  - `"db.client.batch.exec_duration"` (Histogram, unit: `"ms"`): Measures actual network execution duration of batches.
+  - `"db.client.batch.size"` (Histogram, unit: `"By"`): Measures total payload size in a batch.
+  - `"db.client.batch.request_count"` (Histogram, unit: `"1"`): Measures count of operations packed in a batch.
 
 ### 6.2 Attributes and Bounded Cardinality
 
-- **Proposed:** All metrics will utilize the following dimensions:
+- **Implemented:** All metrics use the following dimensions:
   - `db.system`: Bounded (Value: `"oxia"`)
   - `db.name` (Namespace): Bounded (Value from config)
   - `db.operation`: Bounded (Values: `"get"`, `"put"`, `"delete"`, etc.)
-  - `db.oxia.shard_id`: Bounded (Values: integers [0 - maximum sharding limit])
   - `result`: Bounded (Values: `"success"`, `"failure"`)
+- **Implemented:** Shard IDs are intentionally not metric attributes. This keeps the public metric dimension set small and bounded.
 - **Proposed:** **Cardinality Risk Flag:** No dynamic, user-provided data (such as keys, values, or raw error messages containing user parameters) may be used as metric dimensions. Recording arbitrary keys as dimensions is strictly prohibited due to infinite cardinality risks.
 
 ---
@@ -246,10 +258,11 @@ This document provides a detailed design and implementation specification for ad
 ### 7.1 Context over Boundaries
 
 - **Proposed:** Context enters the client via the implicit thread-local/async `tracing::Span::current()`.
-- **Proposed:** Since `client` operations are async and span boundaries, we must recommend:
+- **Implemented:** Public operation spans enter through the implicit thread-local/async `tracing::Span::current()` context and are exported only if the caller installs a compatible subscriber.
+- **Proposed:** Since `client` operations are async and span boundaries, downstream applications should bridge via `tracing-opentelemetry`:
   - **Bridge via `tracing-opentelemetry`**: This handles propagating trace headers over spawned task boundaries (like the heartbeat and discovery tasks) using `tracing` parent span attachment.
 - **Proposed:** For background tasks (`ShardAssignmentTask` and heartbeats), we will construct detached root spans `"shard.assignment_sync"` and `"shard.heartbeat"`.
-- **Proposed:** If a caller cancels an operation future, the corresponding span will record a `"cancelled"` event and close immediately.
+- **Not Implemented:** Caller cancellation does not currently record a `"cancelled"` event. The span closes when the instrumented future is dropped.
 
 ---
 
@@ -257,38 +270,36 @@ This document provides a detailed design and implementation specification for ad
 
 ### 8.1 Feature Gating Decision
 
-- **Proposed:** Recommend **Option B: Feature-gated, opt-in**. Telemetry instrumentation logic (specifically the direct `opentelemetry` metrics API dependency and context-propagation functions) will compile only when downstream crates enable the `telemetry` feature flag.
+- **Implemented:** Option B is used: direct OpenTelemetry metrics instrumentation is feature-gated and opt-in. The `opentelemetry` dependency is compiled only when downstream crates enable the `metrics` feature flag.
 - **Rejected Alternative A (Always compiled):** Forces all users to download and compile `opentelemetry` API crates, increasing compile time and dependency trees for minimal-size environments.
 - **Rejected Alternative C (Opt-out):** Violates Rust best practices by enabling a large transitive dependency tree by default.
 
 ### 8.2 Dependency and API Impact
 
-- **Proposed:** Add `opentelemetry` (API crate) as an optional dependency under `[dependencies]` in `client/Cargo.toml`.
-- **Proposed:** Add `telemetry` feature to `client/Cargo.toml` enabling the optional dependency.
-- **Proposed:** Expose `meter_provider` setter field on `Config` and `ConfigBuilder` under the `telemetry` feature flag. This allows downstream consumers to explicitly inject custom OTel `MeterProvider` implementations (mapped as `Arc<dyn opentelemetry::metric::MeterProvider + Send + Sync>`). If not set, metrics fallback to `opentelemetry::global::meter_provider()`.
+- **Implemented:** `opentelemetry` is an optional dependency under `[dependencies]` in `client/Cargo.toml`.
+- **Implemented:** The `metrics` feature enables the optional dependency.
+- **Implemented:** `Config` and `ConfigBuilder` expose a `meter_provider` field and setter under the `metrics` feature flag. This allows downstream consumers to explicitly inject custom OTel `MeterProvider` implementations, mapped as `Arc<dyn opentelemetry::metrics::MeterProvider + Send + Sync>`. If not set, metrics fallback to `opentelemetry::global::meter_provider()`.
 - **Proposed:** MSRV impact is negligible, as `opentelemetry` supports modern stable Rust compilers matching the workspace's version.
 
 ### 8.3 Metric Naming Feature Flag: `go-metrics-compat`
 
 - **Resolved:** Add a second Cargo feature, `go-metrics-compat`, that selects the Go reference client's legacy metric name strings **and instrument types** at **compile time** rather than at runtime.
 - **Rationale:** The two naming schemes (`db.client.operation.duration` vs `oxia_client_op`) differ in both string constants and instrument shape. Selecting between them with `#[cfg(feature = "go-metrics-compat")]` eliminates all branching at runtime — the unused variant is never materialized in the binary. This satisfies the requirement of zero runtime overhead.
-- **Resolved:** `go-metrics-compat` implies `telemetry` in the Cargo feature graph. This prevents silent no-ops and makes the dependency relationship explicit.
-- **Resolved:** `go-metrics-compat` mode registers **two separate instruments** per timer concept (a `Float64Counter` for `_sum` and an `Int64Counter` for `_count`) to exactly replicate Go wire format. Default (OTel) mode uses a single `Histogram`.
-- **Proposed:** The Cargo feature declaration:
+- **Resolved:** `go-metrics-compat` implies `metrics` in the Cargo feature graph. This prevents silent no-ops and makes the dependency relationship explicit.
+- **Resolved:** `go-metrics-compat` mode registers **two separate instruments** per timer concept (a `Float64Counter` for `_sum` and a `Counter<u64>` for `_count`) to exactly replicate Go wire format. Default (OTel) mode uses a single `Histogram`.
+- **Implemented:** The Cargo feature declaration:
 
   ```toml
-  # client/Cargo.toml  (illustrative — not yet implemented)
+  # client/Cargo.toml
   [features]
-  telemetry         = ["dep:opentelemetry"]
-  go-metrics-compat = ["telemetry"]   # implies telemetry
+  metrics           = ["dep:opentelemetry"]
+  go-metrics-compat = ["metrics"]   # implies metrics
   ```
 
-- **Proposed:** Inside `client/src/telemetry.rs`, the instrument types and name strings are both selected by the feature flag:
+- **Implemented:** Inside `client/src/metrics.rs`, the instrument types and name strings are both selected by feature flags:
 
   ```rust
-  // Illustrative — not yet implemented
-
-  // ── Default (OTel) mode ──────────────────────────────────────────────────
+    // ── Default (OTel) mode ──────────────────────────────────────────────────
   #[cfg(not(feature = "go-metrics-compat"))]
   mod names {
       pub const OP_DURATION:         &str = "db.client.operation.duration";
@@ -300,7 +311,7 @@ This document provides a detailed design and implementation specification for ad
   }
 
   // ── go-metrics-compat mode ───────────────────────────────────────────────
-  // Timer concepts split into _sum (Float64Counter) + _count (Int64Counter)
+  // Timer concepts split into _sum (Float64Counter) + _count (Counter<u64>)
   // matching the Go client's wire format exactly.
   #[cfg(feature = "go-metrics-compat")]
   mod names {
@@ -319,7 +330,7 @@ This document provides a detailed design and implementation specification for ad
   }
   ```
 
-  In default mode, all registrations use `Histogram`. In `go-metrics-compat` mode, timer-concept registrations create one `Float64Counter` (sum) and one `Int64Counter` (count); size/request-count concepts remain `Histogram`.
+  In default mode, all registrations use `Histogram`. In `go-metrics-compat` mode, timer-concept registrations create one `Float64Counter` (sum) and one `Counter<u64>` (count); size/request-count concepts remain `Histogram`.
 
 - **Data migration:** Explicitly out of scope. Users switching feature sets will see a gap or duplicate series in their observability backend. The library documentation should note this.
 
@@ -343,17 +354,17 @@ The table below is the authoritative mapping between the two naming regimes. The
 | Concept                           | Default (OTel v1.41.0) name                       | `go-metrics-compat` instrument(s)                                            | Notes                                                                          |
 | --------------------------------- | ------------------------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
 | Operation latency (sum)           | `db.client.operation.duration` (Histogram)        | `oxia_client_op_sum` (Float64Counter)                                        | Default: single Histogram. Compat: separate sum + count counters               |
-| Operation latency (count)         | _(provided by Histogram internally)_              | `oxia_client_op_count` (Int64Counter)                                        | Compat-mode only; not a separate instrument in default mode                    |
+| Operation latency (count)         | _(provided by Histogram internally)_              | `oxia_client_op_count` (Counter<u64>)                                        | Compat-mode only; not a separate instrument in default mode                    |
 | Operation payload size            | `db.client.operation.size` _(proposed extension)_ (Histogram) | `oxia_client_op_value` (Histogram)                              | Histogram in both modes                                                        |
 | Batch total duration (sum)        | `db.client.batch.duration` (Histogram)            | `oxia_client_batch_total_sum` (Float64Counter)                               | Default: single Histogram. Compat: separate sum + count counters               |
-| Batch total duration (count)      | _(provided by Histogram internally)_              | `oxia_client_batch_total_count` (Int64Counter)                               | Compat-mode only                                                               |
+| Batch total duration (count)      | _(provided by Histogram internally)_              | `oxia_client_batch_total_count` (Counter<u64>)                               | Compat-mode only                                                               |
 | Batch execution duration (sum)    | `db.client.batch.exec_duration` (Histogram)       | `oxia_client_batch_exec_sum` (Float64Counter)                                | Default: single Histogram. Compat: separate sum + count counters               |
-| Batch execution duration (count)  | _(provided by Histogram internally)_              | `oxia_client_batch_exec_count` (Int64Counter)                                | Compat-mode only                                                               |
+| Batch execution duration (count)  | _(provided by Histogram internally)_              | `oxia_client_batch_exec_count` (Counter<u64>)                                | Compat-mode only                                                               |
 | Batch payload size                | `db.client.batch.size` (Histogram)                | `oxia_client_batch_value` (Histogram)                                        | Histogram in both modes                                                        |
 | Batch request count               | `db.client.batch.request_count` (Histogram)       | `oxia_client_batch_request` (Histogram)                                      | Histogram in both modes                                                        |
 
 > [!NOTE]
-> In **default mode** a single OTel `Histogram` covers each timer concept; count and sum are derived from the histogram's built-in aggregation. In **`go-metrics-compat` mode** each timer concept is split into a `Float64Counter` (`_sum`) and an `Int64Counter` (`_count`) to exactly replicate the Go client's wire format. Size and request-count concepts use `Histogram` in both modes.
+> In **default mode** a single OTel `Histogram` covers each timer concept; count and sum are derived from the histogram's built-in aggregation. In **`go-metrics-compat` mode** each timer concept is split into a `Float64Counter` (`_sum`) and a `Counter<u64>` (`_count`) to exactly replicate the Go client's wire format. Size and request-count concepts use `Histogram` in both modes.
 
 ### 9.3 Switching Overhead Analysis
 
@@ -375,21 +386,27 @@ The table below is the authoritative mapping between the two naming regimes. The
 
 ## 11. Rollout and Migration Plan
 
-- **Proposed:** **Phased Approach:**
-  - **Phase 1:** Add optional `telemetry` Cargo feature, introduce the `client/src/telemetry.rs` module, and configure the ZST metrics interface.
-  - **Phase 2:** Instrument tracing spans using `tracing` macros across the KV operations in `lib.rs` and `shard.rs`.
-  - **Phase 3:** Instrument metrics recorders inside the write batch and read batch streams. Expose the `meter_provider` setter on `Config` when the `telemetry` feature flag is active.
-  - **Phase 4:** Instrument background loops (heartbeat and assignment task).
+- **Implemented:**
+  - **Phase 1:** Added optional `metrics` Cargo feature, introduced the `client/src/metrics.rs` module, and configured the disabled-feature ZST metrics interface.
+  - **Phase 2:** Instrumented public KV operation spans with `#[tracing::instrument]` where practical. `connect` and `batch_get` keep manual spans.
+  - **Phase 3:** Centralized public operation metrics and shard read/write batch metrics. Exposed the `meter_provider` setter on `Config` when the `metrics` feature flag is active.
+- **Planned:**
+  - **Phase 4:** Instrument background loops such as heartbeat and assignment sync.
 
 ---
 
 ## 12. Testing and Validation Strategy
 
-- **Proposed:** Introduce unit tests under `client/tests/` using `otel-test` or `tracing-subscriber` mock layer to verify:
-  - Metric recordings match expected values (counts, sums) on success and failure.
-  - Spans have correct attributes and parent/child relationship.
-  - Custom injected `MeterProvider` receives the expected measurements.
-  - When `telemetry` feature is disabled, tests verify compilation succeeds and no metrics are registered.
+- **Implemented validation commands:**
+  - `just fmt`
+  - `cargo check --package mauricebarnum-oxia-client`
+  - `cargo check --package mauricebarnum-oxia-client --features metrics`
+  - `cargo check --package mauricebarnum-oxia-client --features go-metrics-compat`
+  - `just build-all`
+  - `just test-all`
+  - `just lint`
+- **Implemented tests:** Unit tests cover Go-compatible histogram boundaries and `KeyNotFound` result classification.
+- **Remaining test opportunities:** A tracing-subscriber mock layer could verify span field propagation and a custom OTel test meter could verify exact emitted measurements.
 
 ---
 
@@ -397,7 +414,7 @@ The table below is the authoritative mapping between the two naming regimes. The
 
 - ~~Do downstream dashboards expect exact Go-compatible metric names (`oxia_client_op`) or should we migrate to standard OTel `v1.41.0` names (`db.client.operation.duration`)?~~ **Resolved:** Both naming schemes are supported via the `go-metrics-compat` compile-time feature flag (see Section 8.3). The default build uses OTel `v1.41.0` names. Consumers with existing Go-compatible dashboards enable `go-metrics-compat` at compile time. Data migration is explicitly out of scope.
 
-- ~~Should `go-metrics-compat` imply `telemetry` in the Cargo feature graph (recommended, see Section 8.3) or remain an independent flag that produces a `compile_error!` when `telemetry` is not also enabled?~~ **Resolved**: `go-metrics-compat` feature implies `telemetry` in the feature graph.
+- ~~Should `go-metrics-compat` imply `metrics` in the Cargo feature graph (recommended, see Section 8.3) or remain an independent flag that produces a `compile_error!` when `metrics` is not also enabled?~~ **Resolved**: `go-metrics-compat` feature implies `metrics` in the feature graph.
 
 - ~~The Go client emits `oxia_client_op_sum` and `oxia_client_op_count` as separate instruments. Should the `go-metrics-compat` Rust mode register two instruments to exactly replicate that wire format, or is the Histogram approach (with its built-in count) an acceptable deviation?~~ **Resolved**: `go-metrics-compat` will register and use separate `_sum/_count` instruments.
 
@@ -408,13 +425,13 @@ The table below is the authoritative mapping between the two naming regimes. The
 ## B.1 Required Decisions
 
 - [x] Utilize the `tracing` crate facade with a target dependency on `tracing-opentelemetry` compatibility; do not take a direct dependency on `opentelemetry-sdk` in the library.
-- [x] Use Option B (Feature-gated, opt-in) via the `telemetry` Cargo feature.
+- [x] Use Option B (Feature-gated, opt-in) via the `metrics` Cargo feature.
 - [x] Use OTel `Histogram` for operation latencies instead of Go's counter-based timer approach.
 - [x] Prohibit dynamic user keys or values in metric attributes.
-- [x] Expose `meter_provider` setter on the `Config` builder when the `telemetry` feature flag is active.
+- [x] Expose `meter_provider` setter on the `Config` builder when the `metrics` feature flag is active.
 - [x] Add `go-metrics-compat` Cargo feature to select Go reference client metric name strings and instrument types at compile time (zero runtime overhead). Default build uses OTel `v1.41.0` semantic convention names.
-- [x] `go-metrics-compat` implies `telemetry` in the Cargo feature graph.
-- [x] `go-metrics-compat` mode registers separate `Float64Counter` (`_sum`) and `Int64Counter` (`_count`) instruments per timer concept to exactly replicate Go wire format. Default (OTel) mode uses a single `Histogram` per concept.
+- [x] `go-metrics-compat` implies `metrics` in the Cargo feature graph.
+- [x] `go-metrics-compat` mode registers separate `Float64Counter` (`_sum`) and `Counter<u64>` (`_count`) instruments per timer concept to exactly replicate Go wire format. Default (OTel) mode uses a single `Histogram` per concept.
 
 ## B.2 Assumptions
 
@@ -429,13 +446,13 @@ The table below is the authoritative mapping between the two naming regimes. The
 | Rust API Entry Point   | Span Name                     | Type (Span Kind)   | Metrics Emitted                                                           | Performance Classification |
 | ---------------------- | ----------------------------- | ------------------ | ------------------------------------------------------------------------- | -------------------------- |
 | `Client::connect`      | `"client.connect"`            | `SpanKind::Client` | —                                                                         | Warm path                  |
-| `Client::get`          | `"db.operation.get"`          | `SpanKind::Client` | `"oxia.client.op.duration"`, `"oxia.client.op.size"`                      | Hot path                   |
-| `Client::put`          | `"db.operation.put"`          | `SpanKind::Client` | `"oxia.client.op.duration"`, `"oxia.client.op.size"`                      | Hot path                   |
-| `Client::delete`       | `"db.operation.delete"`       | `SpanKind::Client` | `"oxia.client.op.duration"`                                               | Hot path                   |
-| `Client::delete_range` | `"db.operation.delete_range"` | `SpanKind::Client` | `"oxia.client.op.duration"`                                               | Warm path                  |
-| `Client::list`         | `"db.operation.list"`         | `SpanKind::Client` | `"oxia.client.op.duration"`                                               | Warm path                  |
-| `Client::range_scan`   | `"db.operation.range_scan"`   | `SpanKind::Client` | `"oxia.client.op.duration"`, `"oxia.client.op.size"`                      | Warm path                  |
-| `Client::batch_get`    | `"db.operation.batch_get"`    | `SpanKind::Client` | `"oxia.client.batch.total_duration"`, `"oxia.client.batch.exec_duration"` | Hot path                   |
+| `Client::get`          | `"db.operation.get"`          | `SpanKind::Client` | `db.client.operation.duration`, `db.client.operation.size`                         | Hot path                   |
+| `Client::put`          | `"db.operation.put"`          | `SpanKind::Client` | `db.client.operation.duration`, `db.client.operation.size`                         | Hot path                   |
+| `Client::delete`       | `"db.operation.delete"`       | `SpanKind::Client` | `db.client.operation.duration`                                                    | Hot path                   |
+| `Client::delete_range` | `"db.operation.delete_range"` | `SpanKind::Client` | `db.client.operation.duration`                                                    | Warm path                  |
+| `Client::list`         | `"db.operation.list"`         | `SpanKind::Client` | `db.client.operation.duration`                                                    | Warm path                  |
+| `Client::range_scan`   | `"db.operation.range_scan"`   | `SpanKind::Client` | `db.client.operation.duration`, `db.client.operation.size`                         | Warm path                  |
+| `Client::batch_get`    | `"db.operation.batch_get"`    | `SpanKind::Client` | `db.client.operation.duration` for setup; shard layer emits batch metrics per read | Hot path                   |
 
 ---
 
@@ -450,7 +467,7 @@ The table below is the authoritative mapping between the two naming regimes. The
 - **Attributes:**
   - `db.system`: `"oxia"`
   - `db.name`: Namespace name (e.g. `"default"`)
-- **Error / Status Behavior:** Sets status to `Error` if connection to coordinator fails.
+- **Error / Status Behavior:** Records `error.type` if connection to coordinator fails.
 - **Performance Notes:** Warm path, allocates client metadata during connection.
 
 ##### Operation: `Client::get`
@@ -465,7 +482,7 @@ The table below is the authoritative mapping between the two naming regimes. The
   - `db.operation`: `"get"`
   - `db.oxia.shard_id`: Targeted shard ID
   - `error.type`: Set on failure.
-- **Error / Status Behavior:** `KeyNotFound` is marked `Ok`. Other failures set status to `Error`.
+- **Error / Status Behavior:** `KeyNotFound` is classified as metrics success. All `Err` results record `error.type` on the current span.
 - **Performance Notes:** Hot path. Minimize dynamic allocations in attributes.
 
 ##### Operation: `Client::put`
@@ -480,7 +497,7 @@ The table below is the authoritative mapping between the two naming regimes. The
   - `db.operation`: `"put"`
   - `db.oxia.shard_id`: Targeted shard ID
   - `error.type`: Set on failure.
-- **Error / Status Behavior:** Fails with `Error` status on version mismatches or network failures.
+- **Error / Status Behavior:** Version mismatches or network failures record `error.type` on the current span and classify the metrics result as failure.
 - **Performance Notes:** Hot path. Do not clone payload bytes for attribute logging.
 
 ---
@@ -494,41 +511,57 @@ The table below is the authoritative mapping between the two naming regimes. The
 
 | Concept                | Instrument name                  | Type      | Unit   | Attributes                                       | Cardinality | Lifecycle                   |
 | ---------------------- | -------------------------------- | --------- | ------ | ------------------------------------------------ | ----------- | --------------------------- |
-| Operation latency      | `db.client.operation.duration`   | Histogram | `"s"`  | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
-| Operation payload size | `db.client.operation.size`       | Histogram | `"By"` | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
-| Batch total duration   | `db.client.batch.duration`       | Histogram | `"s"`  | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
-| Batch exec duration    | `db.client.batch.exec_duration`  | Histogram | `"s"`  | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
-| Batch payload size     | `db.client.batch.size`           | Histogram | `"By"` | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
-| Batch request count    | `db.client.batch.request_count`  | Histogram | `"1"`  | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
+| Operation latency      | `db.client.operation.duration`   | Histogram | `"ms"` | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `metrics::Metrics::new()` |
+| Operation payload size | `db.client.operation.size`       | Histogram | `"By"` | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `metrics::Metrics::new()` |
+| Batch total duration   | `db.client.batch.duration`       | Histogram | `"ms"` | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `metrics::Metrics::new()` |
+| Batch exec duration    | `db.client.batch.exec_duration`  | Histogram | `"ms"` | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `metrics::Metrics::new()` |
+| Batch payload size     | `db.client.batch.size`           | Histogram | `"By"` | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `metrics::Metrics::new()` |
+| Batch request count    | `db.client.batch.request_count`  | Histogram | `"1"`  | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `metrics::Metrics::new()` |
 
 **`go-metrics-compat` mode**
 
 | Concept                          | Instrument name                      | Type             | Unit    | Attributes                                       | Cardinality | Lifecycle                   |
 | -------------------------------- | ------------------------------------ | ---------------- | ------- | ------------------------------------------------ | ----------- | --------------------------- |
-| Operation latency — sum          | `oxia_client_op_sum`                 | Float64Counter   | `"s"`   | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
-| Operation latency — count        | `oxia_client_op_count`               | Int64Counter     | `"1"`   | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
-| Operation payload size           | `oxia_client_op_value`               | Histogram        | `"By"`  | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
-| Batch total duration — sum       | `oxia_client_batch_total_sum`        | Float64Counter   | `"s"`   | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
-| Batch total duration — count     | `oxia_client_batch_total_count`      | Int64Counter     | `"1"`   | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
-| Batch exec duration — sum        | `oxia_client_batch_exec_sum`         | Float64Counter   | `"s"`   | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
-| Batch exec duration — count      | `oxia_client_batch_exec_count`       | Int64Counter     | `"1"`   | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
-| Batch payload size               | `oxia_client_batch_value`            | Histogram        | `"By"`  | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
-| Batch request count              | `oxia_client_batch_request`          | Histogram        | `"1"`   | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `telemetry::Metrics::new()` |
+| Operation latency — sum          | `oxia_client_op_sum`                 | Float64Counter   | `"ms"`  | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `metrics::Metrics::new()` |
+| Operation latency — count        | `oxia_client_op_count`               | Counter<u64>     | `"1"`   | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `metrics::Metrics::new()` |
+| Operation payload size           | `oxia_client_op_value`               | Histogram        | `"By"`  | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `metrics::Metrics::new()` |
+| Batch total duration — sum       | `oxia_client_batch_total_sum`        | Float64Counter   | `"ms"`  | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `metrics::Metrics::new()` |
+| Batch total duration — count     | `oxia_client_batch_total_count`      | Counter<u64>     | `"1"`   | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `metrics::Metrics::new()` |
+| Batch exec duration — sum        | `oxia_client_batch_exec_sum`         | Float64Counter   | `"ms"`  | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `metrics::Metrics::new()` |
+| Batch exec duration — count      | `oxia_client_batch_exec_count`       | Counter<u64>     | `"1"`   | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `metrics::Metrics::new()` |
+| Batch payload size               | `oxia_client_batch_value`            | Histogram        | `"By"`  | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `metrics::Metrics::new()` |
+| Batch request count              | `oxia_client_batch_request`          | Histogram        | `"1"`   | `db.system`, `db.name`, `db.operation`, `result` | Bounded     | `metrics::Metrics::new()` |
 
 ---
 
 ## B.5 Module and File Plan
 
-- **[NEW] `client/src/telemetry.rs`**: Contains all metrics wrappers, declarations, and feature-conditional definitions.
-  - When `telemetry` feature is off: compile as a zero-overhead ZST.
-  - When `telemetry` is on and `go-metrics-compat` is **off**: defines `pub(crate) mod names` with `const &str` name constants for OTel instruments; all timer concepts use `Histogram`.
-  - When `telemetry` is on and `go-metrics-compat` is **on**: defines `pub(crate) mod names` with separate `_sum`/`_count` name constants; timer concepts register a `Float64Counter` (sum) and an `Int64Counter` (count) each. Size/count concepts remain `Histogram`. No `if` branches or runtime dispatch in either path.
-- **[MODIFY] `client/Cargo.toml`**:
-  - Add optional dependency `opentelemetry = { version = "0.27.0", features = ["metric"] }` (or matching latest stable version).
-  - Add feature `telemetry = ["dep:opentelemetry"]`.
-  - Add feature `go-metrics-compat = ["telemetry"]` (implies `telemetry`).
-- **[MODIFY] `client/src/lib.rs`**:
-  - Integrate operations tracing using `tracing::info_span!` macros inside `put_internal`, `get_internal`, `delete_internal`, etc.
-  - Record execution metrics inside completion handlers.
-- **[MODIFY] `client/src/config.rs`**:
-  - Expose `meter_provider` field under `#[cfg(feature = "telemetry")]` using `Option<Arc<dyn opentelemetry::metric::MeterProvider + Send + Sync>>` with a setter in the `ConfigBuilder`.
+- **[IMPLEMENTED] `client/src/metrics.rs`**: Contains all metrics wrappers, declarations, result classifiers, size extractors, and feature-conditional definitions.
+  - When `metrics` feature is off: compiles as a ZST metrics interface. Metric wrappers still record tracing span `error.type` for `Err` results, but avoid `Instant::now()`, duration math, result classifier calls, size extraction, OTel calls, and the `opentelemetry` dependency.
+  - When `metrics` is on and `go-metrics-compat` is **off**: defines `pub(crate) mod names` with `const &str` name constants for OTel instruments; all timer concepts use `Histogram`.
+  - When `metrics` is on and `go-metrics-compat` is **on**: defines `pub(crate) mod names` with separate `_sum`/`_count` name constants; timer concepts register a `Float64Counter` (sum) and a `Counter<u64>` (count) each. Size/count concepts remain `Histogram`. No `if` branches or runtime dispatch in either path.
+  - Public operation helpers include `operation_start`, `record_operation_result`, `record_operation_result_with_size`, and `record_operation_sync`.
+  - Shard batch helpers include `batch_start`, `batch_exec_duration`, and `record_batch`.
+  - Result classifiers include `result_kind` and `get_result_kind`; size extractors include `get_response_size` and `range_scan_response_size`.
+- **[IMPLEMENTED] `client/Cargo.toml`**:
+  - Added optional dependency `opentelemetry = { version = "0.29.1", features = ["metrics"] }`.
+  - Added feature `metrics = ["dep:opentelemetry"]`.
+  - Added feature `go-metrics-compat = ["metrics"]` (implies `metrics`).
+  - Preserved the external type allowlist entry for `opentelemetry::metrics::meter::MeterProvider`.
+- **[IMPLEMENTED] `client/src/lib.rs`**:
+  - Added `mod metrics;`.
+  - Added `metrics: metrics::Metrics` to `Client`.
+  - `Client::new` creates `Metrics::new(config.meter_provider())` when the `metrics` feature is enabled and `Metrics::new(None)` otherwise.
+  - `get_internal`, `put_internal`, `delete_internal`, `delete_range_internal`, `list_internal`, and `range_scan_internal` use `#[tracing::instrument(...)]` with `db.system`, `db.name`, `db.operation`, `db.oxia.shard_id`, and `error.type` fields.
+  - `connect` and `batch_get` retain manual spans and call centralized helpers for `error.type` and operation metrics.
+  - Public operation metrics are recorded once after the operation future resolves, including early shard selection and setup errors.
+- **[IMPLEMENTED] `client/src/shard.rs`**:
+  - Shard client data carries `metrics::Metrics`.
+  - Write batch handling builds one result and calls `metrics::record_batch` once.
+  - Read batch demux setup classifies result, value size, and request count once and calls `metrics::record_batch` once.
+  - Retry paths measure retry execution duration separately and preserve total duration, execution duration, value size, and request count.
+- **[IMPLEMENTED] `client/src/config.rs`**:
+  - Exposes `meter_provider` under `#[cfg(feature = "metrics")]` using `Option<Arc<dyn opentelemetry::metrics::MeterProvider + Send + Sync>>` with a setter in the `ConfigBuilder`.
+- **[IMPLEMENTED] `Justfile`**:
+  - Added `build-all` to build with metrics off, `metrics`, and `go-metrics-compat`.
+  - Added `test-all` to run nextest with metrics off, `metrics`, and `go-metrics-compat`.

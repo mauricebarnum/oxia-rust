@@ -27,9 +27,12 @@ dashmap = { version = "6", optional = true }
 fastrand = "2.4.1"
 prost = "0.14.3"
 prost-types = "0.14.3"
+opentelemetry = { version = "0.27.0", features = ["metrics"], optional = true }
 
 [features]
 bench-dashmap = ["dep:dashmap"]
+go-metrics-compat = ["metrics"]
+metrics = ["dep:opentelemetry"]
 
 [dev-dependencies]
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros"] }
@@ -65,4 +68,5 @@ allowed_external_types = [
     "futures_core::stream::Stream",
     "bon::builder_state::IsSet",
     "bon::builder_state::IsUnset",
+    "opentelemetry::metrics::meter::MeterProvider",
 ]
