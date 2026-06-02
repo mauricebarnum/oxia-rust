@@ -892,6 +892,10 @@ impl Client {
     }
 
     pub async fn connect(&mut self) -> Result<()> {
+        if self.is_connected() {
+            return Ok(());
+        }
+
         let span = tracing::info_span!(
             target: metrics::SCOPE_NAME,
             "client.connect",
@@ -900,14 +904,9 @@ impl Client {
             "error.type" = tracing::field::Empty,
         );
         async {
-            let result = async {
-                if !self.is_connected() {
-                    let sm = shard::Manager::new(&self.config).await?;
-                    self.shard_manager = Some(Arc::new(sm));
-                }
-                Ok(())
-            }
-            .await;
+            let result = shard::Manager::new(&self.config).await.map(|sm| {
+                self.shard_manager = Some(Arc::new(sm));
+            });
             metrics::record_error_type(&result);
             result
         }
