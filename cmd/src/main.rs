@@ -27,6 +27,9 @@ use context::Context;
 mod log;
 use log::LogArgs;
 
+mod metrics;
+use metrics::MetricsOutput;
+
 mod utils;
 
 #[derive(Parser)]
@@ -52,6 +55,9 @@ pub struct Cli {
 
     #[arg(long, default_value_t = false)]
     retry_on_stale_shard_map: bool,
+
+    #[arg(long, default_value_t = false)]
+    metrics: bool,
 }
 
 #[tokio::main]
@@ -59,6 +65,16 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     cli.log.setup("off")?;
 
-    let ctx = Context::new(&cli);
-    cli.command.run(ctx).await
+    let metrics = cli.metrics.then(MetricsOutput::new);
+    let ctx = Context::new(&cli, metrics.as_ref());
+    let result = cli.command.run(ctx).await;
+
+    if let Some(m) = metrics {
+        m.export()
+            .await
+            .inspect_err(|e| eprintln!("failed to export metrics: {e:#}"))
+            .ok();
+    }
+
+    result
 }
