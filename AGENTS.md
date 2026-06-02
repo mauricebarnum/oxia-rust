@@ -13,21 +13,21 @@ This guide outlines rules, architecture, testing frameworks, and style constrain
 
 ## Project Overview
 
-Experimental Rust Oxia client with sharding, gRPC support, and notifications. 
+Experimental Rust Oxia client with sharding, gRPC support, and notifications.
+
 - Workspace crates: `common` (bindings), `client` (async API), `cmd` (CLI `oxia-cmd`), `oxia-bin-util` (server binary compiler).
 
 ## Build & Test Commands
 
-| Task      | Command                                                    | Notes                       |
-| --------- | ---------------------------------------------------------- | --------------------------- |
-| Build     | `cargo build --all-targets`                                | All targets                 |
-| Tests     | `cargo nextest run`                                        | Full; or `--package client` |
-| Unit only | `cargo nextest run -E 'kind(lib)'`                         | Sandbox-safe; no sockets    |
-| ExtSyms   | `cargo nextest run -E 'binary(extsyms)'`                   | Public API types allowlist  |
-| Lint      | `cargo clippy --all-targets --all-features -- -D warnings` | Strict                      |
-| Format    | `cargo +nightly fmt --all` / `--check`                     | -                           |
-| Security  | `cargo deny check`                                         | Licenses                    |
-| Miri      | `+nightly cargo miri nextest run --package client`         | UB detection                |
+| Task      | Command                                            | Notes                       |
+| --------- | -------------------------------------------------- | --------------------------- |
+| Build     | `cargo build --all-targets`                        | All targets                 |
+| Tests     | `cargo nextest run`                                | Full; or `--package client` |
+| Unit only | `cargo nextest run -E 'kind(lib)'`                 | Sandbox-safe; no sockets    |
+| Lint      | `just lint`                                        | Strict                      |
+| Format    | `just fmt`                                         | -                           |
+| Security  | `cargo deny check`                                 | Licenses                    |
+| Miri      | `cargo +nightly miri nextest run --package client` | UB detection                |
 
 CI uses `--release --frozen`. Local commands can omit those flags.
 
@@ -59,7 +59,7 @@ CI uses `--release --frozen`. Local commands can omit those flags.
 
 1. `ArcSwap::load` to look up active shards/clients.
 2. `RwLock::read` pool (only on misses).
-Guidelines: `ArcSwap` preferred over `RwLock`. Use `tokio::sync` primitives. Do not hold locks across `.await` points.
+   Guidelines: `ArcSwap` preferred over `RwLock`. Use `tokio::sync` primitives. Do not hold locks across `.await` points.
 
 - **Async Traits**: Use `BoxFuture` desugaring (see `notification.rs`, `address.rs`), not the `async-trait` crate.
 
