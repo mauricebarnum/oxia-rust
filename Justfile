@@ -14,4 +14,4 @@ lint: check
     cd client && cargo +nightly-2025-10-18 check-external-types
 
 fmt:
-    cargo fmt --all
+    cargo +nightly fmt --all
