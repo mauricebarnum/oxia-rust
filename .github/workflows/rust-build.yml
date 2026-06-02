@@ -127,7 +127,7 @@ jobs:
           cargo fetch --locked   # fetch dependencies: last network dependency
 
       - name: build
-        run: cargo build $RELEASE_FLAG --frozen --all-targets
+        run: cargo build $RELEASE_FLAG --frozen --all-targets --features mauricebarnum-oxia-client/metrics
 
       - name: clippy
         run: cargo clippy $RELEASE_FLAG --no-deps --all-targets --frozen -- -D warnings

@@ -90,9 +90,9 @@ RUN GH_WORKSPACE="/__w/${REPO_NAME}/${REPO_NAME}" && \
     mkdir -p "${GH_WORKSPACE}" && \
     cp /tmp/recipe.json "${GH_WORKSPACE}/recipe.json" && \
     cd "${GH_WORKSPACE}" && \
-    cargo chef cook --profile ci-debug --all-targets --recipe-path recipe.json && \
-    cargo chef cook --profile ci --all-targets --recipe-path recipe.json && \
-    cargo chef cook --profile ci-test-release --all-targets --recipe-path recipe.json && \
+    cargo chef cook --profile ci-debug --all-targets --features mauricebarnum-oxia-client/metrics --recipe-path recipe.json && \
+    cargo chef cook --profile ci --all-targets --features mauricebarnum-oxia-client/metrics --recipe-path recipe.json && \
+    cargo chef cook --profile ci-test-release --all-targets --features mauricebarnum-oxia-client/metrics --recipe-path recipe.json && \
     cargo fetch --locked && \
     cargo +nightly fetch --locked
 
