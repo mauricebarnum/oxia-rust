@@ -19,6 +19,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::StreamExt;
 use mauricebarnum_oxia_client as client;
@@ -191,7 +192,15 @@ async fn test_batch_get(env: &dyn TestEnv) -> anyhow::Result<()> {
 async fn test_concurrent_ops(env: &dyn TestEnv) -> anyhow::Result<()> {
     const NUM_TASKS: usize = 20;
 
-    let client = Arc::new(trace_err!(common::connect_env(env).await)?);
+    let client = if env.needs_connect_retry() {
+        let builder = config::Config::builder()
+            .request_timeout(Duration::from_secs(20))
+            .retry(config::RetryConfig::new(5, Duration::from_millis(100)))
+            .retry_on_stale_shard_map(true);
+        Arc::new(trace_err!(common::connect_env_with(env, builder).await)?)
+    } else {
+        Arc::new(trace_err!(common::connect_env(env).await)?)
+    };
 
     let barrier = Arc::new(Barrier::new(NUM_TASKS));
     let mut handles = Vec::with_capacity(NUM_TASKS);

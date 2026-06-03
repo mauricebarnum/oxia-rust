@@ -1,0 +1,12 @@
+[test-groups]
+oxia-cluster = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'test(cluster_3n_6s)'
+test-group = 'oxia-cluster'
+slow-timeout = { period = "120s", terminate-after = 2 }
+
+[[profile.default.overrides]]
+filter = 'test(/test_.*survives_/) or test(/test_.*leader_change/) or test(/test_.*failover/) or test(test_kill_restart_kill) or test(test_concurrent_ops_during_kill) or test(test_coordinator_bootstrap)'
+test-group = 'oxia-cluster'
+slow-timeout = { period = "180s", terminate-after = 2 }
