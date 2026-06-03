@@ -39,9 +39,9 @@ pub(crate) type OperationStart = Instant;
 pub(crate) type OperationStart = ();
 
 #[cfg(any(all(feature = "metrics", not(feature = "go-metrics-compat")), test))]
-pub(crate) const LATENCY_BUCKETS_MILLIS: &[f64] = &[
-    0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1_000.0, 2_000.0, 5_000.0,
-    10_000.0, 20_000.0, 50_000.0,
+pub(crate) const LATENCY_BUCKETS_SECONDS: &[f64] = &[
+    0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0,
+    10.0, 20.0, 50.0,
 ];
 #[cfg(any(feature = "metrics", test))]
 pub(crate) const SIZE_BUCKETS_BYTES: &[f64] = &[
@@ -336,7 +336,7 @@ mod imp {
     use super::COUNT_BUCKETS;
     use super::DB_SYSTEM;
     #[cfg(not(feature = "go-metrics-compat"))]
-    use super::LATENCY_BUCKETS_MILLIS;
+    use super::LATENCY_BUCKETS_SECONDS;
     use super::Operation;
     use super::ResultKind;
     use super::SCOPE_NAME;
@@ -427,8 +427,8 @@ mod imp {
                 #[cfg(not(feature = "go-metrics-compat"))]
                 op_duration: meter
                     .f64_histogram(names::OP_DURATION)
-                    .with_unit("ms")
-                    .with_boundaries(LATENCY_BUCKETS_MILLIS.to_vec())
+                    .with_unit("s")
+                    .with_boundaries(LATENCY_BUCKETS_SECONDS.to_vec())
                     .build(),
                 #[cfg(feature = "go-metrics-compat")]
                 op_duration: Timer::new(&meter, names::OP_DURATION_SUM, names::OP_DURATION_COUNT),
@@ -440,8 +440,8 @@ mod imp {
                 #[cfg(not(feature = "go-metrics-compat"))]
                 batch_total_duration: meter
                     .f64_histogram(names::BATCH_TOTAL)
-                    .with_unit("ms")
-                    .with_boundaries(LATENCY_BUCKETS_MILLIS.to_vec())
+                    .with_unit("s")
+                    .with_boundaries(LATENCY_BUCKETS_SECONDS.to_vec())
                     .build(),
                 #[cfg(feature = "go-metrics-compat")]
                 batch_total_duration: Timer::new(
@@ -452,8 +452,8 @@ mod imp {
                 #[cfg(not(feature = "go-metrics-compat"))]
                 batch_exec_duration: meter
                     .f64_histogram(names::BATCH_EXEC)
-                    .with_unit("ms")
-                    .with_boundaries(LATENCY_BUCKETS_MILLIS.to_vec())
+                    .with_unit("s")
+                    .with_boundaries(LATENCY_BUCKETS_SECONDS.to_vec())
                     .build(),
                 #[cfg(feature = "go-metrics-compat")]
                 batch_exec_duration: Timer::new(
@@ -526,7 +526,7 @@ mod imp {
 
     #[cfg(not(feature = "go-metrics-compat"))]
     fn record_timer(timer: &Histogram<f64>, duration: std::time::Duration, attrs: &[KeyValue]) {
-        timer.record(duration.as_secs_f64() * 1_000.0, attrs);
+        timer.record(duration.as_secs_f64(), attrs);
     }
 
     #[cfg(feature = "go-metrics-compat")]
@@ -556,12 +556,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn go_histogram_boundaries_match_reference() {
+    fn semantic_histogram_boundaries_match_reference() {
         assert_eq!(
-            LATENCY_BUCKETS_MILLIS,
+            LATENCY_BUCKETS_SECONDS,
             &[
-                0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1_000.0,
-                2_000.0, 5_000.0, 10_000.0, 20_000.0, 50_000.0,
+                0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0,
+                2.0, 5.0, 10.0, 20.0, 50.0,
             ]
         );
         assert_eq!(
