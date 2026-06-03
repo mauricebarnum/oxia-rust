@@ -1035,6 +1035,7 @@ dependencies = [
  "mauricebarnum-oxia-common",
  "nix",
  "opentelemetry",
+ "opentelemetry_sdk",
  "oxia-bin-util",
  "prost",
  "prost-types",

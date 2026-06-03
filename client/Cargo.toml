@@ -45,6 +45,10 @@ tempfile = "3.27.0"
 anyhow = "1.0.102"
 itertools = "0.14.0"
 nix = { version = "0.31", default-features = false, features = ["signal"] }
+opentelemetry_sdk = { version = "0.27.0", default-features = false, features = [
+    "metrics",
+    "spec_unstable_metrics_views",
+] }
 
 [[bench]]
 name = "shard_lookup"
