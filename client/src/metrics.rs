@@ -38,51 +38,25 @@ pub(crate) type OperationStart = Instant;
 #[cfg(not(feature = "metrics"))]
 pub(crate) type OperationStart = ();
 
-#[cfg(any(all(feature = "metrics", not(feature = "go-metrics-compat")), test))]
-pub(crate) const LATENCY_BUCKETS_SECONDS: &[f64] = &[
-    0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0,
-    10.0, 20.0, 50.0,
+#[cfg(all(test, feature = "metrics"))]
+pub(crate) const HISTOGRAM_NAMES: &[&str] = &[
+    names::OP_DURATION,
+    names::OP_SIZE,
+    names::BATCH_TOTAL,
+    names::BATCH_EXEC,
+    names::BATCH_SIZE,
+    names::BATCH_REQUEST_COUNT,
 ];
+
 #[cfg(any(feature = "metrics", test))]
-pub(crate) const SIZE_BUCKETS_BYTES: &[f64] = &[
-    0x10 as f64,
-    0x20 as f64,
-    0x40 as f64,
-    0x80 as f64,
-    0x100 as f64,
-    0x200 as f64,
-    0x400 as f64,
-    0x800 as f64,
-    0x1000 as f64,
-    0x2000 as f64,
-    0x4000 as f64,
-    0x8000 as f64,
-    0x10000 as f64,
-    0x20000 as f64,
-    0x40000 as f64,
-    0x80000 as f64,
-    0x10_0000 as f64,
-    0x20_0000 as f64,
-    0x40_0000 as f64,
-    0x80_0000 as f64,
-];
-#[cfg(any(feature = "metrics", test))]
-pub(crate) const COUNT_BUCKETS: &[f64] = &[
-    1.0,
-    5.0,
-    10.0,
-    20.0,
-    50.0,
-    100.0,
-    200.0,
-    500.0,
-    1_000.0,
-    10_000.0,
-    20_000.0,
-    50_000.0,
-    100_000.0,
-    1_000_000.0,
-];
+pub(crate) mod names {
+    pub(crate) const OP_DURATION: &str = "db.client.operation.duration";
+    pub(crate) const OP_SIZE: &str = "db.client.operation.size";
+    pub(crate) const BATCH_TOTAL: &str = "db.client.batch.duration";
+    pub(crate) const BATCH_EXEC: &str = "db.client.batch.exec_duration";
+    pub(crate) const BATCH_SIZE: &str = "db.client.batch.size";
+    pub(crate) const BATCH_REQUEST_COUNT: &str = "db.client.batch.request_count";
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Operation {
@@ -333,55 +307,36 @@ mod imp {
     use opentelemetry::metrics::Counter;
     use opentelemetry::metrics::Histogram;
 
-    use super::COUNT_BUCKETS;
     use super::DB_SYSTEM;
-    #[cfg(not(feature = "go-metrics-compat"))]
-    use super::LATENCY_BUCKETS_SECONDS;
     use super::Operation;
     use super::ResultKind;
     use super::SCOPE_NAME;
-    use super::SIZE_BUCKETS_BYTES;
-
-    #[cfg(not(feature = "go-metrics-compat"))]
-    mod names {
-        pub(super) const OP_DURATION: &str = "db.client.operation.duration";
-        pub(super) const OP_SIZE: &str = "db.client.operation.size";
-        pub(super) const BATCH_TOTAL: &str = "db.client.batch.duration";
-        pub(super) const BATCH_EXEC: &str = "db.client.batch.exec_duration";
-        pub(super) const BATCH_SIZE: &str = "db.client.batch.size";
-        pub(super) const BATCH_REQUEST_COUNT: &str = "db.client.batch.request_count";
-    }
+    use super::names;
 
     #[cfg(feature = "go-metrics-compat")]
-    mod names {
+    mod compat_names {
         pub(super) const OP_DURATION_SUM: &str = "oxia_client_op_sum";
         pub(super) const OP_DURATION_COUNT: &str = "oxia_client_op_count";
-        pub(super) const OP_SIZE: &str = "oxia_client_op_value";
         pub(super) const BATCH_TOTAL_SUM: &str = "oxia_client_batch_total_sum";
         pub(super) const BATCH_TOTAL_COUNT: &str = "oxia_client_batch_total_count";
         pub(super) const BATCH_EXEC_SUM: &str = "oxia_client_batch_exec_sum";
         pub(super) const BATCH_EXEC_COUNT: &str = "oxia_client_batch_exec_count";
-        pub(super) const BATCH_SIZE: &str = "oxia_client_batch_value";
-        pub(super) const BATCH_REQUEST_COUNT: &str = "oxia_client_batch_request";
     }
 
     pub(crate) type MeterProviderHandle = crate::config::MeterProviderHandle;
 
     #[derive(Clone)]
     pub(crate) struct Metrics {
-        #[cfg(not(feature = "go-metrics-compat"))]
         op_duration: Histogram<f64>,
         #[cfg(feature = "go-metrics-compat")]
-        op_duration: Timer,
+        compat_op_duration: Timer,
         op_size: Histogram<u64>,
-        #[cfg(not(feature = "go-metrics-compat"))]
         batch_total_duration: Histogram<f64>,
         #[cfg(feature = "go-metrics-compat")]
-        batch_total_duration: Timer,
-        #[cfg(not(feature = "go-metrics-compat"))]
+        compat_batch_total_duration: Timer,
         batch_exec_duration: Histogram<f64>,
         #[cfg(feature = "go-metrics-compat")]
-        batch_exec_duration: Timer,
+        compat_batch_exec_duration: Timer,
         batch_size: Histogram<u64>,
         batch_request_count: Histogram<u64>,
     }
@@ -424,52 +379,44 @@ mod imp {
             let meter = provider.meter(SCOPE_NAME);
 
             Self {
-                #[cfg(not(feature = "go-metrics-compat"))]
                 op_duration: meter
                     .f64_histogram(names::OP_DURATION)
                     .with_unit("s")
-                    .with_boundaries(LATENCY_BUCKETS_SECONDS.to_vec())
                     .build(),
                 #[cfg(feature = "go-metrics-compat")]
-                op_duration: Timer::new(&meter, names::OP_DURATION_SUM, names::OP_DURATION_COUNT),
-                op_size: meter
-                    .u64_histogram(names::OP_SIZE)
-                    .with_unit("By")
-                    .with_boundaries(SIZE_BUCKETS_BYTES.to_vec())
-                    .build(),
-                #[cfg(not(feature = "go-metrics-compat"))]
+                compat_op_duration: Timer::new(
+                    &meter,
+                    compat_names::OP_DURATION_SUM,
+                    compat_names::OP_DURATION_COUNT,
+                ),
+                op_size: meter.u64_histogram(names::OP_SIZE).with_unit("By").build(),
                 batch_total_duration: meter
                     .f64_histogram(names::BATCH_TOTAL)
                     .with_unit("s")
-                    .with_boundaries(LATENCY_BUCKETS_SECONDS.to_vec())
                     .build(),
                 #[cfg(feature = "go-metrics-compat")]
-                batch_total_duration: Timer::new(
+                compat_batch_total_duration: Timer::new(
                     &meter,
-                    names::BATCH_TOTAL_SUM,
-                    names::BATCH_TOTAL_COUNT,
+                    compat_names::BATCH_TOTAL_SUM,
+                    compat_names::BATCH_TOTAL_COUNT,
                 ),
-                #[cfg(not(feature = "go-metrics-compat"))]
                 batch_exec_duration: meter
                     .f64_histogram(names::BATCH_EXEC)
                     .with_unit("s")
-                    .with_boundaries(LATENCY_BUCKETS_SECONDS.to_vec())
                     .build(),
                 #[cfg(feature = "go-metrics-compat")]
-                batch_exec_duration: Timer::new(
+                compat_batch_exec_duration: Timer::new(
                     &meter,
-                    names::BATCH_EXEC_SUM,
-                    names::BATCH_EXEC_COUNT,
+                    compat_names::BATCH_EXEC_SUM,
+                    compat_names::BATCH_EXEC_COUNT,
                 ),
                 batch_size: meter
                     .u64_histogram(names::BATCH_SIZE)
                     .with_unit("By")
-                    .with_boundaries(SIZE_BUCKETS_BYTES.to_vec())
                     .build(),
                 batch_request_count: meter
                     .u64_histogram(names::BATCH_REQUEST_COUNT)
                     .with_unit("1")
-                    .with_boundaries(COUNT_BUCKETS.to_vec())
                     .build(),
             }
         }
@@ -483,6 +430,8 @@ mod imp {
         ) {
             let attrs = attrs(namespace, operation, result);
             record_timer(&self.op_duration, duration, &attrs);
+            #[cfg(feature = "go-metrics-compat")]
+            self.compat_op_duration.record(duration, &attrs);
         }
 
         pub(crate) fn record_operation_size(
@@ -510,6 +459,13 @@ mod imp {
             let attrs = attrs(namespace, operation, result);
             record_timer(&self.batch_total_duration, total_duration, &attrs);
             record_timer(&self.batch_exec_duration, exec_duration, &attrs);
+            #[cfg(feature = "go-metrics-compat")]
+            {
+                self.compat_batch_total_duration
+                    .record(total_duration, &attrs);
+                self.compat_batch_exec_duration
+                    .record(exec_duration, &attrs);
+            }
             self.batch_size.record(value_size, &attrs);
             self.batch_request_count.record(request_count, &attrs);
         }
@@ -524,14 +480,8 @@ mod imp {
         ]
     }
 
-    #[cfg(not(feature = "go-metrics-compat"))]
     fn record_timer(timer: &Histogram<f64>, duration: std::time::Duration, attrs: &[KeyValue]) {
         timer.record(duration.as_secs_f64(), attrs);
-    }
-
-    #[cfg(feature = "go-metrics-compat")]
-    fn record_timer(timer: &Timer, duration: std::time::Duration, attrs: &[KeyValue]) {
-        timer.record(duration, attrs);
     }
 }
 
@@ -556,63 +506,271 @@ mod tests {
     use super::*;
 
     #[test]
-    fn semantic_histogram_boundaries_match_reference() {
-        assert_eq!(
-            LATENCY_BUCKETS_SECONDS,
-            &[
-                0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0,
-                2.0, 5.0, 10.0, 20.0, 50.0,
-            ]
-        );
-        assert_eq!(
-            SIZE_BUCKETS_BYTES,
-            &[
-                16.0,
-                32.0,
-                64.0,
-                128.0,
-                256.0,
-                512.0,
-                1_024.0,
-                2_048.0,
-                4_096.0,
-                8_192.0,
-                16_384.0,
-                32_768.0,
-                65_536.0,
-                131_072.0,
-                262_144.0,
-                524_288.0,
-                1_048_576.0,
-                2_097_152.0,
-                4_194_304.0,
-                8_388_608.0,
-            ]
-        );
-        assert_eq!(
-            COUNT_BUCKETS,
-            &[
-                1.0,
-                5.0,
-                10.0,
-                20.0,
-                50.0,
-                100.0,
-                200.0,
-                500.0,
-                1_000.0,
-                10_000.0,
-                20_000.0,
-                50_000.0,
-                100_000.0,
-                1_000_000.0,
-            ]
-        );
-    }
-
-    #[test]
     fn key_not_found_get_is_success_for_metrics() {
         let result = Err(Error::Oxia(OxiaError::KeyNotFound));
         assert_eq!(get_result_kind(&result), ResultKind::Success);
+    }
+}
+
+#[cfg(all(test, feature = "metrics"))]
+mod sdk_tests {
+    use std::sync::Arc;
+    use std::sync::Weak;
+    use std::time::Duration;
+
+    use opentelemetry_sdk::Resource;
+    use opentelemetry_sdk::metrics::Aggregation;
+    use opentelemetry_sdk::metrics::Instrument;
+    use opentelemetry_sdk::metrics::InstrumentKind;
+    use opentelemetry_sdk::metrics::ManualReader;
+    use opentelemetry_sdk::metrics::MetricResult;
+    use opentelemetry_sdk::metrics::Pipeline;
+    use opentelemetry_sdk::metrics::SdkMeterProvider;
+    use opentelemetry_sdk::metrics::Stream;
+    use opentelemetry_sdk::metrics::Temporality;
+    use opentelemetry_sdk::metrics::data;
+    use opentelemetry_sdk::metrics::data::ResourceMetrics;
+    use opentelemetry_sdk::metrics::reader::MetricReader;
+
+    use super::*;
+
+    const EXPONENTIAL_HISTOGRAM_MAX_SIZE: u32 = 160;
+    const EXPONENTIAL_HISTOGRAM_MAX_SCALE: i8 = 20;
+
+    #[test]
+    fn semantic_metrics_use_exponential_histograms() {
+        let (reader, _provider, metrics) = setup_metrics();
+
+        metrics.record_operation(
+            "default",
+            Operation::Get,
+            ResultKind::Success,
+            Duration::from_millis(250),
+        );
+        metrics.record_operation_size("default", Operation::Get, ResultKind::Success, 42);
+        metrics.record_batch(
+            "default",
+            Operation::Put,
+            ResultKind::Success,
+            Duration::from_secs(2),
+            Duration::from_millis(500),
+            128,
+            3,
+        );
+        metrics.record_operation_size("default", Operation::Get, ResultKind::Success, 0);
+
+        let rm = collect(&reader);
+
+        assert_exponential_f64(&rm, names::OP_DURATION, "s", 1, 0.25, true);
+        assert_exponential_u64(&rm, names::OP_SIZE, "By", 2, 42, true, true);
+        assert_exponential_f64(&rm, names::BATCH_TOTAL, "s", 1, 2.0, true);
+        assert_exponential_f64(&rm, names::BATCH_EXEC, "s", 1, 0.5, true);
+        assert_exponential_u64(&rm, names::BATCH_SIZE, "By", 1, 128, true, false);
+        assert_exponential_u64(&rm, names::BATCH_REQUEST_COUNT, "1", 1, 3, true, false);
+    }
+
+    #[cfg(feature = "go-metrics-compat")]
+    #[test]
+    fn go_metrics_compat_adds_only_latency_sum_count_metrics() {
+        let (reader, _provider, metrics) = setup_metrics();
+
+        metrics.record_operation(
+            "default",
+            Operation::Get,
+            ResultKind::Success,
+            Duration::from_millis(250),
+        );
+        metrics.record_operation_size("default", Operation::Get, ResultKind::Success, 42);
+        metrics.record_batch(
+            "default",
+            Operation::Put,
+            ResultKind::Success,
+            Duration::from_secs(2),
+            Duration::from_millis(500),
+            128,
+            3,
+        );
+
+        let rm = collect(&reader);
+
+        assert_exponential_f64(&rm, names::OP_DURATION, "s", 1, 0.25, true);
+        assert_sum_f64(&rm, "oxia_client_op_sum", "ms", 250.0);
+        assert_sum_u64(&rm, "oxia_client_op_count", "1", 1);
+        assert_sum_f64(&rm, "oxia_client_batch_total_sum", "ms", 2_000.0);
+        assert_sum_u64(&rm, "oxia_client_batch_total_count", "1", 1);
+        assert_sum_f64(&rm, "oxia_client_batch_exec_sum", "ms", 500.0);
+        assert_sum_u64(&rm, "oxia_client_batch_exec_count", "1", 1);
+        assert_metric_absent(&rm, "oxia_client_op_value");
+        assert_metric_absent(&rm, "oxia_client_batch_value");
+        assert_metric_absent(&rm, "oxia_client_batch_request");
+    }
+
+    fn setup_metrics() -> (
+        SharedManualReader,
+        crate::config::MeterProviderHandle,
+        Metrics,
+    ) {
+        let reader = SharedManualReader::new(
+            ManualReader::builder()
+                .with_temporality(Temporality::Cumulative)
+                .build(),
+        );
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader.clone())
+            .with_view(exponential_histogram_view)
+            .build();
+        let provider_handle: crate::config::MeterProviderHandle = Arc::new(provider);
+        let metrics = Metrics::new(Some(&provider_handle));
+        (reader, provider_handle, metrics)
+    }
+
+    fn exponential_histogram_view(instrument: &Instrument) -> Option<Stream> {
+        (instrument.kind == Some(InstrumentKind::Histogram)
+            && HISTOGRAM_NAMES.contains(&instrument.name.as_ref()))
+        .then(|| {
+            Stream::new()
+                .name(instrument.name.clone())
+                .description(instrument.description.clone())
+                .unit(instrument.unit.clone())
+                .aggregation(Aggregation::Base2ExponentialHistogram {
+                    max_size: EXPONENTIAL_HISTOGRAM_MAX_SIZE,
+                    max_scale: EXPONENTIAL_HISTOGRAM_MAX_SCALE,
+                    record_min_max: false,
+                })
+        })
+    }
+
+    fn collect(reader: &SharedManualReader) -> ResourceMetrics {
+        let mut rm = ResourceMetrics {
+            resource: Resource::empty(),
+            scope_metrics: Vec::new(),
+        };
+        reader
+            .collect(&mut rm)
+            .expect("metrics collection succeeds");
+        rm
+    }
+
+    fn assert_exponential_f64(
+        rm: &ResourceMetrics,
+        name: &str,
+        unit: &str,
+        count: usize,
+        sum: f64,
+        has_positive_bucket: bool,
+    ) {
+        let histogram = metric_data::<data::ExponentialHistogram<f64>>(rm, name, unit);
+        assert_eq!(Temporality::Cumulative, histogram.temporality);
+        assert_eq!(1, histogram.data_points.len());
+        let point = &histogram.data_points[0];
+        assert_eq!(count, point.count);
+        assert!((point.sum - sum).abs() < f64::EPSILON);
+        assert_eq!(None, point.min);
+        assert_eq!(None, point.max);
+        assert_eq!(0, point.zero_count);
+        assert_eq!(
+            has_positive_bucket,
+            point.positive_bucket.counts.iter().any(|count| *count > 0)
+        );
+    }
+
+    fn assert_exponential_u64(
+        rm: &ResourceMetrics,
+        name: &str,
+        unit: &str,
+        count: usize,
+        sum: u64,
+        has_positive_bucket: bool,
+        has_zero: bool,
+    ) {
+        let histogram = metric_data::<data::ExponentialHistogram<u64>>(rm, name, unit);
+        assert_eq!(Temporality::Cumulative, histogram.temporality);
+        assert_eq!(1, histogram.data_points.len());
+        let point = &histogram.data_points[0];
+        assert_eq!(count, point.count);
+        assert_eq!(sum, point.sum);
+        assert_eq!(None, point.min);
+        assert_eq!(None, point.max);
+        assert_eq!(u64::from(has_zero), point.zero_count);
+        assert_eq!(
+            has_positive_bucket,
+            point.positive_bucket.counts.iter().any(|count| *count > 0)
+        );
+    }
+
+    #[cfg(feature = "go-metrics-compat")]
+    fn assert_sum_f64(rm: &ResourceMetrics, name: &str, unit: &str, value: f64) {
+        let sum = metric_data::<data::Sum<f64>>(rm, name, unit);
+        assert_eq!(1, sum.data_points.len());
+        assert!((sum.data_points[0].value - value).abs() < f64::EPSILON);
+    }
+
+    #[cfg(feature = "go-metrics-compat")]
+    fn assert_sum_u64(rm: &ResourceMetrics, name: &str, unit: &str, value: u64) {
+        let sum = metric_data::<data::Sum<u64>>(rm, name, unit);
+        assert_eq!(1, sum.data_points.len());
+        assert_eq!(value, sum.data_points[0].value);
+    }
+
+    #[cfg(feature = "go-metrics-compat")]
+    fn assert_metric_absent(rm: &ResourceMetrics, name: &str) {
+        assert!(
+            metric(rm, name).is_none(),
+            "metric {name} should not be exported"
+        );
+    }
+
+    fn metric_data<'a, T>(rm: &'a ResourceMetrics, name: &str, unit: &str) -> &'a T
+    where
+        T: data::Aggregation,
+    {
+        let metric = metric(rm, name).unwrap_or_else(|| panic!("metric {name} is exported"));
+        assert_eq!(unit, metric.unit);
+        metric
+            .data
+            .as_any()
+            .downcast_ref::<T>()
+            .unwrap_or_else(|| panic!("metric {name} has expected data type"))
+    }
+
+    fn metric<'a>(
+        rm: &'a ResourceMetrics,
+        name: &str,
+    ) -> Option<&'a opentelemetry_sdk::metrics::data::Metric> {
+        rm.scope_metrics
+            .iter()
+            .flat_map(|scope| scope.metrics.iter())
+            .find(|metric| metric.name == name)
+    }
+
+    #[derive(Clone, Debug)]
+    struct SharedManualReader(Arc<ManualReader>);
+
+    impl SharedManualReader {
+        fn new(reader: ManualReader) -> Self {
+            Self(Arc::new(reader))
+        }
+    }
+
+    impl MetricReader for SharedManualReader {
+        fn register_pipeline(&self, pipeline: Weak<Pipeline>) {
+            self.0.register_pipeline(pipeline);
+        }
+
+        fn collect(&self, rm: &mut ResourceMetrics) -> MetricResult<()> {
+            self.0.collect(rm)
+        }
+
+        fn force_flush(&self) -> MetricResult<()> {
+            self.0.force_flush()
+        }
+
+        fn shutdown(&self) -> MetricResult<()> {
+            self.0.shutdown()
+        }
+
+        fn temporality(&self, kind: InstrumentKind) -> Temporality {
+            self.0.temporality(kind)
+        }
     }
 }

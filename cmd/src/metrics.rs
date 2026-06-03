@@ -17,15 +17,30 @@ use std::sync::Weak;
 
 use anyhow::Context as _;
 use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::metrics::Aggregation;
+use opentelemetry_sdk::metrics::Instrument;
 use opentelemetry_sdk::metrics::InstrumentKind;
 use opentelemetry_sdk::metrics::ManualReader;
 use opentelemetry_sdk::metrics::MetricResult;
 use opentelemetry_sdk::metrics::Pipeline;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
+use opentelemetry_sdk::metrics::Stream;
 use opentelemetry_sdk::metrics::Temporality;
 use opentelemetry_sdk::metrics::data::ResourceMetrics;
 use opentelemetry_sdk::metrics::exporter::PushMetricExporter;
 use opentelemetry_sdk::metrics::reader::MetricReader;
+
+const EXPONENTIAL_HISTOGRAM_MAX_SIZE: u32 = 160;
+const EXPONENTIAL_HISTOGRAM_MAX_SCALE: i8 = 20;
+
+const HISTOGRAM_NAMES: &[&str] = &[
+    "db.client.operation.duration",
+    "db.client.operation.size",
+    "db.client.batch.duration",
+    "db.client.batch.exec_duration",
+    "db.client.batch.size",
+    "db.client.batch.request_count",
+];
 
 #[derive(Debug)]
 pub struct MetricsOutput {
@@ -44,6 +59,7 @@ impl MetricsOutput {
         );
         let provider = SdkMeterProvider::builder()
             .with_reader(reader.clone())
+            .with_view(exponential_histogram_view)
             .build();
         Self {
             provider,
@@ -73,6 +89,27 @@ impl MetricsOutput {
             .context("failed to shut down metrics provider")
     }
 }
+
+fn exponential_histogram_view(instrument: &Instrument) -> Option<Stream> {
+    (instrument.kind == Some(InstrumentKind::Histogram)
+        && HISTOGRAM_NAMES.contains(&instrument.name.as_ref()))
+    .then(|| {
+        Stream::new()
+            .name(instrument.name.clone())
+            .description(instrument.description.clone())
+            .unit(instrument.unit.clone())
+            .aggregation(Aggregation::Base2ExponentialHistogram {
+                max_size: EXPONENTIAL_HISTOGRAM_MAX_SIZE,
+                max_scale: EXPONENTIAL_HISTOGRAM_MAX_SCALE,
+                record_min_max: false,
+            })
+    })
+}
+
+// SharedManualReader is a wrapper to address ownership issues with the
+// MeterProvider builder, that takes ownership of a MetricReader. But we
+// need to keep a reference for collecting the metrics at program shutdown,
+// hence this Arc wrapper.
 
 #[derive(Clone, Debug)]
 struct SharedManualReader(Arc<ManualReader>);
