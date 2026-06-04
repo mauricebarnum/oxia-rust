@@ -3,7 +3,7 @@ ARG CARGO_HOME=/root/.cargo
 ARG RUSTUP_HOME=/root/.rustup
 ARG HOME=/root
 ARG RUST_VERSION=1.96.0
-ARG GO_VERSION=1.26.3
+ARG GO_VERSION=1.26.4
 
 # ===== 1. Pull Official Images =====
 FROM rust:${RUST_VERSION} AS rust-official
