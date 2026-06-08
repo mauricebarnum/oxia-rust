@@ -25,8 +25,8 @@ tokio-util = "0.7.18"
 bon = { version = "3.9.1", features = ["implied-bounds"] }
 dashmap = { version = "6", optional = true }
 fastrand = "2.4.1"
-prost = "0.14.3"
-prost-types = "0.14.3"
+prost = "0.14.4"
+prost-types = "0.14.4"
 
 [features]
 bench-dashmap = ["dep:dashmap"]
@@ -34,9 +34,9 @@ bench-dashmap = ["dep:dashmap"]
 [dev-dependencies]
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
-chrono = "0.4.44"
-socket2 = "0.6.3"
-test-log = { version = "0.2.20", features = ["trace", "color"] }
+chrono = "0.4.45"
+socket2 = "0.6.4"
+test-log = { version = "0.2.21", features = ["trace", "color"] }
 oxia-bin-util = { path = "../oxia-bin-util" }
 tempfile = "3.27.0"
 anyhow = "1.0.102"
