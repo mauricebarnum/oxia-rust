@@ -20,12 +20,14 @@
 
 #![cfg(not(miri))]
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
 use mauricebarnum_oxia_client::Client;
 use mauricebarnum_oxia_client::batch_get;
 use mauricebarnum_oxia_client::config;
+use tokio::sync::Barrier;
 
 mod common;
 use common::TestCluster;
@@ -51,7 +53,7 @@ async fn connect_cluster(cluster: &TestCluster) -> Client {
 #[test_log::test(tokio::test)]
 async fn test_put_get_survives_kill() -> anyhow::Result<()> {
     let timeout = tokio::time::timeout(Duration::from_mins(2), async {
-        let mut cluster = TestCluster::start(3, 3, 4)?;
+        let mut cluster = TestCluster::start(3, 3, 4).await?;
         let client = connect_cluster(&cluster).await;
 
         // Put 20 keys
@@ -62,7 +64,6 @@ async fn test_put_get_survives_kill() -> anyhow::Result<()> {
 
         // Kill server 1
         cluster.kill_server(1)?;
-        tokio::time::sleep(Duration::from_secs(4)).await;
 
         // Get all 20 keys
         for i in 0..20 {
@@ -91,7 +92,7 @@ async fn test_put_get_survives_kill() -> anyhow::Result<()> {
 #[test_log::test(tokio::test)]
 async fn test_put_get_survives_stop() -> anyhow::Result<()> {
     let timeout = tokio::time::timeout(Duration::from_mins(2), async {
-        let mut cluster = TestCluster::start(3, 3, 4)?;
+        let mut cluster = TestCluster::start(3, 3, 4).await?;
         let client = connect_cluster(&cluster).await;
 
         // Put 20 keys
@@ -129,7 +130,7 @@ async fn test_put_get_survives_stop() -> anyhow::Result<()> {
 #[test_log::test(tokio::test)]
 async fn test_fan_out_ops_survive_leader_change() -> anyhow::Result<()> {
     let timeout = tokio::time::timeout(Duration::from_mins(2), async {
-        let mut cluster = TestCluster::start(3, 3, 4)?;
+        let mut cluster = TestCluster::start(3, 3, 4).await?;
         let client = connect_cluster(&cluster).await;
 
         // Put 50 keys
@@ -140,7 +141,6 @@ async fn test_fan_out_ops_survive_leader_change() -> anyhow::Result<()> {
 
         // Kill server 2
         cluster.kill_server(2)?;
-        tokio::time::sleep(Duration::from_secs(4)).await;
 
         // List
         let list_result = trace_err!(client.list("lc-fo-", "lc-fo-~").await)?;
@@ -194,7 +194,7 @@ async fn test_fan_out_ops_survive_leader_change() -> anyhow::Result<()> {
 #[test_log::test(tokio::test)]
 async fn test_kill_restart_kill() -> anyhow::Result<()> {
     let timeout = tokio::time::timeout(Duration::from_mins(2), async {
-        let mut cluster = TestCluster::start(3, 3, 4)?;
+        let mut cluster = TestCluster::start(3, 3, 4).await?;
         let client = connect_cluster(&cluster).await;
 
         // Put initial data
@@ -205,7 +205,6 @@ async fn test_kill_restart_kill() -> anyhow::Result<()> {
 
         // Kill server 1
         cluster.kill_server(1)?;
-        tokio::time::sleep(Duration::from_secs(4)).await;
 
         // Verify reads
         for i in 0..20 {
@@ -218,11 +217,10 @@ async fn test_kill_restart_kill() -> anyhow::Result<()> {
         }
 
         // Restart server 1
-        cluster.restart_server(1)?;
+        cluster.restart_server(1).await?;
 
         // Kill server 2
         cluster.kill_server(2)?;
-        tokio::time::sleep(Duration::from_secs(4)).await;
 
         // Verify reads + writes
         for i in 0..20 {
@@ -251,7 +249,7 @@ async fn test_kill_restart_kill() -> anyhow::Result<()> {
 #[test_log::test(tokio::test)]
 async fn test_concurrent_ops_during_kill() -> anyhow::Result<()> {
     let timeout = tokio::time::timeout(Duration::from_mins(2), async {
-        let mut cluster = TestCluster::start(3, 3, 4)?;
+        let mut cluster = TestCluster::start(3, 3, 4).await?;
         let client = connect_cluster(&cluster).await;
 
         // Put initial data
@@ -262,9 +260,12 @@ async fn test_concurrent_ops_during_kill() -> anyhow::Result<()> {
 
         // Spawn 5 concurrent tasks doing put/get loops
         let mut handles = Vec::new();
+        let start = Arc::new(Barrier::new(6));
         for task_id in 0..5u32 {
             let c = client.clone();
+            let start = Arc::clone(&start);
             let handle = tokio::spawn(async move {
+                start.wait().await;
                 for round in 0..10u32 {
                     let key = format!("lc-co-t{task_id}-{round:04}");
                     c.put(&key, format!("v-{task_id}-{round}"))
@@ -283,8 +284,8 @@ async fn test_concurrent_ops_during_kill() -> anyhow::Result<()> {
             handles.push(handle);
         }
 
-        // Let tasks start, then kill a server
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Release the workers and kill a server while their operations begin.
+        start.wait().await;
         cluster.kill_server(1)?;
 
         // Wait for all tasks to complete

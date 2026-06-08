@@ -12,29 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod proto {
-    tonic::include_proto!("io.oxia.proto.v1");
-    pub use oxia_admin_client::OxiaAdminClient;
-    pub use oxia_client_client::OxiaClientClient;
+#![cfg(not(miri))]
 
-    pub mod google {
-        pub mod rpc {
-            tonic::include_proto!("google.rpc");
-        }
-    }
-}
+mod common;
+use common::TestCluster;
 
-pub mod replication {
-    tonic::include_proto!("replication");
-}
+#[test_log::test(tokio::test)]
+async fn concurrent_clusters_start_on_distinct_ports() -> anyhow::Result<()> {
+    let (left, right) = tokio::join!(TestCluster::start(3, 2, 4), TestCluster::start(3, 2, 4),);
+    let left = left?;
+    let right = right?;
 
-#[doc(hidden)]
-pub mod io {
-    pub mod oxia {
-        pub mod proto {
-            pub mod v1 {
-                pub use crate::proto::*;
-            }
-        }
-    }
+    let left_addrs = left.server_addrs();
+    let right_addrs = right.server_addrs();
+    assert!(
+        left_addrs.iter().all(|addr| !right_addrs.contains(addr)),
+        "concurrent clusters must not share public addresses"
+    );
+
+    Ok(())
 }

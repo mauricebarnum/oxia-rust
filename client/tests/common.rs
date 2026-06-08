@@ -37,7 +37,15 @@ use anyhow::anyhow;
 use mauricebarnum_oxia_client::Client;
 use mauricebarnum_oxia_client::config;
 use mauricebarnum_oxia_client::errors::Error as ClientError;
+use mauricebarnum_oxia_common::replication::GetStatusRequest;
+use mauricebarnum_oxia_common::replication::ServingStatus;
+use mauricebarnum_oxia_common::replication::oxia_coordination_client::OxiaCoordinationClient;
 use tempfile::TempDir;
+use tokio::time::sleep as async_sleep;
+
+const CLUSTER_PHASE_TIMEOUT: Duration = Duration::from_secs(45);
+const CLUSTER_BOOTSTRAP_ATTEMPTS: usize = 3;
+const STABLE_TOPOLOGY_POLLS: usize = 2;
 
 #[inline]
 #[allow(dead_code)]
@@ -141,41 +149,6 @@ pub fn wait_for_ready(addr: &str, timeout_secs: u64) -> anyhow::Result<()> {
         sleep(Duration::from_millis(100));
     }
     Err(anyhow!("Port did not open in time"))
-}
-
-/// Wait for the gRPC health service on `addr` to report SERVING.
-///
-/// This polls `oxia health` until it succeeds or `timeout_secs` elapses.
-/// The `oxia-readiness` service transitions to SERVING only after the server
-/// receives its first shard assignment from the coordinator.
-pub fn wait_for_health(addr: &str, service: &str, timeout_secs: u64) -> anyhow::Result<()> {
-    let (host, port) = addr
-        .rsplit_once(':')
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, format!("bad addr: {addr}")))?;
-    let start = Instant::now();
-    while start.elapsed().as_secs() < timeout_secs {
-        let status = Command::new(oxia_cli_path())
-            .arg("health")
-            .arg("--host")
-            .arg(host)
-            .arg("--port")
-            .arg(port)
-            .arg("--service")
-            .arg(service)
-            .arg("--timeout")
-            .arg("2s")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        match status {
-            Ok(s) if s.success() => return Ok(()),
-            _ => sleep(Duration::from_millis(200)),
-        }
-    }
-    Err(anyhow!(
-        "health check for {addr} ({service}) did not pass within {timeout_secs}s"
-    ))
 }
 
 struct TestServerArgs {
@@ -289,6 +262,104 @@ struct ServerNode {
     process: Option<Child>,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ShardStatus {
+    server: usize,
+    status: ServingStatus,
+    head_offset: i64,
+    commit_offset: i64,
+}
+
+struct ClusterProcesses {
+    servers: Vec<ServerNode>,
+    coordinator: Option<Child>,
+}
+
+impl ClusterProcesses {
+    fn shutdown(&mut self) {
+        if let Some(mut process) = self.coordinator.take() {
+            let _ = process.kill();
+            let _ = process.wait();
+        }
+        for server in &mut self.servers {
+            if let Some(mut process) = server.process.take() {
+                let _ = process.kill();
+                let _ = process.wait();
+            }
+        }
+    }
+}
+
+impl Drop for ClusterProcesses {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+async fn wait_for_process_port(
+    process: &mut Child,
+    addr: &str,
+    name: &str,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = process.try_wait()? {
+            return Err(anyhow!("{name} exited before opening {addr}: {status}"));
+        }
+        if TcpStream::connect(addr).is_ok() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(anyhow!("{name} did not open {addr} within {timeout:?}"));
+        }
+        async_sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn wait_for_node_port(
+    server: &mut ServerNode,
+    internal: bool,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    let addr = if internal {
+        server.internal_addr.clone()
+    } else {
+        server.public_addr.clone()
+    };
+    let process = server
+        .process
+        .as_mut()
+        .ok_or_else(|| anyhow!("server at {addr} is stopped"))?;
+    wait_for_process_port(process, &addr, "data server", timeout).await
+}
+
+async fn get_shard_status(addr: &str, shard: u32) -> anyhow::Result<Option<ShardStatus>> {
+    let endpoint = format!("http://{addr}");
+    let mut client = tokio::time::timeout(
+        Duration::from_secs(2),
+        OxiaCoordinationClient::connect(endpoint),
+    )
+    .await??;
+    let request = GetStatusRequest {
+        shard: i64::from(shard),
+    };
+    match tokio::time::timeout(Duration::from_secs(2), client.get_status(request)).await? {
+        Ok(response) => {
+            let response = response.into_inner();
+            let status = ServingStatus::try_from(response.status)?;
+            Ok(Some(ShardStatus {
+                server: 0,
+                status,
+                head_offset: response.head_offset,
+                commit_offset: response.commit_offset,
+            }))
+        }
+        Err(status) if status.code() == tonic::Code::FailedPrecondition => Ok(None),
+        Err(status) => Err(status.into()),
+    }
+}
+
 #[allow(dead_code)]
 struct CoordinatorNode {
     internal_addr: String,
@@ -304,6 +375,8 @@ pub struct TestCluster {
     coordinator: CoordinatorNode,
     /// The public address of the first server (used for client connections).
     service_addr: String,
+    replication_factor: usize,
+    initial_shard_count: u32,
 }
 
 #[allow(dead_code)]
@@ -312,7 +385,29 @@ impl TestCluster {
     ///
     /// `replication_factor` and `initial_shard_count` configure the namespace.
     #[allow(clippy::too_many_lines)]
-    pub fn start(
+    pub async fn start(
+        num_servers: usize,
+        replication_factor: u32,
+        initial_shard_count: u32,
+    ) -> anyhow::Result<Self> {
+        let mut errors = Vec::new();
+        for attempt in 1..=CLUSTER_BOOTSTRAP_ATTEMPTS {
+            match Self::start_once(num_servers, replication_factor, initial_shard_count).await {
+                Ok(cluster) => return Ok(cluster),
+                Err(error) => {
+                    errors.push(format!("attempt {attempt}: {error:#}"));
+                    async_sleep(Duration::from_millis(100 * attempt as u64)).await;
+                }
+            }
+        }
+        Err(anyhow!(
+            "cluster bootstrap failed after {CLUSTER_BOOTSTRAP_ATTEMPTS} attempts:\n{}",
+            errors.join("\n")
+        ))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn start_once(
         num_servers: usize,
         replication_factor: u32,
         initial_shard_count: u32,
@@ -367,7 +462,10 @@ impl TestCluster {
         }
 
         // Start data servers
-        let mut servers = Vec::with_capacity(num_servers);
+        let mut processes = ClusterProcesses {
+            servers: Vec::with_capacity(num_servers),
+            coordinator: None,
+        };
         for (i, sa) in server_addrs.iter().enumerate() {
             let srv_data = data_dir.path().join(format!("server-{i}"));
             let srv_db = srv_data.join("db");
@@ -390,7 +488,7 @@ impl TestCluster {
                     .spawn()
             )?;
 
-            servers.push(ServerNode {
+            processes.servers.push(ServerNode {
                 public_addr: sa.public.clone(),
                 internal_addr: sa.internal.clone(),
                 metrics_addr: sa.metrics.clone(),
@@ -401,8 +499,11 @@ impl TestCluster {
         }
 
         // Wait for each server's public port to be reachable
-        for srv in &servers {
-            trace_err!(wait_for_ready(&srv.public_addr, 30))?;
+        for index in 0..processes.servers.len() {
+            trace_err!(
+                wait_for_node_port(&mut processes.servers[index], false, CLUSTER_PHASE_TIMEOUT,)
+                    .await
+            )?;
         }
 
         // Start coordinator
@@ -423,39 +524,188 @@ impl TestCluster {
                 .spawn()
         )?;
 
+        processes.coordinator = Some(coord_process);
+        // Wait for coordinator's internal port while the startup guard owns it.
+        trace_err!(
+            wait_for_process_port(
+                processes
+                    .coordinator
+                    .as_mut()
+                    .expect("coordinator process should exist"),
+                &coord_internal,
+                "coordinator",
+                CLUSTER_PHASE_TIMEOUT,
+            )
+            .await
+        )?;
+
         let coordinator = CoordinatorNode {
             internal_addr: coord_internal,
             metrics_addr: coord_metrics,
             admin_addr: coord_admin,
-            process: coord_process,
+            process: processes
+                .coordinator
+                .take()
+                .expect("coordinator process should exist"),
         };
 
-        // Wait for coordinator's internal port
-        trace_err!(wait_for_ready(&coordinator.internal_addr, 30))?;
-
-        // Wait for each server to receive shard assignments from the
-        // coordinator.  The `oxia-readiness` gRPC health service transitions
-        // to SERVING only after the first shard assignment arrives.
-        for srv in &servers {
-            trace_err!(wait_for_health(&srv.internal_addr, "oxia-readiness", 30))?;
-        }
-
-        // Brief pause for shard leader elections to settle after assignment
-        // propagation.
-        sleep(Duration::from_secs(2));
-
-        let service_addr = servers[0].public_addr.clone();
-
-        Ok(Self {
+        let service_addr = processes.servers[0].public_addr.clone();
+        let mut cluster = Self {
             data_dir,
-            servers,
+            servers: std::mem::take(&mut processes.servers),
             coordinator,
             service_addr,
-        })
+            replication_factor: usize::try_from(replication_factor)?,
+            initial_shard_count,
+        };
+        trace_err!(
+            cluster
+                .wait_for_stable_topology(CLUSTER_PHASE_TIMEOUT)
+                .await
+        )?;
+
+        Ok(cluster)
     }
 
     pub fn coordinator_admin_addr(&self) -> &str {
         &self.coordinator.admin_addr
+    }
+
+    fn check_processes(&mut self) -> anyhow::Result<()> {
+        if let Some(status) = self.coordinator.process.try_wait()? {
+            return Err(anyhow!("coordinator exited unexpectedly: {status}"));
+        }
+        for (index, server) in self.servers.iter_mut().enumerate() {
+            if let Some(process) = server.process.as_mut()
+                && let Some(status) = process.try_wait()?
+            {
+                return Err(anyhow!("server {index} exited unexpectedly: {status}"));
+            }
+        }
+        Ok(())
+    }
+
+    async fn shard_statuses(&self, shard: u32) -> Vec<ShardStatus> {
+        let requests = self
+            .servers
+            .iter()
+            .enumerate()
+            .filter_map(|(server, node)| {
+                node.process.as_ref()?;
+                let addr = node.internal_addr.clone();
+                Some(async move {
+                    get_shard_status(&addr, shard)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|mut status| {
+                            status.server = server;
+                            status
+                        })
+                })
+            });
+        futures::future::join_all(requests)
+            .await
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+
+    async fn topology_state(&self) -> (bool, String) {
+        let mut ready = true;
+        let mut details = Vec::new();
+        for shard in 0..self.initial_shard_count {
+            let statuses = self.shard_statuses(shard).await;
+            let leaders = statuses
+                .iter()
+                .filter(|status| status.status == ServingStatus::Leader)
+                .count();
+            let members = statuses
+                .iter()
+                .filter(|status| status.status != ServingStatus::NotMember)
+                .count();
+            if leaders != 1 || members != self.replication_factor {
+                ready = false;
+            }
+            details.push(format!(
+                "shard {shard}: leaders={leaders}, members={members}, statuses={statuses:?}"
+            ));
+        }
+        (ready, details.join("; "))
+    }
+
+    async fn wait_for_stable_topology(&mut self, timeout: Duration) -> anyhow::Result<()> {
+        let deadline = Instant::now() + timeout;
+        let mut stable_polls = 0;
+        loop {
+            self.check_processes()?;
+            let (ready, state) = self.topology_state().await;
+            if ready {
+                stable_polls += 1;
+                if stable_polls >= STABLE_TOPOLOGY_POLLS {
+                    return Ok(());
+                }
+            } else {
+                stable_polls = 0;
+            }
+            if Instant::now() >= deadline {
+                return Err(anyhow!(
+                    "cluster topology did not stabilize within {timeout:?}: {state}"
+                ));
+            }
+            async_sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    async fn wait_for_restarted_node(
+        &mut self,
+        index: usize,
+        timeout: Duration,
+    ) -> anyhow::Result<()> {
+        let deadline = Instant::now() + timeout;
+        let mut stable_polls = 0;
+        loop {
+            self.check_processes()?;
+            let mut ready = true;
+            let mut details = Vec::new();
+            for shard in 0..self.initial_shard_count {
+                let statuses = self.shard_statuses(shard).await;
+                let leaders = statuses
+                    .iter()
+                    .filter(|status| status.status == ServingStatus::Leader)
+                    .count();
+                let members: Vec<_> = statuses
+                    .iter()
+                    .filter(|status| status.status != ServingStatus::NotMember)
+                    .collect();
+                let max_commit = members.iter().map(|status| status.commit_offset).max();
+                let restarted = members.iter().find(|status| status.server == index);
+                let shard_ready = leaders == 1
+                    && members.len() == self.replication_factor
+                    && restarted.is_some_and(|status| {
+                        max_commit.is_some_and(|commit| status.head_offset >= commit)
+                    });
+                ready &= shard_ready;
+                details.push(format!(
+                    "shard {shard}: leaders={leaders}, max_commit={max_commit:?}, statuses={statuses:?}"
+                ));
+            }
+            let state = details.join("; ");
+            if ready {
+                stable_polls += 1;
+                if stable_polls >= STABLE_TOPOLOGY_POLLS {
+                    return Ok(());
+                }
+            } else {
+                stable_polls = 0;
+            }
+            if Instant::now() >= deadline {
+                return Err(anyhow!(
+                    "server {index} did not rejoin and catch up within {timeout:?}: {state}"
+                ));
+            }
+            async_sleep(Duration::from_millis(200)).await;
+        }
     }
 
     pub fn shutdown(&mut self) {
@@ -507,7 +757,7 @@ impl TestCluster {
 
     /// Restart a previously stopped server on the same ports and data
     /// directory.
-    pub fn restart_server(&mut self, index: usize) -> anyhow::Result<()> {
+    pub async fn restart_server(&mut self, index: usize) -> anyhow::Result<()> {
         let srv = &mut self.servers[index];
         assert!(srv.process.is_none(), "server {index} is still running");
         let child = trace_err!(
@@ -527,10 +777,11 @@ impl TestCluster {
                 .spawn()
         )?;
         srv.process = Some(child);
-        trace_err!(wait_for_ready(&srv.public_addr, 30))?;
-        trace_err!(wait_for_health(&srv.internal_addr, "oxia-readiness", 30))?;
-        sleep(Duration::from_secs(2));
-        Ok(())
+        trace_err!(wait_for_node_port(srv, false, CLUSTER_PHASE_TIMEOUT).await)?;
+        trace_err!(
+            self.wait_for_restarted_node(index, CLUSTER_PHASE_TIMEOUT)
+                .await
+        )
     }
 
     /// Connect a client to the cluster, retrying to handle asynchronous shard
@@ -606,7 +857,7 @@ impl TestEnv for TestCluster {
     }
 
     fn test_timeout(&self) -> Duration {
-        Duration::from_mins(1)
+        Duration::from_mins(2)
     }
 }
 
@@ -675,7 +926,7 @@ impl TestConfig {
         }
     }
 
-    pub fn start(&self) -> anyhow::Result<Box<dyn TestEnv>> {
+    pub async fn start(&self) -> anyhow::Result<Box<dyn TestEnv>> {
         match *self {
             Self::Standalone { shards } => {
                 let server = TestServer::start_nshards(shards)?;
@@ -686,7 +937,7 @@ impl TestConfig {
                 rf,
                 shards,
             } => {
-                let cluster = TestCluster::start(servers, rf, shards)?;
+                let cluster = TestCluster::start(servers, rf, shards).await?;
                 Ok(Box::new(cluster))
             }
         }
@@ -701,7 +952,7 @@ macro_rules! parameterized_test {
             $(
                 #[test_log::test(tokio::test)]
                 async fn $name() -> anyhow::Result<()> {
-                    let env = $config.start()?;
+                    let env = $config.start().await?;
                     let timeout = env.test_timeout();
                     tokio::time::timeout(timeout, super::$test_fn(env.as_ref())).await?
                 }

@@ -17,7 +17,6 @@
 #![cfg(not(miri))]
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use mauricebarnum_oxia_client::Client;
 use mauricebarnum_oxia_client::config;
@@ -32,7 +31,7 @@ use common::TestCluster;
 /// the client recovers by reconnecting the assignment stream to another server.
 #[test_log::test(tokio::test)]
 async fn test_failover_on_server0_kill() -> anyhow::Result<()> {
-    let mut cluster = TestCluster::start(3, 3, 4)?;
+    let mut cluster = TestCluster::start(3, 3, 4).await?;
     let all_addrs = cluster.server_addrs();
 
     // Connect with all server addresses so the client can fail over
@@ -52,9 +51,6 @@ async fn test_failover_on_server0_kill() -> anyhow::Result<()> {
     // Kill server 0 — the shard assignment stream was initially connected here
     tracing::info!("killing server 0");
     cluster.kill_server(0)?;
-
-    // Brief pause to let the client notice the stream break
-    tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Verify reads still work (client should have reconnected to server 1 or 2)
     let mut read_successes = 0u32;
@@ -118,7 +114,7 @@ async fn test_failover_on_server0_kill() -> anyhow::Result<()> {
 /// discovers server addresses via `ListNodes`, then verify failover works.
 #[test_log::test(tokio::test)]
 async fn test_coordinator_bootstrap() -> anyhow::Result<()> {
-    let mut cluster = TestCluster::start(3, 3, 4)?;
+    let mut cluster = TestCluster::start(3, 3, 4).await?;
 
     // Connect with coordinator_addr for address discovery
     let cfg = config::Config::builder()
@@ -139,8 +135,6 @@ async fn test_coordinator_bootstrap() -> anyhow::Result<()> {
     // Kill server 0
     tracing::info!("killing server 0");
     cluster.kill_server(0)?;
-
-    tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Verify the client recovers via coordinator-discovered addresses
     let mut read_successes = 0u32;
