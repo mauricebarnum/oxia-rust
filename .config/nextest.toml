@@ -1,0 +1,3 @@
+[[profile.default.overrides]]
+filter = 'test(cluster_3n_6s)'
+slow-timeout = { period = "120s" }
