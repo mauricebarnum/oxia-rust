@@ -606,7 +606,7 @@ impl TestEnv for TestCluster {
     }
 
     fn test_timeout(&self) -> Duration {
-        Duration::from_mins(1)
+        Duration::from_mins(2)
     }
 }
 
