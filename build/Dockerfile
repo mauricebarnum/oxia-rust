@@ -3,6 +3,7 @@ ARG CARGO_HOME=/root/.cargo
 ARG RUSTUP_HOME=/root/.rustup
 ARG HOME=/root
 ARG RUST_VERSION=1.96.0
+ARG RUST_VERSION_EXTERNAL_TYPES=nightly-2026-03-20
 ARG GO_VERSION=1.26.4
 
 # ===== 1. Pull Official Images =====
@@ -11,11 +12,17 @@ FROM golang:${GO_VERSION} AS go-official
 
 # ===== 2. Toolchain & Tool Preparer =====
 FROM rust-official AS toolchain-builder
+ARG RUST_VERSION_EXTERNAL_TYPES
+
 # Use image defaults (/usr/local) for CARGO_HOME/RUSTUP_HOME
 RUN rustup component add clippy && \
     rustup toolchain install --profile minimal --allow-downgrade nightly && \
     rustup component add --toolchain nightly miri rust-src && \
     cargo +nightly miri setup
+
+RUN rustup toolchain install "${RUST_VERSION_EXTERNAL_TYPES}" --profile minimal && \
+    cargo +"${RUST_VERSION_EXTERNAL_TYPES}" install cargo-check-external-types
+
 
 RUN curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash && \
     cargo binstall -y cargo-deny cargo-nextest sccache
@@ -109,11 +116,13 @@ RUN --mount=type=bind,dst=/src \
 FROM os-base AS final
 ARG CARGO_HOME
 ARG RUSTUP_HOME
+ARG RUST_VERSION_EXTERNAL_TYPES
 ARG HOME
 
 ENV CARGO_HOME=${CARGO_HOME} \
     RUSTUP_HOME=${RUSTUP_HOME} \
     CARGO_TARGET_DIR=${HOME}/deps/target \
+    RUST_VERSION_EXTERNAL_TYPES="${RUST_VERSION_EXTERNAL_TYPES}" \
     PATH=${CARGO_HOME}/bin:${RUSTUP_HOME}/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Copy all pre‑built pieces (root owned, no chown)
