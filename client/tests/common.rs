@@ -580,6 +580,19 @@ pub trait TestEnv: Send + Sync {
     fn service_addr(&self) -> &str;
     fn needs_connect_retry(&self) -> bool;
     fn test_timeout(&self) -> Duration;
+    /// Per-request timeout for operations against this environment.
+    fn request_timeout(&self) -> Option<Duration> {
+        None
+    }
+    /// Operation-level retry config for this environment (e.g. to tolerate
+    /// leadership transitions in cluster tests).
+    fn retry_config(&self) -> Option<config::RetryConfig> {
+        None
+    }
+    /// Whether to retry on a stale shard map.
+    fn retry_on_stale_shard_map(&self) -> bool {
+        false
+    }
 }
 
 impl TestEnv for TestServer {
@@ -606,7 +619,19 @@ impl TestEnv for TestCluster {
     }
 
     fn test_timeout(&self) -> Duration {
-        Duration::from_mins(1)
+        Duration::from_mins(2)
+    }
+
+    fn request_timeout(&self) -> Option<Duration> {
+        Some(Duration::from_secs(20))
+    }
+
+    fn retry_config(&self) -> Option<config::RetryConfig> {
+        Some(config::RetryConfig::new(5, Duration::from_millis(200)))
+    }
+
+    fn retry_on_stale_shard_map(&self) -> bool {
+        true
     }
 }
 
@@ -623,8 +648,16 @@ pub async fn connect_env_with<S>(
 where
     S: config::config_builder::State,
     S::ServiceDiscovery: config::config_builder::IsUnset,
+    S::RequestTimeout: config::config_builder::IsUnset,
+    S::Retry: config::config_builder::IsUnset,
+    S::RetryOnStaleShardMap: config::config_builder::IsUnset,
 {
-    let cfg = opts.service_addr(env.service_addr().to_owned()).build();
+    let cfg = opts
+        .maybe_request_timeout(env.request_timeout())
+        .maybe_retry(env.retry_config())
+        .retry_on_stale_shard_map(env.retry_on_stale_shard_map())
+        .service_addr(env.service_addr().to_owned())
+        .build();
 
     if env.needs_connect_retry() {
         let mut last_err = None;
