@@ -1145,20 +1145,19 @@ impl Client {
 
     /// Gets a list with timeout handling
     #[allow(dead_code)]
-    pub(crate) async fn list_with_timeout(
+    async fn list_with_timeout(
         &self,
         start_inclusive: &str,
         end_exclusive: &str,
         opts: &ListOptions,
         timeout: Duration,
     ) -> Result<ListResponse> {
-        // Apply timeout to the list operation
-        match tokio::time::timeout(timeout, self.list(start_inclusive, end_exclusive, opts)).await {
-            Ok(result) => result,
-            Err(_) => Err(Error::Custom(format!(
-                "List request timed out after {timeout:?}"
-            ))),
-        }
+        // Experimental placeholder for shard-local timeout handling.
+        crate::util::with_timeout(
+            Some(timeout),
+            self.list(start_inclusive, end_exclusive, opts),
+        )
+        .await
     }
 
     /// Scans for records in the given range with options
