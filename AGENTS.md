@@ -68,6 +68,7 @@ CI uses `--release --frozen`. Local commands can omit those flags.
 - **Clippy**: Strict workspace Cargo.toml settings must be followed.
 - **Imports**: Prefer unmerged `use` statements (one item per line). Do not merge imports (e.g. avoid `use std::{foo, bar};`).
 - **Docs**: Terse, idiomatic Rust API guidelines; prefer `const fn` when possible.
+- **Formatting**: Use `just fmt`, or run `rustfmt` with nightly; stable `cargo fmt` does not honor the repository's unstable import formatting settings.
 - **GitHub**: Submit changes via Draft PRs; push with `--force-with-lease`; always verify clippy and tests locally before pushing. Ignore local `main`.
 
 ## Dependencies
