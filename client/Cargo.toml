@@ -43,7 +43,7 @@ test-log = { version = "0.2.21", features = ["trace", "color"] }
 oxia-bin-util = { path = "../oxia-bin-util" }
 tempfile = "3.27.0"
 anyhow = "1.0.102"
-itertools = "0.14.0"
+itertools = "0.15.0"
 nix = { version = "0.31", default-features = false, features = ["signal"] }
 opentelemetry_sdk = { version = "0.32.1", default-features = false, features = [
     "metrics",
