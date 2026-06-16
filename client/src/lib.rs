@@ -20,8 +20,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Context;
 use std::time::Duration;
-use std::time::Instant;
 
+use backon::FibonacciBuilder;
+use backon::Retryable;
 use bon::Builder;
 use bytes::Bytes;
 use futures::stream::StreamExt;
@@ -745,18 +746,23 @@ const fn extract_leader_hint(e: &Error) -> Option<&LeaderHint> {
     }
 }
 
-fn remaining_timeout(
-    request_timeout: Option<Duration>,
-    start: Option<Instant>,
-) -> Option<Duration> {
-    request_timeout
-        .zip(start)
-        .map(|(timeout, started)| timeout.saturating_sub(started.elapsed()))
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RetrySafety {
+    Idempotent,
+    NonIdempotent,
+}
+
+impl RetrySafety {
+    #[inline]
+    fn should_retry(self, error: &Error) -> bool {
+        error.is_retryable() || matches!((self, error), (Self::Idempotent, Error::RequestTimeout))
+    }
 }
 
 pub(crate) async fn execute_with_retry<F, Fut, R>(
     config: &Arc<config::Config>,
     shard_manager: Option<&Arc<shard::Manager>>,
+    retry_safety: RetrySafety,
     op: F,
 ) -> Result<R>
 where
@@ -765,47 +771,49 @@ where
     F: Fn() -> Fut + Send + Sync,
 {
     let timeout = config.request_timeout();
-    let retry_config = config.retry();
-    let start = if (retry_config.is_some() || config.retry_on_stale_shard_map())
-        && timeout.unwrap_or_default() > Duration::ZERO
-    {
-        Some(Instant::now())
-    } else {
-        None
-    };
+    util::with_timeout(timeout, async {
+        let result = op().await;
 
-    let result = util::with_timeout(timeout, op()).await;
+        // Happy path: call just worked
+        if result.is_ok() {
+            return result;
+        }
 
-    // Happy path: call just worked
-    if result.is_ok() {
-        return result;
-    }
+        // Something went wrong.  We'll enter the retry path now if we're confident that
+        // the operation can be retried safely.  Unconditional writes, for example,
+        // shouldn't be retried upon a timeout since we don't know if the previous write
+        // was applied or not.
+        if let Err(ref error) = result
+            && !retry_safety.should_retry(error)
+        {
+            return result;
+        }
 
-    // Or... our time budget was consumed, and we're done
-    if matches!(&result, Err(Error::RequestTimeout)) {
-        return result;
-    }
+        // Stale shard map: refresh and retry before falling through to transient retry
+        if config.retry_on_stale_shard_map()
+            && let Some(sm) = shard_manager
+            && let Err(ref e) = result
+            && e.is_wrong_leader()
+        {
+            let hint = extract_leader_hint(e).cloned();
+            return stale_shard_map_retry(config, sm, hint, &op).await;
+        }
 
-    // Stale shard map: refresh and retry before falling through to transient retry
-    if config.retry_on_stale_shard_map()
-        && let Some(sm) = shard_manager
-        && let Err(ref e) = result
-        && e.is_wrong_leader()
-    {
-        let hint = extract_leader_hint(e).cloned();
-        return stale_shard_map_retry(config, sm, start, hint, &op).await;
-    }
+        let Some(retry_config) = config.retry() else {
+            return result;
+        };
 
-    // Or... no retries are requested
-    if retry_config.is_none() {
-        return result;
-    }
+        let backoff = FibonacciBuilder::default()
+            .with_min_delay(retry_config.initial_delay)
+            .with_max_delay(retry_config.max_delay)
+            .with_max_times(retry_config.attempts)
+            .with_jitter();
 
-    // Account for the time we've used so far for the next round of retries
-    let timeout = remaining_timeout(timeout, start);
-
-    let retry_op = move || op();
-    util::with_timeout(timeout, util::with_retry(retry_config, retry_op)).await
+        op.retry(backoff)
+            .when(|e: &Error| retry_safety.should_retry(e))
+            .await
+    })
+    .await
 }
 
 /// Retry loop for stale shard map (wrong leader) errors.
@@ -815,11 +823,10 @@ where
 /// from the retry result, or fall back to the slow path when no hint is available.
 ///
 /// Each slow-path iteration: capture epoch → trigger refresh → wait for update → retry op.
-/// Bounded by retry attempts (or 1 if no retry config) and the overall request timeout.
+/// Bounded by retry attempts (or 1 if no retry config) and the outer request timeout.
 async fn stale_shard_map_retry<F, Fut, R>(
     config: &Arc<config::Config>,
     shard_manager: &Arc<shard::Manager>,
-    start: Option<Instant>,
     initial_hint: Option<LeaderHint>,
     op: F,
 ) -> Result<R>
@@ -829,17 +836,14 @@ where
     F: Fn() -> Fut + Send + Sync,
 {
     let max_attempts = config.retry().map_or(1, |r| r.attempts);
-    let request_timeout = config.request_timeout();
+    let wait_timeout = config
+        .request_timeout()
+        .filter(|timeout| *timeout > Duration::ZERO)
+        .unwrap_or(Duration::from_secs(30));
 
     let mut hint = initial_hint;
 
     for _ in 0..max_attempts {
-        // Check remaining time budget
-        let remaining = remaining_timeout(request_timeout, start);
-        if matches!(remaining, Some(left) if left.is_zero()) {
-            return Err(Error::RequestTimeout);
-        }
-
         if let Some(ref h) = hint {
             // Fast path: leader hint known — apply immediately without waiting
             // apply_leader_hint also calls trigger_refresh internally
@@ -849,14 +853,10 @@ where
             let epoch = shard_manager.epoch();
             shard_manager.trigger_refresh();
 
-            // Wait for the shard map to update, using remaining timeout or a reasonable default
-            let wait_timeout = remaining.unwrap_or(Duration::from_secs(30));
             shard_manager.wait_for_update(epoch, wait_timeout).await?;
         }
 
-        // Retry the operation with remaining timeout
-        let remaining = remaining_timeout(request_timeout, start);
-        let result = util::with_timeout(remaining, op()).await;
+        let result = op().await;
 
         #[allow(clippy::match_same_arms)]
         match &result {
@@ -870,8 +870,7 @@ where
     }
 
     // Final attempt after exhausting retry budget
-    let remaining = remaining_timeout(request_timeout, start);
-    util::with_timeout(remaining, op()).await
+    op().await
 }
 
 #[derive(Clone, Debug)]
@@ -990,6 +989,26 @@ impl Client {
         self.get_shard_manager()?.get_client_by_shard_id(id)
     }
 
+    async fn execute_on_shard<F, Fut, R>(
+        &self,
+        shard: shard::Client,
+        retry_safety: RetrySafety,
+        op: F,
+    ) -> Result<R>
+    where
+        Fut: Future<Output = Result<R>> + Send,
+        R: Send,
+        F: Fn(shard::Client) -> Fut + Send + Sync,
+    {
+        execute_with_retry(
+            &self.config,
+            self.shard_manager.as_ref(),
+            retry_safety,
+            move || op(shard.clone()),
+        )
+        .await
+    }
+
     #[inline]
     pub fn get(&self, k: impl Into<String>) -> impl Future<Output = Result<Option<GetResponse>>> {
         self.get_with_options(k, GetOptions::default())
@@ -1024,17 +1043,13 @@ impl Client {
     ) -> Result<Option<GetResponse>> {
         let start = metrics::operation_start();
         let result = async {
-            // Define the core operation with retry/timeout wrapper
-            let execute_get =
-                |shard: shard::Client, key: Arc<str>, options: GetOptions| async move {
-                    execute_with_retry(&self.config, self.shard_manager.as_ref(), move || {
-                        let shard = shard.clone();
-                        let key = Arc::clone(&key);
-                        let options = options.clone();
-                        async move { shard.get(&key, &options).await }
-                    })
-                    .await
-                };
+            let execute_get = |shard, key: Arc<str>, options: GetOptions| {
+                self.execute_on_shard(shard, RetrySafety::Idempotent, move |shard| {
+                    let key = Arc::clone(&key);
+                    let options = options.clone();
+                    async move { shard.get(&key, &options).await }
+                })
+            };
 
             // Single shard case: exact match with partition key OR exact match without secondary index
             let use_single_shard = options.partition_key.is_some()
@@ -1045,7 +1060,7 @@ impl Client {
                 let selector = options.partition_key.as_deref().unwrap_or(&key);
                 let shard = self.get_shard(selector)?;
                 tracing::Span::current().record("db.oxia.shard_id", i64::from(shard.id()));
-                return execute_get(shard, key, options).await;
+                return execute_get(shard, Arc::clone(&key), options.clone()).await;
             }
 
             // Multi-shard case: query all shards and select the best response
@@ -1061,9 +1076,11 @@ impl Client {
                     Ok(match response {
                         Some(candidate) => Some(match best {
                             None => candidate,
-                            Some(prev) => {
-                                util::select_response(Some(prev), candidate, options.comparison_type)
-                            }
+                            Some(prev) => util::select_response(
+                                Some(prev),
+                                candidate,
+                                options.comparison_type,
+                            ),
                         }),
                         None => best,
                     })
@@ -1203,8 +1220,9 @@ impl Client {
             let selector = options.partition_key.as_deref().unwrap_or(&key);
             let shard = self.get_shard(selector)?;
             tracing::Span::current().record("db.oxia.shard_id", i64::from(shard.id()));
-            execute_with_retry(&self.config, self.shard_manager.as_ref(), move || {
-                let shard = shard.clone();
+            // TODO: inspect PutOptions and retry timeouts when the request is provably
+            // idempotent, such as a put constrained by an expected version.
+            self.execute_on_shard(shard, RetrySafety::NonIdempotent, move |shard| {
                 let key = Arc::clone(&key);
                 let value = value.clone();
                 let options = options.clone();
@@ -1257,8 +1275,9 @@ impl Client {
             let selector = options.partition_key.as_deref().unwrap_or(&key);
             let shard = self.get_shard(selector)?;
             tracing::Span::current().record("db.oxia.shard_id", i64::from(shard.id()));
-            execute_with_retry(&self.config, self.shard_manager.as_ref(), move || {
-                let shard = shard.clone();
+            // TODO: inspect DeleteOptions and retry timeouts when the request is provably
+            // idempotent, such as a delete constrained by an expected version.
+            self.execute_on_shard(shard, RetrySafety::NonIdempotent, move |shard| {
                 let key = Arc::clone(&key);
                 let options = options.clone();
                 async move { shard.delete(&key, &options).await }
@@ -1324,18 +1343,18 @@ impl Client {
     ) -> Result<()> {
         let start = metrics::operation_start();
         let result = async {
-            let do_delete_range = |shard: shard::Client,
-                                   start: Arc<str>,
-                                   end: Arc<str>,
-                                   options: DeleteRangeOptions| async move {
-                execute_with_retry(&self.config, self.shard_manager.as_ref(), move || {
-                    let shard = shard.clone();
-                    let start = Arc::clone(&start);
-                    let end = Arc::clone(&end);
+            // TODO: inspect DeleteRangeOptions and retry timeouts when the request is
+            // provably idempotent.
+            let do_delete_range = |shard,
+                                   start_inclusive: Arc<str>,
+                                   end_exclusive: Arc<str>,
+                                   options: DeleteRangeOptions| {
+                self.execute_on_shard(shard, RetrySafety::NonIdempotent, move |shard| {
+                    let start = Arc::clone(&start_inclusive);
+                    let end = Arc::clone(&end_exclusive);
                     let options = options.clone();
                     async move { shard.delete_range(&start, &end, &options).await }
                 })
-                .await
             };
 
             if let Some(shard) = {
@@ -1348,7 +1367,13 @@ impl Client {
                 }
             } {
                 tracing::Span::current().record("db.oxia.shard_id", i64::from(shard.id()));
-                return do_delete_range(shard, start_inclusive, end_exclusive, options).await;
+                return do_delete_range(
+                    shard,
+                    Arc::clone(&start_inclusive),
+                    Arc::clone(&end_exclusive),
+                    options.clone(),
+                )
+                .await;
             }
 
             let n = match self.config.max_parallel_requests() {
@@ -1438,24 +1463,28 @@ impl Client {
     ) -> Result<ListResponse> {
         let start = metrics::operation_start();
         let result = async {
-            let do_list = |shard: shard::Client,
-                           start: Arc<str>,
-                           end: Arc<str>,
-                           options: ListOptions| async move {
-                execute_with_retry(&self.config, self.shard_manager.as_ref(), move || {
-                    let shard = shard.clone();
-                    let start = Arc::clone(&start);
-                    let end = Arc::clone(&end);
+            let do_list = |shard,
+                           start_inclusive: Arc<str>,
+                           end_exclusive: Arc<str>,
+                           options: ListOptions| {
+                self.execute_on_shard(shard, RetrySafety::Idempotent, move |shard| {
+                    let start = Arc::clone(&start_inclusive);
+                    let end = Arc::clone(&end_exclusive);
                     let options = options.clone();
                     async move { shard.list(&start, &end, &options).await }
                 })
-                .await
             };
 
             if let Some(pk) = options.partition_key.as_deref() {
                 let shard = self.get_shard(pk)?;
                 tracing::Span::current().record("db.oxia.shard_id", i64::from(shard.id()));
-                return do_list(shard, start_inclusive, end_exclusive, options).await;
+                return do_list(
+                    shard,
+                    Arc::clone(&start_inclusive),
+                    Arc::clone(&end_exclusive),
+                    options.clone(),
+                )
+                .await;
             }
 
             let n = match self.config.max_parallel_requests() {
@@ -1547,24 +1576,28 @@ impl Client {
     ) -> Result<RangeScanResponse> {
         let start = metrics::operation_start();
         let result = async {
-            let do_range_scan = |shard: shard::Client,
-                                 start: Arc<str>,
-                                 end: Arc<str>,
-                                 options: RangeScanOptions| async move {
-                execute_with_retry(&self.config, self.shard_manager.as_ref(), move || {
-                    let shard = shard.clone();
-                    let start = Arc::clone(&start);
-                    let end = Arc::clone(&end);
+            let do_range_scan = |shard,
+                                 start_inclusive: Arc<str>,
+                                 end_exclusive: Arc<str>,
+                                 options: RangeScanOptions| {
+                self.execute_on_shard(shard, RetrySafety::Idempotent, move |shard| {
+                    let start = Arc::clone(&start_inclusive);
+                    let end = Arc::clone(&end_exclusive);
                     let options = options.clone();
                     async move { shard.range_scan(&start, &end, &options).await }
                 })
-                .await
             };
 
             if let Some(pk) = options.partition_key.as_deref() {
                 let shard = self.get_shard(pk)?;
                 tracing::Span::current().record("db.oxia.shard_id", i64::from(shard.id()));
-                return do_range_scan(shard, start_inclusive, end_exclusive, options).await;
+                return do_range_scan(
+                    shard,
+                    Arc::clone(&start_inclusive),
+                    Arc::clone(&end_exclusive),
+                    options.clone(),
+                )
+                .await;
             }
 
             let n = match self.config.max_parallel_requests() {
@@ -1634,7 +1667,158 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+
     use super::*;
+
+    const RETRIES: usize = 3;
+    const EXPECTED_RETRYABLE_CALLS: usize = RETRIES + 2;
+    const EXPECTED_IDEMPOTENT_TIMEOUT_CALLS: usize = RETRIES + 2;
+
+    #[test_log::test(tokio::test)]
+    #[cfg_attr(miri, ignore)]
+    async fn execute_with_retry_retries_retryable_errors() -> Result<()> {
+        let config = config::Config::builder()
+            .service_addr("localhost:1234")
+            .retry(config::RetryConfig::new(RETRIES, Duration::from_millis(1)))
+            .build();
+        let count = Arc::new(AtomicUsize::new(0));
+
+        let result = execute_with_retry(&config, None, RetrySafety::NonIdempotent, {
+            let count = Arc::clone(&count);
+            move || {
+                let count = Arc::clone(&count);
+                async move {
+                    count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Err::<(), _>(Error::Io(
+                        io::Error::new(io::ErrorKind::ConnectionReset, "").into(),
+                    ))
+                }
+            }
+        })
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            EXPECTED_RETRYABLE_CALLS,
+            count.load(std::sync::atomic::Ordering::Relaxed)
+        );
+        Ok(())
+    }
+
+    #[test_log::test(tokio::test)]
+    #[cfg_attr(miri, ignore)]
+    async fn execute_with_retry_retries_request_timeout_for_idempotent_ops() -> Result<()> {
+        let config = config::Config::builder()
+            .service_addr("localhost:1234")
+            .retry(config::RetryConfig::new(RETRIES, Duration::from_millis(1)))
+            .build();
+        let count = Arc::new(AtomicUsize::new(0));
+
+        let result = execute_with_retry(&config, None, RetrySafety::Idempotent, {
+            let count = Arc::clone(&count);
+            move || {
+                let count = Arc::clone(&count);
+                async move {
+                    count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Err::<(), _>(Error::RequestTimeout)
+                }
+            }
+        })
+        .await;
+
+        assert!(matches!(result, Err(Error::RequestTimeout)));
+        assert_eq!(
+            EXPECTED_IDEMPOTENT_TIMEOUT_CALLS,
+            count.load(std::sync::atomic::Ordering::Relaxed)
+        );
+        Ok(())
+    }
+
+    #[test_log::test(tokio::test)]
+    #[cfg_attr(miri, ignore)]
+    async fn execute_with_retry_does_not_retry_request_timeout_for_non_idempotent_ops() -> Result<()>
+    {
+        let config = config::Config::builder()
+            .service_addr("localhost:1234")
+            .retry(config::RetryConfig::new(3, Duration::from_millis(1)))
+            .build();
+        let count = Arc::new(AtomicUsize::new(0));
+
+        let result = execute_with_retry(&config, None, RetrySafety::NonIdempotent, {
+            let count = Arc::clone(&count);
+            move || {
+                let count = Arc::clone(&count);
+                async move {
+                    count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Err::<(), _>(Error::RequestTimeout)
+                }
+            }
+        })
+        .await;
+
+        assert!(matches!(result, Err(Error::RequestTimeout)));
+        assert_eq!(1, count.load(std::sync::atomic::Ordering::Relaxed));
+        Ok(())
+    }
+
+    #[test_log::test(tokio::test)]
+    #[cfg_attr(miri, ignore)]
+    async fn execute_with_retry_without_retry_config_runs_once() -> Result<()> {
+        let config = config::Config::builder()
+            .service_addr("localhost:1234")
+            .build();
+        let count = Arc::new(AtomicUsize::new(0));
+
+        let result = execute_with_retry(&config, None, RetrySafety::NonIdempotent, {
+            let count = Arc::clone(&count);
+            move || {
+                let count = Arc::clone(&count);
+                async move {
+                    count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Err::<(), _>(Error::Io(
+                        io::Error::new(io::ErrorKind::ConnectionReset, "").into(),
+                    ))
+                }
+            }
+        })
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(1, count.load(std::sync::atomic::Ordering::Relaxed));
+        Ok(())
+    }
+
+    #[test_log::test(tokio::test)]
+    #[cfg_attr(miri, ignore)]
+    async fn execute_with_retry_timeout_bounds_retry_sequence() -> Result<()> {
+        let config = config::Config::builder()
+            .service_addr("localhost:1234")
+            .retry(config::RetryConfig::new(3, Duration::from_millis(50)))
+            .request_timeout(Duration::from_millis(10))
+            .build();
+        let count = Arc::new(AtomicUsize::new(0));
+
+        let result = execute_with_retry(&config, None, RetrySafety::Idempotent, {
+            let count = Arc::clone(&count);
+            move || {
+                let count = Arc::clone(&count);
+                async move {
+                    count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Err::<(), _>(Error::Io(
+                        io::Error::new(io::ErrorKind::ConnectionReset, "").into(),
+                    ))
+                }
+            }
+        })
+        .await;
+
+        assert!(matches!(result, Err(Error::RequestTimeout)));
+        assert_eq!(2, count.load(std::sync::atomic::Ordering::Relaxed));
+        Ok(())
+    }
 
     #[test]
     fn test_validate_dest() {

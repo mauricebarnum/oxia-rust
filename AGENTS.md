@@ -43,6 +43,7 @@ CI uses `--release --frozen`. Local commands can omit those flags.
 - **API**: `Client` is a concrete struct, not a trait object, with `put(key, value)` and `put_with_options(...)`. Uses zero-cost abstractions.
 - **Sharding**: XXHASH3 routing; dynamic via `shard.rs`.
 - **Pooling**: `pool.rs` per-shard gRPC; `ArcSwap` caches.
+- **Retry/Timeouts**: `lib.rs::execute_with_retry` owns client-level retry orchestration. Keep the first attempt explicit, preserve stale-shard-map retry handling, and use `util::with_retry_timeout` for transient retries. Use `Client::execute_on_shard` for per-shard client operations instead of open-coding retry wrappers in public method internals.
 - **Notifications**: Streaming key changes.
 - **Protos**: Automatically generated from `./ext/oxia/common/proto`. No manual edits are allowed to generated files or protos.
 - **Tests**: Spawn local servers via `client/tests/common.rs`.

@@ -16,12 +16,8 @@ use std::cmp::Ordering;
 use std::future::Future;
 use std::time::Duration;
 
-use backon::FibonacciBuilder;
-use backon::Retryable;
-
 use crate::Error;
 use crate::Result;
-use crate::config;
 
 pub async fn with_timeout<T, Fut>(timeout: Option<Duration>, fut: Fut) -> Result<T>
 where
@@ -32,27 +28,6 @@ where
             .await
             .map_err(|_| Error::RequestTimeout)?,
         _ => fut.await,
-    }
-}
-
-pub async fn with_retry<T, F, Fut>(retry_config: Option<config::RetryConfig>, mut f: F) -> Result<T>
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = Result<T>>,
-{
-    match retry_config {
-        Some(rc) => {
-            let backoff = FibonacciBuilder::default()
-                .with_min_delay(rc.initial_delay)
-                .with_max_delay(rc.max_delay)
-                .with_max_times(rc.attempts)
-                .with_jitter();
-            (|| f())
-                .retry(&backoff)
-                .when(|e: &Error| e.is_retryable())
-                .await
-        }
-        None => f().await,
     }
 }
 
@@ -159,14 +134,10 @@ pub fn select_response(
 #[allow(clippy::too_many_lines)]
 mod tests {
     use std::cmp::Ordering;
-    use std::io;
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicUsize;
 
     use itertools::Itertools;
 
     use super::*;
-    use crate::config::RetryConfig;
 
     #[tokio::test]
     #[cfg_attr(miri, ignore)]
@@ -181,42 +152,6 @@ mod tests {
             Err(Error::RequestTimeout) => Ok(()),
             _ => Err(Error::Custom(format!("unexpected result {r:?}"))),
         }
-    }
-
-    #[test_log::test(tokio::test)]
-    #[cfg_attr(miri, ignore)]
-    #[allow(clippy::items_after_statements)]
-    async fn test_with_retry() -> Result<()> {
-        const RETRIES: usize = 3;
-        const EXPECTED: usize = RETRIES + 2;
-
-        let retry = Some(RetryConfig::new(RETRIES, Duration::from_millis(1)));
-        let count = Arc::new(AtomicUsize::new(0));
-
-        let funcs = [
-            || -> Result<()> {
-                Err(Error::Io(
-                    io::Error::new(io::ErrorKind::ConnectionReset, "").into(),
-                ))
-            },
-            || -> Result<()> { Err(Error::RequestTimeout) },
-        ];
-        for f in funcs {
-            let r = with_retry(retry, {
-                let count = Arc::clone(&count);
-                move || {
-                    let count = Arc::clone(&count);
-                    async move {
-                        count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        f()
-                    }
-                }
-            })
-            .await;
-            assert!(r.is_err());
-        }
-        assert_eq!(EXPECTED, count.load(std::sync::atomic::Ordering::Relaxed));
-        Ok(())
     }
 
     #[test]

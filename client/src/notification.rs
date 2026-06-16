@@ -233,10 +233,15 @@ impl NotificationsStream {
                     let config = Arc::clone(&config);
                     let offset = offsets.get(id);
                     async move {
-                        let r = crate::execute_with_retry(&config, None, move || {
-                            let client = client.clone();
-                            async move { client.get_notifications(offset).await }
-                        })
+                        let r = crate::execute_with_retry(
+                            &config,
+                            None,
+                            crate::RetrySafety::Idempotent,
+                            move || {
+                                let client = client.clone();
+                                async move { client.get_notifications(offset).await }
+                            },
+                        )
                         .await;
                         let s = StreamNotifyClose::new(match r {
                             Ok(s) => s.boxed(),
@@ -325,10 +330,15 @@ impl NotificationsStream {
                 Err(e) => return (id, Err(e)),
             };
 
-            let result = crate::execute_with_retry(&config, None, move || {
-                let client = client.clone();
-                async move { client.get_notifications(offset).await }
-            })
+            let result = crate::execute_with_retry(
+                &config,
+                None,
+                crate::RetrySafety::Idempotent,
+                move || {
+                    let client = client.clone();
+                    async move { client.get_notifications(offset).await }
+                },
+            )
             .await;
 
             match result {
