@@ -510,7 +510,7 @@ impl TestCluster {
         let coord_process = trace_err!(
             Command::new(oxia_cli_path())
                 .arg("coordinator")
-                .arg("-f")
+                .arg("--cconfig")
                 .arg(&config_path)
                 .arg("--metadata")
                 .arg("memory")
