@@ -103,7 +103,6 @@ RUN GH_WORKSPACE="/__w/${REPO_NAME}/${REPO_NAME}" && \
     cd "${GH_WORKSPACE}" && \
     cargo chef cook --profile ci-debug --all-targets --features metrics --recipe-path recipe.json && \
     cargo chef cook --profile ci --all-targets --features metrics --recipe-path recipe.json && \
-    cargo chef cook --profile ci-test-release --all-targets --features metrics --recipe-path recipe.json && \
     cargo fetch --locked && \
     cargo +nightly fetch --locked
 
@@ -145,7 +144,6 @@ COPY . /__w/${REPO_NAME}/${REPO_NAME}
 RUN cd /__w/${REPO_NAME}/${REPO_NAME} && \
     cargo build --profile ci-debug --all-targets --features metrics --frozen && \
     cargo build --profile ci --all-targets --features metrics --frozen && \
-    cargo build --profile ci-test-release --all-targets --features metrics --frozen && \
     rm -rf /__w/${REPO_NAME}/${REPO_NAME}
 
 WORKDIR ${HOME}
