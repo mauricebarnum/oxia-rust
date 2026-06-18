@@ -5,6 +5,7 @@ ARG HOME=/root
 ARG RUST_VERSION=1.96.0
 ARG RUST_VERSION_EXTERNAL_TYPES=nightly-2026-03-20
 ARG GO_VERSION=1.26.4
+ARG SCCACHE_DIR=/tmp/sccache
 
 # ===== 1. Pull Official Images =====
 FROM rust:${RUST_VERSION} AS rust-official
@@ -75,6 +76,7 @@ ARG REPO_NAME=oxia-rust
 ARG CARGO_HOME
 ARG RUSTUP_HOME
 ARG HOME
+ARG SCCACHE_DIR
 
 WORKDIR ${HOME}
 
@@ -87,6 +89,8 @@ ENV CARGO_HOME=${CARGO_HOME} \
     RUSTUP_HOME=${RUSTUP_HOME} \
     CARGO_TARGET_DIR=${HOME}/deps/target \
     RUSTC_WRAPPER=sccache \
+    SCCACHE_DIR=${SCCACHE_DIR} \
+    OXIA_BIN=${CARGO_HOME}/bin/oxia \
     PATH=${CARGO_HOME}/bin:${RUSTUP_HOME}/bin:$PATH
 
 COPY build/cargo-config.toml ${CARGO_HOME}/config.toml
@@ -118,10 +122,15 @@ ARG CARGO_HOME
 ARG RUSTUP_HOME
 ARG RUST_VERSION_EXTERNAL_TYPES
 ARG HOME
+ARG REPO_NAME=oxia-rust
+ARG SCCACHE_DIR
 
 ENV CARGO_HOME=${CARGO_HOME} \
     RUSTUP_HOME=${RUSTUP_HOME} \
     CARGO_TARGET_DIR=${HOME}/deps/target \
+    RUSTC_WRAPPER=sccache \
+    SCCACHE_DIR=${SCCACHE_DIR} \
+    OXIA_BIN=${CARGO_HOME}/bin/oxia \
     RUST_VERSION_EXTERNAL_TYPES="${RUST_VERSION_EXTERNAL_TYPES}" \
     PATH=${CARGO_HOME}/bin:${RUSTUP_HOME}/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
@@ -131,5 +140,12 @@ COPY --from=rust-cooker ${RUSTUP_HOME} ${RUSTUP_HOME}
 COPY --from=rust-cooker ${HOME}/deps ${HOME}/deps
 COPY --from=go-official /usr/local/go /usr/local/go
 COPY --from=go-builder /tmp/oxia ${CARGO_HOME}/bin/oxia
+
+COPY . /__w/${REPO_NAME}/${REPO_NAME}
+RUN cd /__w/${REPO_NAME}/${REPO_NAME} && \
+    cargo build --profile ci-debug --all-targets --features metrics --frozen && \
+    cargo build --profile ci --all-targets --features metrics --frozen && \
+    cargo build --profile ci-test-release --all-targets --features metrics --frozen && \
+    rm -rf /__w/${REPO_NAME}/${REPO_NAME}
 
 WORKDIR ${HOME}
