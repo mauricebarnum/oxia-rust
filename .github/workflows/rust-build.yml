@@ -17,6 +17,11 @@ on:
         required: false
         default: ""
         type: string
+      diagnose_build_fingerprints:
+        description: "Emit Cargo fingerprint diagnostics for the cargo build step"
+        required: false
+        default: false
+        type: boolean
       caller_event_name:
         description: "Event name from caller (used for auto build_mode PR detection)"
         required: false
@@ -53,14 +58,55 @@ jobs:
       - name: checkout
         uses: actions/checkout@v7
 
+      - name: normalize-workspace-path
+        run: |
+          repo_name="${GITHUB_REPOSITORY##*/}"
+          workflow_workspace="/__w/${repo_name}/${repo_name}"
+          if [ -z "$repo_name" ] || [ "$workflow_workspace" = "/__w//" ]; then
+            echo "Unable to determine GitHub workspace path" >&2
+            exit 1
+          fi
+          if [ "$PWD" != "$workflow_workspace" ]; then
+            mkdir -p "$(dirname "$workflow_workspace")"
+            rm -rf "$workflow_workspace"
+            mkdir -p "$workflow_workspace"
+            cp -a "$PWD/." "$workflow_workspace/"
+          fi
+          echo "WORKFLOW_WORKSPACE=$workflow_workspace" >> "$GITHUB_ENV"
+
+      - name: normalize-build-script-mtimes
+        run: |
+          cd "$WORKFLOW_WORKSPACE"
+          manifest=/root/deps/build-rs.sha256
+          if [ ! -f "$manifest" ]; then
+            exit 0
+          fi
+
+          # Cargo fingerprints compare build script source mtimes against the
+          # baked target artifacts. A fresh checkout gives unchanged build.rs
+          # files newer mtimes, so backdate only files that match the image.
+          while read -r expected path; do
+            path=${path#./}
+            if [ ! -f "$path" ]; then
+              continue
+            fi
+            actual=$(sha256sum "$path" | cut -d ' ' -f1)
+            if [ "$actual" = "$expected" ]; then
+              touch -d '@1' "$path"
+            fi
+          done < "$manifest"
+
       - name: cargo-deny
-        run: cargo deny check
+        run: |
+          cd "$WORKFLOW_WORKSPACE"
+          cargo deny check
 
       - name: set-build-profile
         env:
           BUILD_MODE_INPUT: ${{ inputs.build_mode }}
           EVENT_INPUT: ${{ inputs.caller_event_name || github.event_name }}
         run: |
+          cd "$WORKFLOW_WORKSPACE"
           BUILD_MODE="$BUILD_MODE_INPUT"
           EVENT="$EVENT_INPUT"
           if [ "$BUILD_MODE" = "ci" ]; then
@@ -89,7 +135,9 @@ jobs:
           echo "Build mode: $BUILD_MODE, Event: $EVENT, Profile: $CARGO_PROFILE"
 
       - name: Compute rustc hash
-        run: echo "RUSTC_HASH=$(rustc --version | sha256sum | cut -d' ' -f1)" >> $GITHUB_ENV
+        run: |
+          cd "$WORKFLOW_WORKSPACE"
+          echo "RUSTC_HASH=$(rustc --version | sha256sum | cut -d' ' -f1)" >> $GITHUB_ENV
 
       - name: enable-sccache
         uses: actions/cache@v5
@@ -110,6 +158,7 @@ jobs:
       - name: detect-vendored-build
         id: vendored
         run: |
+          cd "$WORKFLOW_WORKSPACE"
           vendored=false
           if [ -f .cargo/config.toml ] && grep -q 'vendored-sources' .cargo/config.toml; then
             vendored=true
@@ -119,38 +168,47 @@ jobs:
       - name: fetch-dependencies
         if: steps.vendored.outputs.vendored == 'false'
         run: |
+          cd "$WORKFLOW_WORKSPACE"
           cargo update --dry-run --verbose # update crate index
           cargo fetch --locked   # fetch dependencies: last network dependency
 
       - name: build
-        run: cargo build $RELEASE_FLAG --frozen --all-targets --features metrics
+        env:
+          CARGO_LOG: ${{ inputs.diagnose_build_fingerprints && 'cargo::core::compiler::fingerprint=info' || '' }}
+        run: |
+          cd "$WORKFLOW_WORKSPACE"
+          cargo build $RELEASE_FLAG --frozen --all-targets --features metrics
 
       - name: clippy
-        run: cargo clippy $RELEASE_FLAG --no-deps --frozen --all-targets --features metrics -- -D warnings
+        run: |
+          cd "$WORKFLOW_WORKSPACE"
+          cargo clippy $RELEASE_FLAG --no-deps --frozen --all-targets --features metrics -- -D warnings
 
       - name: check-external-types
-        run: cd client && cargo +"$RUST_VERSION_EXTERNAL_TYPES" check-external-types --all-features
+        run: |
+          cd "$WORKFLOW_WORKSPACE/client"
+          cargo +"$RUST_VERSION_EXTERNAL_TYPES" check-external-types --all-features
 
       - name: test
         timeout-minutes: 15 # release builds may be slower
-        run: cargo nextest run $NEXTEST_FLAG --frozen --features metrics --no-fail-fast --verbose
+        run: |
+          cd "$WORKFLOW_WORKSPACE"
+          cargo nextest run $NEXTEST_FLAG --frozen --features metrics --no-fail-fast --verbose
 
       - name: doc-test
-        run: cargo test --doc $RELEASE_FLAG --frozen --verbose
+        run: |
+          cd "$WORKFLOW_WORKSPACE"
+          cargo test --doc $RELEASE_FLAG --frozen --verbose
 
       - name: miri-client
         run: |
-          repo_name="${GITHUB_REPOSITORY##*/}"
-          workflow_workspace="/__w/${repo_name}/${repo_name}"
-          if [ "$PWD" != "$workflow_workspace" ]; then
-            mkdir -p "$(dirname "$workflow_workspace")"
-            ln -sfnT "$PWD" "$workflow_workspace"
-            cd "$workflow_workspace"
-          fi
+          cd "$WORKFLOW_WORKSPACE"
           unset RUSTC_WRAPPER
           cargo +nightly miri nextest run --package mauricebarnum-oxia-client --features metrics --frozen
         env:
           MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-disable-isolation
 
       - name: show-sccache-stats
-        run: sccache --show-stats || true
+        run: |
+          cd "$WORKFLOW_WORKSPACE"
+          sccache --show-stats || true

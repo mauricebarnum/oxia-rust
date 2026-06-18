@@ -142,8 +142,14 @@ COPY --from=go-builder /tmp/oxia ${CARGO_HOME}/bin/oxia
 
 COPY . /__w/${REPO_NAME}/${REPO_NAME}
 RUN cd /__w/${REPO_NAME}/${REPO_NAME} && \
+    find . -name build.rs -type f -print0 | sort -z | xargs -0 sha256sum > "${HOME}/deps/build-rs.sha256" && \
     cargo build --profile ci-debug --all-targets --features metrics --frozen && \
+    cargo clippy --profile ci-debug --no-deps --all-targets --features metrics --frozen -- -D warnings && \
     cargo build --profile ci --all-targets --features metrics --frozen && \
+    cargo clippy --profile ci --no-deps --all-targets --features metrics --frozen -- -D warnings && \
+    cd client && \
+    cargo +"${RUST_VERSION_EXTERNAL_TYPES}" check-external-types --all-features && \
+    cd .. && \
     unset RUSTC_WRAPPER && \
     MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-disable-isolation" \
     cargo +nightly miri nextest run --package mauricebarnum-oxia-client --features metrics --frozen && \
