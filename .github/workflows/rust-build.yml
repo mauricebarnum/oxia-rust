@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       build_mode:
-        description: "Build mode: auto, ci, ci-debug, ci-test-release, or debug"
+        description: "Build mode: auto, ci, ci-debug, or debug"
         required: false
         default: "auto"
         type: string
@@ -75,10 +75,6 @@ jobs:
             echo "CARGO_PROFILE=ci-debug" >> $GITHUB_ENV
             echo "RELEASE_FLAG=--profile ci-debug" >> $GITHUB_ENV
             echo "NEXTEST_FLAG=--cargo-profile ci-debug" >> $GITHUB_ENV
-          elif [ "$BUILD_MODE" = "ci-test-release" ]; then
-            echo "CARGO_PROFILE=ci-test-release" >> $GITHUB_ENV
-            echo "RELEASE_FLAG=--profile ci-test-release" >> $GITHUB_ENV
-            echo "NEXTEST_FLAG=--cargo-profile ci-test-release" >> $GITHUB_ENV
           elif [ "$EVENT" = "pull_request" ]; then
             # Auto mode: ci-debug for PRs
             echo "CARGO_PROFILE=ci-debug" >> $GITHUB_ENV
@@ -140,7 +136,6 @@ jobs:
         run: cargo nextest run $NEXTEST_FLAG --frozen --features metrics --no-fail-fast --verbose
 
       - name: doc-test
-        if: env.CARGO_PROFILE == 'ci-test-release'
         run: cargo test --doc $RELEASE_FLAG --frozen --verbose
 
       - name: miri-client
