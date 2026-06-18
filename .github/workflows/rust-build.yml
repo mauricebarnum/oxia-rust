@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       build_mode:
-        description: "Build mode: auto, ci, ci-debug, ci-test-release, or debug"
+        description: "Build mode: auto, ci, ci-debug, or debug"
         required: false
         default: "auto"
         type: string
@@ -17,6 +17,11 @@ on:
         required: false
         default: ""
         type: string
+      diagnose_build_fingerprints:
+        description: "Emit Cargo fingerprint diagnostics for the cargo build step"
+        required: false
+        default: false
+        type: boolean
       caller_event_name:
         description: "Event name from caller (used for auto build_mode PR detection)"
         required: false
@@ -45,10 +50,7 @@ jobs:
           EXTRA_ENV: ${{ inputs.extra_env }}
         run: |
           echo "Setting extra environment variables: $EXTRA_ENV"
-          for pair in $EXTRA_ENV; do
-            echo "Exporting $pair"
-            echo "$pair" >> $GITHUB_ENV
-          done
+          echo "$EXTRA_ENV" >> $GITHUB_ENV
 
       - name: checkout
         uses: actions/checkout@v7
@@ -75,10 +77,6 @@ jobs:
             echo "CARGO_PROFILE=ci-debug" >> $GITHUB_ENV
             echo "RELEASE_FLAG=--profile ci-debug" >> $GITHUB_ENV
             echo "NEXTEST_FLAG=--cargo-profile ci-debug" >> $GITHUB_ENV
-          elif [ "$BUILD_MODE" = "ci-test-release" ]; then
-            echo "CARGO_PROFILE=ci-test-release" >> $GITHUB_ENV
-            echo "RELEASE_FLAG=--profile ci-test-release" >> $GITHUB_ENV
-            echo "NEXTEST_FLAG=--cargo-profile ci-test-release" >> $GITHUB_ENV
           elif [ "$EVENT" = "pull_request" ]; then
             # Auto mode: ci-debug for PRs
             echo "CARGO_PROFILE=ci-debug" >> $GITHUB_ENV
@@ -92,24 +90,23 @@ jobs:
           fi
           echo "Build mode: $BUILD_MODE, Event: $EVENT, Profile: $CARGO_PROFILE"
 
+      - name: sync-mtimes-to-git-history
+        run: |
+          git -c safe.directory=/__w/oxia-rust/oxia-rust \
+              -c alias.whatchanged='log --raw --no-merges' \
+              -c diff.renames=false \
+              restore-mtime -q
+
       - name: Compute rustc hash
         run: echo "RUSTC_HASH=$(rustc --version | sha256sum | cut -d' ' -f1)" >> $GITHUB_ENV
 
       - name: enable-sccache
         uses: actions/cache@v6
         with:
-          path: /tmp/sccache
+          path: ${{ env.SCCACHE_DIR }}
           key: sccache-${{ runner.os }}-${{ env.CARGO_PROFILE }}-${{ env.RUSTC_HASH }}
           restore-keys: |
             sccache-${{ runner.os }}-${{ env.CARGO_PROFILE }}-
-
-      - name: enable-miri-cache
-        uses: actions/cache@v5
-        with:
-          path: /home/runner/deps/target/miri
-          key: miri-${{ runner.os }}-${{ env.RUSTC_HASH }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            miri-${{ runner.os }}-${{ env.RUSTC_HASH }}-
 
       - name: detect-vendored-build
         id: vendored
@@ -127,21 +124,24 @@ jobs:
           cargo fetch --locked   # fetch dependencies: last network dependency
 
       - name: build
+        env:
+          CARGO_LOG: ${{ inputs.diagnose_build_fingerprints && 'cargo::core::compiler::fingerprint=info' || '' }}
         run: cargo build $RELEASE_FLAG --frozen --all-targets --features metrics
 
       - name: clippy
         run: cargo clippy $RELEASE_FLAG --no-deps --frozen --all-targets --features metrics -- -D warnings
 
-      - name: check-external-types
-        run: cd client && cargo +"$RUST_VERSION_EXTERNAL_TYPES" check-external-types --all-features
-
       - name: test
-        timeout-minutes: 15 # release builds may be slower
+        timeout-minutes: 15
         run: cargo nextest run $NEXTEST_FLAG --frozen --features metrics --no-fail-fast --verbose
 
       - name: doc-test
-        if: env.CARGO_PROFILE == 'ci-test-release'
         run: cargo test --doc $RELEASE_FLAG --frozen --verbose
+
+      - name: check-external-types
+        run: |
+          cd client
+          cargo +"$RUST_VERSION_EXTERNAL_TYPES" check-external-types --all-features
 
       - name: miri-client
         run: |
@@ -151,4 +151,4 @@ jobs:
           MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-disable-isolation
 
       - name: show-sccache-stats
-        run: sccache --show-stats || true
+        run: sccache --show-stats
