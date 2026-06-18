@@ -1,4 +1,4 @@
-# Global Scope ARGs (change these defaults if you ever switch user)
+# Global Scope ARGs
 ARG CARGO_HOME=/root/.cargo
 ARG RUSTUP_HOME=/root/.rustup
 ARG HOME=/root
@@ -14,122 +14,115 @@ FROM golang:${GO_VERSION} AS go-official
 FROM rust-official AS toolchain-builder
 ARG RUST_VERSION_EXTERNAL_TYPES
 
-# Use image defaults (/usr/local) for CARGO_HOME/RUSTUP_HOME
 RUN rustup component add clippy && \
     rustup toolchain install --profile minimal --allow-downgrade nightly && \
     rustup component add --toolchain nightly miri rust-src && \
-    cargo +nightly miri setup
+    cargo +nightly miri setup --print-sysroot
 
 RUN rustup toolchain install "${RUST_VERSION_EXTERNAL_TYPES}" --profile minimal && \
     cargo +"${RUST_VERSION_EXTERNAL_TYPES}" install cargo-check-external-types
 
-
 RUN curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash && \
     cargo binstall -y cargo-deny cargo-nextest sccache
 
-# ===== 3. Chef & Planner =====
-FROM rust-official AS chef
-RUN curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash && \
-    cargo binstall -y cargo-chef
-
-FROM chef AS planner
-WORKDIR /recipe
-COPY Cargo.toml Cargo.lock ./
-COPY common/Cargo.toml common/
-COPY client/Cargo.toml client/
-COPY cmd/Cargo.toml cmd/
-COPY oxia-bin-util/Cargo.toml oxia-bin-util/
-
-RUN for toml in */Cargo.toml; do \
-    dir="${toml%/Cargo.toml}"; \
-    mkdir -p "$dir/src"; \
-    touch "$dir/src/lib.rs" "$dir/src/main.rs"; \
-    done \
-    && while ! cargo metadata --no-deps --format-version 1 >/dev/null 2>/tmp/meta-err; do \
-    path=$(sed -n "s/.*failed to read \`\([^\`]*\)\`.*/\1/p" /tmp/meta-err | head -1); \
-    [ -n "$path" ] || { cat /tmp/meta-err >&2; exit 1; }; \
-    mkdir -p "$(dirname "$path")" && touch "$path"; \
-    done \
-    && cargo chef prepare --recipe-path recipe.json
-
-# ===== 4. OS Base =====
+# ===== 3. OS Base Stage =====
 FROM ubuntu:24.04 AS os-base
 ARG CARGO_HOME
 ARG RUSTUP_HOME
+ARG RUST_VERSION_EXTERNAL_TYPES
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y \
-    build-essential ca-certificates curl git gnupg jq libssl-dev \
-    pkg-config protobuf-compiler python3 python3-pip unzip zstd \
+    build-essential ca-certificates curl git git-restore-mtime gnupg jq libssl-dev \
+    pkg-config protobuf-compiler python3 python3-git python3-pip unzip zstd \
     && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /__w "${CARGO_HOME}" "${RUSTUP_HOME}"
+# ===== 4. Go Builder =====
+FROM os-base AS go-builder
+COPY --from=go-official /usr/local/go /usr/local/go
+ENV PATH=/usr/local/go/bin:$PATH
 
-# ===== 5. Rust Cooker =====
-FROM os-base AS rust-cooker
+# Bind mount ONLY the specific folder containing the Go module/vendored code
+RUN --mount=type=bind,source=ext/oxia,dst=/src \
+    --mount=type=cache,target=/tmp/gocache \
+    GOPROXY=off GOCACHE=/tmp/gocache \
+    go -C /src/cmd build -mod=vendor -o /tmp/oxia
+
+# ===== 5. Code Base Context Staging =====
+FROM os-base AS source-context
 ARG REPO_NAME=oxia-rust
 ARG CARGO_HOME
 ARG RUSTUP_HOME
 ARG HOME
+ARG RUSTFLAGS
+ARG RUST_VERSION_EXTERNAL_TYPES
 
-WORKDIR ${HOME}
+ENV CARGO_HOME=${CARGO_HOME} \
+    RUSTUP_HOME=${RUSTUP_HOME} \
+    CARGO_TARGET_DIR=${HOME}/deps/target \
+    RUSTFLAGS="${RUSTFLAGS}" \
+    PATH=${CARGO_HOME}/bin:${RUSTUP_HOME}/bin:/usr/local/go/bin:$PATH
 
-# Copy toolchains to our parameterised paths (root owned)
 COPY --from=toolchain-builder /usr/local/cargo ${CARGO_HOME}
 COPY --from=toolchain-builder /usr/local/rustup ${RUSTUP_HOME}
-COPY --from=chef /usr/local/cargo/bin/cargo-chef ${CARGO_HOME}/bin/cargo-chef
-
-ENV CARGO_HOME=${CARGO_HOME} \
-    RUSTUP_HOME=${RUSTUP_HOME} \
-    CARGO_TARGET_DIR=${HOME}/deps/target \
-    RUSTC_WRAPPER=sccache \
-    PATH=${CARGO_HOME}/bin:${RUSTUP_HOME}/bin:$PATH
-
-COPY build/cargo-config.toml ${CARGO_HOME}/config.toml
-
-COPY --from=planner /recipe/recipe.json /tmp/recipe.json
-
-RUN GH_WORKSPACE="/__w/${REPO_NAME}/${REPO_NAME}" && \
-    mkdir -p "${GH_WORKSPACE}" && \
-    cp /tmp/recipe.json "${GH_WORKSPACE}/recipe.json" && \
-    cd "${GH_WORKSPACE}" && \
-    cargo chef cook --profile ci-debug --all-targets --features metrics --recipe-path recipe.json && \
-    cargo chef cook --profile ci --all-targets --features metrics --recipe-path recipe.json && \
-    cargo chef cook --profile ci-test-release --all-targets --features metrics --recipe-path recipe.json && \
-    cargo fetch --locked && \
-    cargo +nightly fetch --locked
-
-# ===== 6. Go Builder =====
-FROM os-base AS go-builder
-COPY --from=go-official /usr/local/go /usr/local/go
-ENV PATH=/usr/local/go/bin:$PATH
-RUN --mount=type=bind,dst=/src \
-    --mount=type=cache,target=/tmp/gocache \
-    GOPROXY=off GOCACHE=/tmp/gocache \
-    go -C /src/ext/oxia/cmd build -mod=vendor -o /tmp/oxia
-
-# ===== 7. Final Assembly =====
-FROM os-base AS final
-ARG CARGO_HOME
-ARG RUSTUP_HOME
-ARG RUST_VERSION_EXTERNAL_TYPES
-ARG HOME
-
-ENV CARGO_HOME=${CARGO_HOME} \
-    RUSTUP_HOME=${RUSTUP_HOME} \
-    CARGO_TARGET_DIR=${HOME}/deps/target \
-    RUST_VERSION_EXTERNAL_TYPES="${RUST_VERSION_EXTERNAL_TYPES}" \
-    PATH=${CARGO_HOME}/bin:${RUSTUP_HOME}/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-
-# Copy all pre‑built pieces (root owned, no chown)
-COPY --from=rust-cooker ${CARGO_HOME} ${CARGO_HOME}
-COPY --from=rust-cooker ${RUSTUP_HOME} ${RUSTUP_HOME}
-COPY --from=rust-cooker ${HOME}/deps ${HOME}/deps
 COPY --from=go-official /usr/local/go /usr/local/go
 COPY --from=go-builder /tmp/oxia ${CARGO_HOME}/bin/oxia
 
+WORKDIR /__w/${REPO_NAME}/${REPO_NAME}
+# Use a cache mount for the cargo registry so downloads persist across builds!
+RUN --mount=type=bind,source=.,target=/__w/oxia-rust/oxia-rust,ro \
+    cargo fetch --locked
+
+# ===== 5a. Parallel Builder: CI Profile =====
+FROM source-context AS build-ci
+RUN --mount=type=bind,source=.,target=/__w/oxia-rust/oxia-rust \
+    cargo build --profile ci --all-targets --features metrics --frozen && \
+    cargo clippy --profile ci --no-deps --all-targets --features metrics --frozen -- -D warnings
+
+# ===== 5b. Parallel Builder: CI-Debug Profile =====
+FROM source-context AS build-ci-debug
+RUN --mount=type=bind,source=.,target=/__w/oxia-rust/oxia-rust \
+    cargo build --profile ci-debug --all-targets --features metrics --frozen && \
+    cargo clippy --profile ci-debug --no-deps --all-targets --features metrics --frozen -- -D warnings
+
+# ===== 5c. Parallel Builder: Miri Targets =====
+FROM source-context AS build-miri
+RUN --mount=type=bind,source=.,target=/__w/oxia-rust/oxia-rust \
+    MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-disable-isolation" \
+    cargo +nightly miri nextest run  --package mauricebarnum-oxia-client  --features metrics  --frozen --no-run
+
+# ===== 6. Final Assembly (The Fan-In) =====
+FROM os-base AS final
+ARG CARGO_HOME
+ARG RUSTUP_HOME
+ARG HOME
+ARG RUSTFLAGS
+ARG RUST_VERSION_EXTERNAL_TYPES
+
+COPY --from=source-context ${CARGO_HOME} ${CARGO_HOME}
+COPY --from=source-context ${RUSTUP_HOME} ${RUSTUP_HOME}
+COPY --from=source-context /usr/local/go /usr/local/go
+COPY --from=source-context ${CARGO_HOME}/bin/oxia ${CARGO_HOME}/bin/oxia
+
+ENV CARGO_HOME=${CARGO_HOME} \
+    RUSTUP_HOME=${RUSTUP_HOME} \
+    RUSTFLAGS="${RUSTFLAGS}" \
+    CARGO_TARGET_DIR=${HOME}/deps/target \
+    RUST_VERSION_EXTERNAL_TYPES="${RUST_VERSION_EXTERNAL_TYPES}" \
+    PATH=${CARGO_HOME}/bin:${RUSTUP_HOME}/bin:/usr/local/go/bin:$PATH
+
+COPY build/cargo-config.toml ${CARGO_HOME}/config.toml
+
+# Pull the independent target profile directories back together into the unified cache layout
+
+COPY --from=build-ci       ${HOME}/deps/target/ ${HOME}/deps/target/
+COPY --from=build-ci-debug ${HOME}/deps/target/ ${HOME}/deps/target/
+COPY --from=build-miri     ${HOME}/deps/target/ ${HOME}/deps/target/
+COPY --from=build-miri     ${HOME}/.cache/miri/ ${HOME}/.cache/miri/
+
 WORKDIR ${HOME}
+
