@@ -37,9 +37,8 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 # both contexts.  Concretely:
 #   - [profile.ci-debug] here must exactly match [profile.ci-debug] in Cargo.toml.
 #   - [profile.ci] here must exactly match [profile.ci] in Cargo.toml.
-#   - [profile.ci-test-release] here must exactly match [profile.ci-test-release] in Cargo.toml.
 #   - [profile.release] here must exactly match [profile.release] in Cargo.toml
-#     (because [profile.ci] and [profile.ci-test-release] inherit from it).
+#     (because [profile.ci] inherits from it).
 # Update both files together whenever you change a profile.
 
 # Goal: Fast compiles, but fast enough runtime to not be frustrated.
@@ -90,15 +89,3 @@ opt-level = 2              # Good optimization, faster compile than 3
 debug-assertions = true    # Catch bugs in CI
 overflow-checks = true     # Catch arithmetic bugs
 strip = "none"
-
-# Test-release: Full optimizations plus assertions for catching release-only bugs.
-# Must match workspace Cargo.toml
-[profile.ci-test-release]
-inherits = "release"
-debug = true            # Full debug info for accurate backtraces
-debug-assertions = true # Keep assertions enabled (critical for bug catching)
-overflow-checks = true  # Keep overflow checks
-lto = false             # LTO too slow for CI, optimizations not needed for tests
-codegen-units = 256     # Fast compilation
-incremental = false     # Enable sccache
-strip = "none"          # Keep symbols
