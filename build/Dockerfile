@@ -144,6 +144,9 @@ COPY . /__w/${REPO_NAME}/${REPO_NAME}
 RUN cd /__w/${REPO_NAME}/${REPO_NAME} && \
     cargo build --profile ci-debug --all-targets --features metrics --frozen && \
     cargo build --profile ci --all-targets --features metrics --frozen && \
+    unset RUSTC_WRAPPER && \
+    MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-disable-isolation" \
+    cargo +nightly miri nextest run --package mauricebarnum-oxia-client --features metrics --frozen && \
     rm -rf /__w/${REPO_NAME}/${REPO_NAME}
 
 WORKDIR ${HOME}

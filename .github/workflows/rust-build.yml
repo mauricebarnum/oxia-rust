@@ -106,7 +106,7 @@ jobs:
       - name: enable-miri-cache
         uses: actions/cache@v5
         with:
-          path: /home/runner/deps/target/miri
+          path: /root/deps/target/miri
           key: miri-${{ runner.os }}-${{ env.RUSTC_HASH }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             miri-${{ runner.os }}-${{ env.RUSTC_HASH }}-
@@ -145,6 +145,13 @@ jobs:
 
       - name: miri-client
         run: |
+          repo_name="${GITHUB_REPOSITORY##*/}"
+          workflow_workspace="/__w/${repo_name}/${repo_name}"
+          if [ "$PWD" != "$workflow_workspace" ]; then
+            mkdir -p "$(dirname "$workflow_workspace")"
+            ln -sfnT "$PWD" "$workflow_workspace"
+            cd "$workflow_workspace"
+          fi
           unset RUSTC_WRAPPER
           cargo +nightly miri nextest run --package mauricebarnum-oxia-client --features metrics --frozen
         env:
