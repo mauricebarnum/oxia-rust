@@ -95,7 +95,7 @@ RUN --mount=type=bind,source=.,target=/__w/oxia-rust/oxia-rust \
 FROM source-context AS build-miri
 RUN --mount=type=bind,source=.,target=/__w/oxia-rust/oxia-rust \
     MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-disable-isolation" \
-    cargo +nightly miri test  --package mauricebarnum-oxia-client  --features metrics  --frozen --no-run
+    cargo +nightly miri nextest run  --package mauricebarnum-oxia-client  --features metrics  --frozen --no-run
 
 # ===== 6. Final Assembly (The Fan-In) =====
 FROM os-base AS final

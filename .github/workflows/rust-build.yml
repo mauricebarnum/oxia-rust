@@ -146,7 +146,7 @@ jobs:
       - name: miri-client
         run: |
           unset RUSTC_WRAPPER
-          cargo +nightly miri test --package mauricebarnum-oxia-client --features metrics --frozen
+          cargo +nightly miri nextest run --package mauricebarnum-oxia-client --features metrics --frozen
         env:
           MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-disable-isolation
 
