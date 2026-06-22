@@ -46,9 +46,8 @@ FROM os-base AS go-builder
 COPY --from=go-official /usr/local/go /usr/local/go
 ENV PATH=/usr/local/go/bin:$PATH
 
-# Bind mount ONLY the specific folder containing the Go module/vendored code
-RUN --mount=type=bind,source=ext/oxia,dst=/src \
-    --mount=type=cache,target=/tmp/gocache \
+COPY ext/oxia /src
+RUN --mount=type=cache,target=/tmp/gocache \
     GOPROXY=off GOCACHE=/tmp/gocache \
     go -C /src/cmd build -mod=vendor -o /tmp/oxia
 
@@ -65,6 +64,8 @@ ENV CARGO_HOME=${CARGO_HOME} \
     RUSTUP_HOME=${RUSTUP_HOME} \
     CARGO_TARGET_DIR=${HOME}/deps/target \
     RUSTFLAGS="${RUSTFLAGS}" \
+    RUSTC_WRAPPER="sccache" \
+    SCCACHE_DIR="${HOME}/.cache/sccache" \
     PATH=${CARGO_HOME}/bin:${RUSTUP_HOME}/bin:/usr/local/go/bin:$PATH
 
 COPY --from=toolchain-builder /usr/local/cargo ${CARGO_HOME}
@@ -73,27 +74,29 @@ COPY --from=go-official /usr/local/go /usr/local/go
 COPY --from=go-builder /tmp/oxia ${CARGO_HOME}/bin/oxia
 
 WORKDIR /__w/${REPO_NAME}/${REPO_NAME}
-# Use a cache mount for the cargo registry so downloads persist across builds!
-RUN --mount=type=bind,source=.,target=/__w/oxia-rust/oxia-rust,ro \
-    cargo fetch --locked
+
+COPY . .
+RUN cargo fetch --locked
 
 # ===== 5a. Parallel Builder: CI Profile =====
 FROM source-context AS build-ci
-RUN --mount=type=bind,source=.,target=/__w/oxia-rust/oxia-rust \
+# Added sharing=locked to serialize access to the same cache mount safely if built concurrently
+RUN --mount=type=cache,target=/root/.cache/sccache,sharing=locked \
     cargo build --profile ci --all-targets --features metrics --frozen && \
     cargo clippy --profile ci --no-deps --all-targets --features metrics --frozen -- -D warnings
 
 # ===== 5b. Parallel Builder: CI-Debug Profile =====
 FROM source-context AS build-ci-debug
-RUN --mount=type=bind,source=.,target=/__w/oxia-rust/oxia-rust \
+# Added sharing=locked to prevent compiler-cache race mutations
+RUN --mount=type=cache,target=/root/.cache/sccache,sharing=locked \
     cargo build --profile ci-debug --all-targets --features metrics --frozen && \
     cargo clippy --profile ci-debug --no-deps --all-targets --features metrics --frozen -- -D warnings
 
 # ===== 5c. Parallel Builder: Miri Targets =====
 FROM source-context AS build-miri
-RUN --mount=type=bind,source=.,target=/__w/oxia-rust/oxia-rust \
+RUN RUSTC_WRAPPER= \
     MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-disable-isolation" \
-    cargo +nightly miri nextest run  --package mauricebarnum-oxia-client  --features metrics  --frozen --no-run
+    cargo +nightly miri nextest run --package mauricebarnum-oxia-client --features metrics --frozen --no-run
 
 # ===== 6. Final Assembly (The Fan-In) =====
 FROM os-base AS final
@@ -111,6 +114,7 @@ COPY --from=source-context ${CARGO_HOME}/bin/oxia ${CARGO_HOME}/bin/oxia
 ENV CARGO_HOME=${CARGO_HOME} \
     RUSTUP_HOME=${RUSTUP_HOME} \
     RUSTFLAGS="${RUSTFLAGS}" \
+    RUSTC_WRAPPER="sccache" \
     CARGO_TARGET_DIR=${HOME}/deps/target \
     RUST_VERSION_EXTERNAL_TYPES="${RUST_VERSION_EXTERNAL_TYPES}" \
     XDG_CACHE_HOME="${HOME}/.cache" \
@@ -118,12 +122,11 @@ ENV CARGO_HOME=${CARGO_HOME} \
 
 COPY build/cargo-config.toml ${CARGO_HOME}/config.toml
 
-# Pull the independent target profile directories back together into the unified cache layout
-
-COPY --from=build-ci       ${HOME}/deps/target/ ${HOME}/deps/target/
-COPY --from=build-ci-debug ${HOME}/deps/target/ ${HOME}/deps/target/
-COPY --from=build-miri     ${HOME}/deps/target/ ${HOME}/deps/target/
-COPY --from=build-miri     ${HOME}/.cache/miri/ ${HOME}/.cache/miri/
+# FIX: Isolated graph paths. Instead of importing the shared parent directory,
+# pull isolated explicit leaf-node profile subdirectories to eliminate graph collisions.
+COPY --from=build-ci       /root/deps/target/ci/       /root/deps/target/ci/
+COPY --from=build-ci-debug /root/deps/target/ci-debug/ /root/deps/target/ci-debug/
+COPY --from=build-miri     /root/deps/target/miri/     /root/deps/target/miri/
+COPY --from=build-miri     /root/.cache/miri/          /root/.cache/miri/
 
 WORKDIR ${HOME}
-
