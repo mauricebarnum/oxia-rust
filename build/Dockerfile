@@ -126,6 +126,5 @@ COPY --from=build-ci-debug ${HOME}/deps/target/ ${HOME}/deps/target/
 COPY --from=build-miri     ${HOME}/deps/target/ ${HOME}/deps/target/
 COPY --from=build-miri     ${HOME}/.cache/miri/ ${HOME}/.cache/miri/
 
-RUN git config --global --add safe.directory /__w/oxia-rust/oxia-rust
-
 WORKDIR ${HOME}
+
