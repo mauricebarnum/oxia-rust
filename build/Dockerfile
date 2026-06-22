@@ -77,7 +77,7 @@ COPY --from=go-builder /tmp/oxia ${CARGO_HOME}/bin/oxia
 WORKDIR /__w/${REPO_NAME}/${REPO_NAME}
 # Use a cache mount for the cargo registry so downloads persist across builds!
 RUN --mount=type=bind,source=.,target=/__w/oxia-rust/oxia-rust,ro \
-    cargo fetch --locked && cargo +nightly fetch --locked
+    cargo fetch --locked
 
 # ===== 5a. Parallel Builder: CI Profile =====
 FROM source-context AS build-ci
