@@ -41,8 +41,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /__w "${CARGO_HOME}" "${RUSTUP_HOME}"
-
 # ===== 4. Go Builder =====
 FROM os-base AS go-builder
 COPY --from=go-official /usr/local/go /usr/local/go
