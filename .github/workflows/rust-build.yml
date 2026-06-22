@@ -131,17 +131,17 @@ jobs:
       - name: clippy
         run: cargo clippy $RELEASE_FLAG --no-deps --frozen --all-targets --features metrics -- -D warnings
 
-      - name: check-external-types
-        run: |
-          cd client
-          cargo +"$RUST_VERSION_EXTERNAL_TYPES" check-external-types --all-features
-
       - name: test
         timeout-minutes: 15
         run: cargo nextest run $NEXTEST_FLAG --frozen --features metrics --no-fail-fast --verbose
 
       - name: doc-test
         run: cargo test --doc $RELEASE_FLAG --frozen --verbose
+
+      - name: check-external-types
+        run: |
+          cd client
+          cargo +"$RUST_VERSION_EXTERNAL_TYPES" check-external-types --all-features
 
       - name: miri-client
         run: |
