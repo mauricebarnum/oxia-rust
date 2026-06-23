@@ -1,101 +1,24 @@
-# build/Dockerfile.dockerignore
-#
-# This Dockerfile-specific ignore file is intentionally tighter than a normal
-# repo-wide .dockerignore. The image build uses `context: .` and
-# `file: build/Dockerfile`, but the expensive Cargo prewarm stages only need
-# the Rust workspace plus the vendored Oxia source used by the Go builder.
+# Ignore everything by default
+**
 
-# -----------------------------------------------------------------------------
-# VCS and local/editor state
-# -----------------------------------------------------------------------------
-.git
-.git/
-.gitignore
-.gitattributes
-.github/
+# Allow Cargo manifests for cargo-chef prepare
+!**/Cargo.toml
+!Cargo.lock
 
-.DS_Store
-**/.DS_Store
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
+# Allow build files (Dockerfile and any supporting scripts in build/)
+!build/**
 
-# -----------------------------------------------------------------------------
-# Build outputs and caches that must never enter the Docker build context
-# -----------------------------------------------------------------------------
-target/
-**/target/
-/tmp/
-tmp/
-.cache/
-**/.cache/
-.sccache/
-**/.sccache/
-.nextest/
-**/.nextest/
-.miri/
-**/.miri/
+# Include source needed to prebuild the real Rust workspace graph
+!common/**
+!client/**
+!cmd/**
+!oxia-bin-util/**
 
-# Rust / Cargo local state that is host-specific
-.cargo/.package-cache
-.cargo/registry/
-.cargo/git/
+# Include vendored proto and Go source trees
+!ext/
+!ext/*.version
+!ext/oxia/**
+!ext/google-protos/**
 
-# -----------------------------------------------------------------------------
-# CI, docs, and project metadata that should not invalidate Cargo prewarm layers
-# -----------------------------------------------------------------------------
-.github/
-*.md
-LICENSE*
-CHANGELOG*
-CONTRIBUTING*
-docs/
-doc/
-site/
-
-# Ignore build support files by default. Re-include only files the Dockerfile
-# actually reads from the context.
-build/**
-!build/Dockerfile
-!build/Dockerfile.dockerignore
-!build/cargo-config.toml
-
-# -----------------------------------------------------------------------------
-# Common non-build artifacts
-# -----------------------------------------------------------------------------
-*.log
-*.tmp
-*.bak
-*.orig
-*.rej
-*.profraw
-*.profdata
-coverage/
-tarpaulin-report.html
-lcov.info
-
-# -----------------------------------------------------------------------------
-# Language/tool caches not used as image inputs
-# -----------------------------------------------------------------------------
-node_modules/
-**/node_modules/
-.npm/
-.pnpm-store/
-.yarn/
-
-__pycache__/
-**/__pycache__/
-*.py[cod]
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.venv/
-venv/
-
-# -----------------------------------------------------------------------------
-# Keep the vendored Oxia source and Rust workspace files available.
-# Do NOT ignore Cargo.toml, Cargo.lock, */Cargo.toml, src/, tests/, benches/,
-# examples/, build.rs, proto files, or ext/oxia/**.
-# -----------------------------------------------------------------------------
+# We need the git database
+!.git/**
