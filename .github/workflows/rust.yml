@@ -5,11 +5,27 @@ on:
     branches: ["main"]
     paths-ignore:
       - "build/Dockerfile"
+      - "build/Dockerfile.dockerignore"
+      - "build/cargo-config.toml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "*/Cargo.toml"
+      - "ext/oxia.version"
+      - "ext/oxia/**"
       - ".github/workflows/docker-image.yml"
+      - ".github/workflows/rust-build.yml"
   pull_request:
     paths-ignore:
       - "build/Dockerfile"
+      - "build/Dockerfile.dockerignore"
+      - "build/cargo-config.toml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "*/Cargo.toml"
+      - "ext/oxia.version"
+      - "ext/oxia/**"
       - ".github/workflows/docker-image.yml"
+      - ".github/workflows/rust-build.yml"
   workflow_dispatch:
     inputs:
       build_mode:
@@ -20,6 +36,7 @@ on:
         options:
           - auto
           - ci
+          - ci-debug
           - debug
       extra_env:
         description: "Extra environment variables (e.g., FOO=bar BAZ=qux)"
