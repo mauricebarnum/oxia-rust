@@ -98,6 +98,22 @@ RUN RUSTC_WRAPPER= \
     MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-disable-isolation" \
     cargo +nightly miri nextest run --package mauricebarnum-oxia-client --features metrics --frozen --no-run
 
+# Keep Miri dependency and sysroot warmup, but do not ship local workspace
+# artifacts. They are path-sensitive and must be rebuilt in the validation
+# checkout that runs cargo-miri.
+FROM build-miri AS build-miri-final-artifacts
+RUN cargo metadata --format-version 1 --no-deps \
+        | jq -r '. as $metadata | .packages[] | select(.id as $id | $metadata.workspace_members[] == $id) | .name' \
+        | while IFS= read -r package; do \
+            artifact="${package//-/_}"; \
+            find "${CARGO_TARGET_DIR}/miri" -type f \
+                \( -name "${artifact}-*" -o -name "lib${artifact}-*" \) \
+                -delete; \
+            find "${CARGO_TARGET_DIR}/miri" -type d \
+                -path "*/.fingerprint/${package}-*" \
+                -prune -exec rm -rf {} +; \
+        done
+
 # ===== 6. Final Assembly (The Fan-In) =====
 FROM os-base AS final
 ARG CARGO_HOME
@@ -126,7 +142,7 @@ COPY build/cargo-config.toml ${CARGO_HOME}/config.toml
 # pull isolated explicit leaf-node profile subdirectories to eliminate graph collisions.
 COPY --from=build-ci       /root/deps/target/ci/       /root/deps/target/ci/
 COPY --from=build-ci-debug /root/deps/target/ci-debug/ /root/deps/target/ci-debug/
-COPY --from=build-miri     /root/deps/target/miri/     /root/deps/target/miri/
-COPY --from=build-miri     /root/.cache/miri/          /root/.cache/miri/
+COPY --from=build-miri-final-artifacts /root/deps/target/miri/ /root/deps/target/miri/
+COPY --from=build-miri-final-artifacts /root/.cache/miri/      /root/.cache/miri/
 
 WORKDIR ${HOME}
