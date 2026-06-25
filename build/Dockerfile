@@ -98,16 +98,21 @@ RUN RUSTC_WRAPPER= \
     MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-disable-isolation" \
     cargo +nightly miri nextest run --package mauricebarnum-oxia-client --features metrics --frozen --no-run
 
-# Keep Miri dependency and sysroot warmup, but do not ship local client test
-# harness artifacts. They are path-sensitive and must be rebuilt in the
-# validation checkout that runs cargo-miri.
+# Keep Miri dependency and sysroot warmup, but do not ship local workspace
+# artifacts. They are path-sensitive and must be rebuilt in the validation
+# checkout that runs cargo-miri.
 FROM build-miri AS build-miri-final-artifacts
-RUN find "${CARGO_TARGET_DIR}/miri" -type f \
-        \( -name "mauricebarnum_oxia_client-*" -o -name "libmauricebarnum_oxia_client-*" \) \
-        -delete && \
-    find "${CARGO_TARGET_DIR}/miri" -type d \
-        -path "*/.fingerprint/mauricebarnum-oxia-client-*" \
-        -prune -exec rm -rf {} +
+RUN cargo metadata --format-version 1 --no-deps \
+        | jq -r '. as $metadata | .packages[] | select(.id as $id | $metadata.workspace_members[] == $id) | .name' \
+        | while IFS= read -r package; do \
+            artifact="${package//-/_}"; \
+            find "${CARGO_TARGET_DIR}/miri" -type f \
+                \( -name "${artifact}-*" -o -name "lib${artifact}-*" \) \
+                -delete; \
+            find "${CARGO_TARGET_DIR}/miri" -type d \
+                -path "*/.fingerprint/${package}-*" \
+                -prune -exec rm -rf {} +; \
+        done
 
 # ===== 6. Final Assembly (The Fan-In) =====
 FROM os-base AS final
