@@ -126,6 +126,7 @@ ENV CARGO_HOME=${CARGO_HOME} \
     RUSTFLAGS="${RUSTFLAGS}" \
     RUSTC_WRAPPER="sccache" \
     CARGO_TARGET_DIR=${HOME}/deps/target \
+    MIRI_SYSROOT=${HOME}/.cache/miri \
     RUST_VERSION_EXTERNAL_TYPES="${RUST_VERSION_EXTERNAL_TYPES}" \
     XDG_CACHE_HOME="${HOME}/.cache" \
     PATH=${CARGO_HOME}/bin:${RUSTUP_HOME}/bin:/usr/local/go/bin:$PATH
