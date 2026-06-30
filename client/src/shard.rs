@@ -269,16 +269,29 @@ impl Drop for Session {
 /// `format!("http://...")` allocations.
 pub type LeaderDirectory = Arc<ArcSwap<ShardIdMap<Arc<str>>>>;
 
-fn format_leader_url(a: &oxia_proto::ShardAssignment) -> Arc<str> {
-    Arc::from(format!("http://{}", a.leader))
+fn format_leader_url(leader: &str) -> Option<Arc<str>> {
+    (!leader.is_empty()).then(|| Arc::from(format!("http://{leader}")))
 }
 
-fn format_leader_hint_url(hint: &crate::LeaderHint) -> Arc<str> {
-    Arc::from(format!("http://{}", hint.leader_address))
+fn make_leader_map(
+    assignments: &[oxia_proto::ShardAssignment],
+    current: &ShardIdMap<Arc<str>>,
+) -> ShardIdMap<Arc<str>> {
+    let mut leaders = ShardIdMap::default();
+    for assignment in assignments {
+        let id = assignment.shard.into();
+        let url = format_leader_url(&assignment.leader).or_else(|| current.get(id).map(Arc::clone));
+        if let Some(url) = url {
+            leaders.insert(id, url);
+        }
+    }
+    leaders
 }
 
 fn apply_leader_hint_to_directory(leaders: &LeaderDirectory, hint: &crate::LeaderHint) -> bool {
-    let new_url = format_leader_hint_url(hint);
+    let Some(new_url) = format_leader_url(&hint.leader_address) else {
+        return false;
+    };
     let current = leaders.load();
     if let Some(existing) = current.get(hint.shard)
         && existing.as_ref() == new_url.as_ref()
@@ -806,17 +819,11 @@ impl Client {
                 let exec_duration = metrics::batch_exec_duration(exec_start);
                 let result = match first_response {
                     Some(Ok(response)) => {
-                        // Close the stream by dropping the sender
+                        // The response acknowledges the only request. Do not wait for the
+                        // server's final trailers: a concurrent connection loss can surface
+                        // there after the operation has already completed successfully.
                         drop(tx);
-
-                        // Verify we received only one response
-                        if let Some(additional_response) = resp_stream.next().await {
-                            Err(Error::Custom(format!(
-                                "Expected exactly one response, but got additional response: {additional_response:?}"
-                            )))
-                        } else {
-                            Ok(response)
-                        }
+                        Ok(response)
                     }
                     Some(Err(err)) => Err(err.into()),
                     None => Err(Error::Custom(
@@ -859,13 +866,6 @@ impl Client {
                 ));
             }
         };
-
-        // Verify we received only one response
-        if let Some(response) = rsp_stream.next().await {
-            return Err(Error::Custom(format!(
-                "Expected only one ReadResponse, but got additional response: {response:?}"
-            )));
-        }
 
         // Check that we got exactly one GetResponse
         if rsp.gets.len() != 1 {
@@ -1679,16 +1679,15 @@ impl ShardAssignmentTask {
         mb.build()
     }
 
-    fn process_assignments(&self, mut ns: oxia_proto::NamespaceShardsAssignment) -> Result<()> {
+    fn process_assignments(&self, ns: &oxia_proto::NamespaceShardsAssignment) -> Result<()> {
         // Create shard mappings and bail out if we find anything silly.
-        let mapper = Self::make_mapper(&ns)?;
+        let mapper = Self::make_mapper(ns)?;
         let current = self.shards.load();
 
-        // Build new leaders map from assignments
-        let mut new_leaders = ShardIdMap::<Arc<str>>::default();
-        for a in &mut ns.assignments {
-            new_leaders.insert(a.shard.into(), format_leader_url(a));
-        }
+        // An empty leader means an election is in progress. Retain the previous
+        // endpoint so requests get retryable connection errors instead of an invalid URI.
+        let current_leaders = self.leaders.load();
+        let new_leaders = make_leader_map(&ns.assignments, &current_leaders);
         // Update leaders atomically - clients will see new leaders on next RPC
         self.leaders.store(Arc::new(new_leaders));
 
@@ -1726,11 +1725,8 @@ impl ShardAssignmentTask {
         while let Some(r) = s.next().await {
             debug!(?r, "assignment");
             match r {
-                Ok(mut r) => {
-                    if let Some(a) = r.namespaces.get_mut(namespace) {
-                        // We're throwing this map away, so grab the value contents rather
-                        // than clone it
-                        let a = std::mem::take(a);
+                Ok(r) => {
+                    if let Some(a) = r.namespaces.get(namespace) {
                         let pr = self.process_assignments(a);
                         let _ = self.changed.send(pr.map(|()| self.shards.load().epoch()));
                     }
@@ -2013,6 +2009,43 @@ mod tests {
     fn make_shard_id(x: u64) -> ShardId {
         #[allow(clippy::cast_possible_wrap)]
         (x as i64).into()
+    }
+
+    #[test]
+    fn leader_map_retains_last_valid_leader_during_election() {
+        let shard_id = ShardId::new(1);
+        let mut current = ShardIdMap::default();
+        current.insert(shard_id, Arc::from("http://previous:6648"));
+        let assignments = [oxia_proto::ShardAssignment {
+            shard: shard_id.into(),
+            leader: String::new(),
+            ..Default::default()
+        }];
+
+        let updated = make_leader_map(&assignments, &current);
+
+        assert_eq!(
+            updated.get(shard_id).map(AsRef::as_ref),
+            Some("http://previous:6648")
+        );
+    }
+
+    #[test]
+    fn empty_leader_hint_does_not_replace_valid_leader() {
+        let shard_id = ShardId::new(1);
+        let mut current = ShardIdMap::default();
+        current.insert(shard_id, Arc::from("http://previous:6648"));
+        let leaders = Arc::new(ArcSwap::from_pointee(current));
+        let hint = crate::LeaderHint {
+            shard: shard_id,
+            leader_address: String::new(),
+        };
+
+        assert!(!apply_leader_hint_to_directory(&leaders, &hint));
+        assert_eq!(
+            leaders.load().get(shard_id).map(AsRef::as_ref),
+            Some("http://previous:6648")
+        );
     }
 
     #[test]
