@@ -100,12 +100,16 @@ RUN RUSTC_WRAPPER= \
 
 # Keep Miri dependency and sysroot warmup, but do not ship local workspace
 # artifacts. They are path-sensitive and must be rebuilt in the validation
-# checkout that runs cargo-miri. Let Cargo remove every artifact associated
-# with workspace packages, including build-script outputs and fingerprints.
+# checkout that runs cargo-miri. Clean both the interpreted target artifacts
+# and the host build scripts and proc macros while retaining dependencies.
 FROM build-miri AS build-miri-final-artifacts
-RUN cargo +nightly clean \
+RUN miri_target="$(rustc +nightly -vV | sed -n 's/^host: //p')" && \
+    cargo +nightly clean \
         --target-dir "${CARGO_TARGET_DIR}/miri" \
-        --target "$(rustc +nightly -vV | sed -n 's/^host: //p')" \
+        --workspace && \
+    cargo +nightly clean \
+        --target-dir "${CARGO_TARGET_DIR}/miri" \
+        --target "${miri_target}" \
         --workspace
 
 # ===== 6. Final Assembly (The Fan-In) =====
@@ -126,6 +130,7 @@ ENV CARGO_HOME=${CARGO_HOME} \
     RUSTFLAGS="${RUSTFLAGS}" \
     RUSTC_WRAPPER="sccache" \
     CARGO_TARGET_DIR=${HOME}/deps/target \
+    MIRI_SYSROOT=${HOME}/.cache/miri \
     RUST_VERSION_EXTERNAL_TYPES="${RUST_VERSION_EXTERNAL_TYPES}" \
     XDG_CACHE_HOME="${HOME}/.cache" \
     PATH=${CARGO_HOME}/bin:${RUSTUP_HOME}/bin:/usr/local/go/bin:$PATH
