@@ -100,19 +100,13 @@ RUN RUSTC_WRAPPER= \
 
 # Keep Miri dependency and sysroot warmup, but do not ship local workspace
 # artifacts. They are path-sensitive and must be rebuilt in the validation
-# checkout that runs cargo-miri.
+# checkout that runs cargo-miri. Let Cargo remove every artifact associated
+# with workspace packages, including build-script outputs and fingerprints.
 FROM build-miri AS build-miri-final-artifacts
-RUN cargo metadata --format-version 1 --no-deps \
-        | jq -r '. as $metadata | .packages[] | select(.id as $id | $metadata.workspace_members[] == $id) | .name' \
-        | while IFS= read -r package; do \
-            artifact="${package//-/_}"; \
-            find "${CARGO_TARGET_DIR}/miri" -type f \
-                \( -name "${artifact}-*" -o -name "lib${artifact}-*" \) \
-                -delete; \
-            find "${CARGO_TARGET_DIR}/miri" -type d \
-                -path "*/.fingerprint/${package}-*" \
-                -prune -exec rm -rf {} +; \
-        done
+RUN cargo +nightly clean \
+        --target-dir "${CARGO_TARGET_DIR}/miri" \
+        --target "$(rustc +nightly -vV | sed -n 's/^host: //p')" \
+        --workspace
 
 # ===== 6. Final Assembly (The Fan-In) =====
 FROM os-base AS final
