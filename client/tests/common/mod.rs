@@ -620,15 +620,18 @@ impl TestCluster {
                 .iter()
                 .filter(|status| status.status == ServingStatus::Leader)
                 .count();
-            let members = statuses
+            let members: Vec<_> = statuses
                 .iter()
                 .filter(|status| status.status != ServingStatus::NotMember)
-                .count();
-            if leaders != 1 || members != self.replication_factor {
+                .collect();
+            let max_commit = members.iter().map(|status| status.commit_offset).max();
+            let caught_up = max_commit
+                .is_some_and(|commit| members.iter().all(|status| status.head_offset >= commit));
+            if leaders != 1 || members.len() != self.replication_factor || !caught_up {
                 ready = false;
             }
             details.push(format!(
-                "shard {shard}: leaders={leaders}, members={members}, statuses={statuses:?}"
+                "shard {shard}: leaders={leaders}, max_commit={max_commit:?}, statuses={statuses:?}"
             ));
         }
         (ready, details.join("; "))
@@ -657,6 +660,10 @@ impl TestCluster {
         }
     }
 
+    pub async fn wait_for_replication(&mut self) -> anyhow::Result<()> {
+        self.wait_for_stable_topology(CLUSTER_PHASE_TIMEOUT).await
+    }
+
     async fn wait_for_restarted_node(
         &mut self,
         index: usize,
@@ -682,8 +689,9 @@ impl TestCluster {
                 let restarted = members.iter().find(|status| status.server == index);
                 let shard_ready = leaders == 1
                     && members.len() == self.replication_factor
-                    && restarted.is_some_and(|status| {
-                        max_commit.is_some_and(|commit| status.head_offset >= commit)
+                    && restarted.is_some()
+                    && max_commit.is_some_and(|commit| {
+                        members.iter().all(|status| status.head_offset >= commit)
                     });
                 ready &= shard_ready;
                 details.push(format!(

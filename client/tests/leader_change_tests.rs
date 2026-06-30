@@ -61,6 +61,7 @@ async fn test_put_get_survives_kill() -> anyhow::Result<()> {
             let key = format!("lc-pk-{i:04}");
             trace_err!(client.put(&key, format!("val-{i}")).await)?;
         }
+        cluster.wait_for_replication().await?;
 
         // Kill server 1
         cluster.kill_server(1)?;
@@ -100,6 +101,7 @@ async fn test_put_get_survives_stop() -> anyhow::Result<()> {
             let key = format!("lc-ps-{i:04}");
             trace_err!(client.put(&key, format!("val-{i}")).await)?;
         }
+        cluster.wait_for_replication().await?;
 
         // SIGTERM server 1
         cluster.stop_server(1)?;
@@ -138,6 +140,7 @@ async fn test_fan_out_ops_survive_leader_change() -> anyhow::Result<()> {
             let key = format!("lc-fo-{i:04}");
             trace_err!(client.put(&key, format!("val-{i}")).await)?;
         }
+        cluster.wait_for_replication().await?;
 
         // Kill server 2
         cluster.kill_server(2)?;
@@ -202,6 +205,7 @@ async fn test_kill_restart_kill() -> anyhow::Result<()> {
             let key = format!("lc-kr-{i:04}");
             trace_err!(client.put(&key, format!("val-{i}")).await)?;
         }
+        cluster.wait_for_replication().await?;
 
         // Kill server 1
         cluster.kill_server(1)?;
@@ -257,6 +261,7 @@ async fn test_concurrent_ops_during_kill() -> anyhow::Result<()> {
             let key = format!("lc-co-{i:04}");
             trace_err!(client.put(&key, format!("val-{i}")).await)?;
         }
+        cluster.wait_for_replication().await?;
 
         // Spawn 5 concurrent tasks doing put/get loops
         let mut handles = Vec::new();
