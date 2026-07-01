@@ -53,17 +53,23 @@ jobs:
 
           if [ "$EVENT_NAME" = "pull_request" ] && \
              [ "$EVENT_ACTION" = "synchronize" ]; then
-            should_build=false
-            while IFS= read -r path; do
-              case "$path" in
-                build/Dockerfile|build/Dockerfile.dockerignore|build/cargo-config.toml|\
-                ext/oxia.version|ext/oxia/*|\
-                .github/workflows/docker-image.yml|.github/workflows/rust-build.yml)
-                  should_build=true
-                  break
-                  ;;
-              esac
-            done < <(git diff --name-only "$PREVIOUS_HEAD" "$CURRENT_HEAD")
+            if git cat-file -e "${PREVIOUS_HEAD}^{commit}" && \
+               git cat-file -e "${CURRENT_HEAD}^{commit}" && \
+               changed_paths="$(git diff --name-only "$PREVIOUS_HEAD" "$CURRENT_HEAD")"; then
+              should_build=false
+              while IFS= read -r path; do
+                case "$path" in
+                  build/Dockerfile|build/Dockerfile.dockerignore|build/cargo-config.toml|\
+                  ext/oxia.version|ext/oxia/*|\
+                  .github/workflows/docker-image.yml|.github/workflows/rust-build.yml)
+                    should_build=true
+                    break
+                    ;;
+                esac
+              done <<< "$changed_paths"
+            else
+              echo "Unable to compare synchronized PR heads; building image"
+            fi
           fi
 
           echo "should_build=$should_build" >> "$GITHUB_OUTPUT"
