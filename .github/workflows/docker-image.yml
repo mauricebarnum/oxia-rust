@@ -7,9 +7,6 @@ on:
       - "build/Dockerfile"
       - "build/Dockerfile.dockerignore"
       - "build/cargo-config.toml"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "*/Cargo.toml"
       - "ext/oxia.version"
       - "ext/oxia/**"
       - ".github/workflows/docker-image.yml"
@@ -19,26 +16,71 @@ on:
       - "build/Dockerfile"
       - "build/Dockerfile.dockerignore"
       - "build/cargo-config.toml"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "*/Cargo.toml"
       - "ext/oxia.version"
       - "ext/oxia/**"
       - ".github/workflows/docker-image.yml"
       - ".github/workflows/rust-build.yml"
   workflow_dispatch:
   schedule:
-    - cron: "13 3 6 * *" # monthly
+    - cron: "13 3 1-5,7-31 * *" # nightly, except for the monthly refresh
+    - cron: "13 3 6 * *" # monthly OS and apt refresh
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}/rust-build
 
 jobs:
+  detect-image-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.changes.outputs.should_build }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Detect image input changes
+        id: changes
+        env:
+          EVENT_ACTION: ${{ github.event.action }}
+          EVENT_NAME: ${{ github.event_name }}
+          PREVIOUS_HEAD: ${{ github.event.before }}
+          CURRENT_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          should_build=true
+
+          if [ "$EVENT_NAME" = "pull_request" ] && \
+             [ "$EVENT_ACTION" = "synchronize" ]; then
+            if git cat-file -e "${PREVIOUS_HEAD}^{commit}" && \
+               git cat-file -e "${CURRENT_HEAD}^{commit}" && \
+               changed_paths="$(git diff --name-only "$PREVIOUS_HEAD" "$CURRENT_HEAD")"; then
+              should_build=false
+              while IFS= read -r path; do
+                case "$path" in
+                  build/Dockerfile|build/Dockerfile.dockerignore|build/cargo-config.toml|\
+                  ext/oxia.version|ext/oxia/*|\
+                  .github/workflows/docker-image.yml|.github/workflows/rust-build.yml)
+                    should_build=true
+                    break
+                    ;;
+                esac
+              done <<< "$changed_paths"
+            else
+              echo "Unable to compare synchronized PR heads; building image"
+            fi
+          fi
+
+          echo "should_build=$should_build" >> "$GITHUB_OUTPUT"
+
   build-image:
+    needs: detect-image-changes
+    if: needs.detect-image-changes.outputs.should_build == 'true'
     runs-on: ubuntu-24.04-arm
     outputs:
       image_digest: ${{ steps.build.outputs.digest }}
+      image_changed: ${{ steps.compare.outputs.image_changed }}
     permissions:
       contents: read
       packages: write
@@ -69,6 +111,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Inspect current latest image
+        id: latest
+        env:
+          LATEST_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+        run: |
+          latest_hash=""
+          if image_config="$(docker buildx imagetools inspect \
+            "$LATEST_IMAGE" --format '{{json .Image}}' 2>/dev/null)"; then
+            latest_hash="$(printf '%s' "$image_config" | sha256sum | cut -d' ' -f1)"
+          fi
+          echo "image_hash=$latest_hash" >> "$GITHUB_OUTPUT"
+
       - name: Build and push (SHA tag only)
         id: build
         uses: docker/build-push-action@v7
@@ -80,10 +134,28 @@ jobs:
           build-args: REPO_NAME=${{ github.event.repository.name }}
           cache-from: type=registry,ref=ghcr.io/${{ github.repository }}/rust-build:cache
           cache-to: type=registry,ref=ghcr.io/${{ github.repository }}/rust-build:cache,mode=max
-          no-cache: ${{ github.event_name == 'schedule' }}
+          no-cache-filters: ${{ github.event.schedule == '13 3 6 * *' && 'os-base' || '' }}
+          pull: true
+
+      - name: Compare candidate with latest
+        id: compare
+        env:
+          CANDIDATE_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          LATEST_HASH: ${{ steps.latest.outputs.image_hash }}
+        run: |
+          candidate_config="$(docker buildx imagetools inspect \
+            "$CANDIDATE_IMAGE" --format '{{json .Image}}')"
+          candidate_hash="$(printf '%s' "$candidate_config" | sha256sum | cut -d' ' -f1)"
+
+          if [ -z "$LATEST_HASH" ] || [ "$candidate_hash" != "$LATEST_HASH" ]; then
+            echo "image_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "image_changed=false" >> "$GITHUB_OUTPUT"
+          fi
 
   validate-image:
     needs: build-image
+    if: needs.build-image.outputs.image_changed == 'true'
     permissions:
       contents: read
       packages: read
@@ -96,7 +168,7 @@ jobs:
 
   tag-latest:
     needs: validate-image
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && needs.validate-image.result == 'success'
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
