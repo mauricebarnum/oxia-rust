@@ -11,18 +11,18 @@ tokio = { version = "1.52.3", features = ["sync", "rt", "time"] }
 tokio-stream = "0.1.18"
 tonic = { version = "0.14.6", features = ["gzip", "channel", "zstd"] }
 thiserror = "2.0.18"
-bytes = "1.11.1"
+bytes = "1.12.0"
 tracing = "0.1.44"
 futures = "0.3.32"
-getrandom = "0.4.2"
-rand = "0.10.1"
-xxhash-rust = { version = "0.8.15", default-features = false, features = [
+getrandom = "0.4.3"
+rand = "0.10.2"
+xxhash-rust = { version = "0.8.16", default-features = false, features = [
     "xxh3",
 ] }
 backon = "1.6.0"
 arc-swap = "1.9"
 tokio-util = "0.7.18"
-bon = { version = "3.9.2", features = ["implied-bounds"] }
+bon = { version = "3.9.3", features = ["implied-bounds"] }
 dashmap = { version = "6", optional = true }
 fastrand = "2.4.1"
 prost = "0.14.4"
@@ -42,7 +42,7 @@ socket2 = "0.6.4"
 test-log = { version = "0.2.21", features = ["trace", "color"] }
 oxia-bin-util = { path = "../oxia-bin-util" }
 tempfile = "3.27.0"
-anyhow = "1.0.102"
+anyhow = "1.0.103"
 itertools = "0.15.0"
 nix = { version = "0.31", default-features = false, features = ["signal"] }
 opentelemetry_sdk = { version = "0.32.1", default-features = false, features = [
