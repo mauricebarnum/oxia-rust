@@ -2,7 +2,7 @@
 ARG CARGO_HOME=/root/.cargo
 ARG RUSTUP_HOME=/root/.rustup
 ARG HOME=/root
-ARG RUST_VERSION=1.96.0
+ARG RUST_VERSION=1.96.1
 ARG RUST_VERSION_EXTERNAL_TYPES=nightly-2026-03-20
 ARG GO_VERSION=1.26.4
 
@@ -104,9 +104,9 @@ RUN RUSTC_WRAPPER= \
 # with workspace packages, including build-script outputs and fingerprints.
 FROM build-miri AS build-miri-final-artifacts
 RUN cargo +nightly clean \
-        --target-dir "${CARGO_TARGET_DIR}/miri" \
-        --target "$(rustc +nightly -vV | sed -n 's/^host: //p')" \
-        --workspace
+    --target-dir "${CARGO_TARGET_DIR}/miri" \
+    --target "$(rustc +nightly -vV | sed -n 's/^host: //p')" \
+    --workspace
 
 # ===== 6. Final Assembly (The Fan-In) =====
 FROM os-base AS final
