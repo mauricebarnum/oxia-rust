@@ -28,6 +28,10 @@ on:
         default: ""
         type: string
 
+permissions:
+  contents: read
+  packages: read
+
 env:
   CARGO_TERM_COLOR: always
   SCCACHE_DIR: "/tmp/sccache"
