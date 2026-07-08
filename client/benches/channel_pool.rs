@@ -43,7 +43,7 @@ use std::time::Instant;
 use arc_swap::ArcSwap;
 #[cfg(feature = "bench-dashmap")]
 use dashmap::DashMap;
-use futures::FutureExt;
+use futures_util::FutureExt;
 use tokio::sync::RwLock;
 
 // ---------------------------------------------------------------------------

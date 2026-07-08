@@ -18,7 +18,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::time::Duration;
 
-use futures::StreamExt;
+use futures_util::StreamExt;
 use mauricebarnum_oxia_client as client;
 use mauricebarnum_oxia_client::config;
 use tokio::time::timeout;

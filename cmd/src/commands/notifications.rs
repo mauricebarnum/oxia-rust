@@ -14,7 +14,7 @@
 
 use clap::Args;
 use clap::ValueEnum;
-use futures::stream::StreamExt;
+use futures_util::stream::StreamExt;
 use mauricebarnum_oxia_client::NotificationBatch;
 use mauricebarnum_oxia_client::NotificationsOptions;
 use tracing::trace;

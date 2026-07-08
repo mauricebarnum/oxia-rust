@@ -21,9 +21,9 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
-use futures::FutureExt;
-use futures::stream::Stream;
-use futures::stream::StreamExt;
+use futures_core::stream::Stream;
+use futures_util::FutureExt;
+use futures_util::stream::StreamExt;
 use mauricebarnum_oxia_common::proto as oxia_proto;
 use rand::SeedableRng;
 use rand::distr::Distribution;
@@ -966,7 +966,7 @@ impl Client {
             request_count,
         );
 
-        futures::stream::unfold(state, move |mut state| async move {
+        futures_util::stream::unfold(state, move |mut state| async move {
             loop {
                 return match state {
                     State::Demuxing {

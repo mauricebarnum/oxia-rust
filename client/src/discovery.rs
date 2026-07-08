@@ -15,7 +15,7 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use futures::future::BoxFuture;
+use futures_core::future::BoxFuture;
 use mauricebarnum_oxia_common::proto::ListNodesRequest;
 use mauricebarnum_oxia_common::proto::OxiaAdminClient;
 use tracing::debug;

@@ -25,8 +25,8 @@ use backon::FibonacciBuilder;
 use backon::Retryable;
 use bon::Builder;
 use bytes::Bytes;
-use futures::stream::StreamExt;
-use futures::stream::TryStreamExt;
+use futures_util::stream::StreamExt;
+use futures_util::stream::TryStreamExt;
 use mauricebarnum_oxia_common::proto as oxia_proto;
 use tonic::transport::Channel;
 use tracing::Instrument;
@@ -51,12 +51,12 @@ pub use shard::ShardId;
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[inline]
-fn instrument_stream<S>(stream: S, span: tracing::Span) -> impl futures::Stream<Item = S::Item>
+fn instrument_stream<S>(stream: S, span: tracing::Span) -> impl futures_core::Stream<Item = S::Item>
 where
-    S: futures::Stream,
+    S: futures_core::Stream,
 {
     let mut stream = Box::pin(stream);
-    futures::stream::poll_fn(move |context: &mut Context<'_>| {
+    futures_util::stream::poll_fn(move |context: &mut Context<'_>| {
         let _entered = span.enter();
         Pin::as_mut(&mut stream).poll_next(context)
     })
@@ -1069,7 +1069,7 @@ impl Client {
                 n => n,
             };
 
-            futures::stream::iter(self.get_shard_manager()?.get_shard_clients())
+            futures_util::stream::iter(self.get_shard_manager()?.get_shard_clients())
                 .map(|shard| execute_get(shard, Arc::clone(&key), options.clone()))
                 .buffer_unordered(max_parallel)
                 .try_fold(None, |best, response| async {
@@ -1108,9 +1108,9 @@ impl Client {
     pub fn batch_get(
         &self,
         req: batch_get::Request,
-    ) -> Result<impl futures::stream::Stream<Item = batch_get::ResponseItem> + use<>> {
-        use futures::future::Either::Left;
-        use futures::future::Either::Right;
+    ) -> Result<impl futures_core::Stream<Item = batch_get::ResponseItem> + use<>> {
+        use futures_util::future::Either::Left;
+        use futures_util::future::Either::Right;
 
         let span = tracing::info_span!(
             target: metrics::SCOPE_NAME,
@@ -1145,7 +1145,7 @@ impl Client {
                     None
                 } else {
                     Some(
-                        futures::stream::iter(batch_get_futures)
+                        futures_util::stream::iter(batch_get_futures)
                             .buffer_unordered(self.config.max_parallel_requests())
                             .flatten_unordered(None)
                             .boxed(),
@@ -1155,14 +1155,14 @@ impl Client {
                 let failures_stream = if failures.is_empty() {
                     None
                 } else {
-                    Some(futures::stream::iter(failures))
+                    Some(futures_util::stream::iter(failures))
                 };
 
                 let final_stream = match (batch_get_stream, failures_stream) {
                     (Some(b), None) => Left(b),
-                    (Some(b), Some(f)) => Right(Left(Left(futures::stream::select(b, f)))),
+                    (Some(b), Some(f)) => Right(Left(Left(futures_util::stream::select(b, f)))),
                     (None, Some(f)) => Right(Left(Right(f))),
-                    (None, None) => Right(Right(futures::stream::empty())),
+                    (None, None) => Right(Right(futures_util::stream::empty())),
                 };
                 Ok((start, final_stream))
             })
@@ -1382,7 +1382,7 @@ impl Client {
             };
 
             let mut result_stream =
-                futures::stream::iter(self.get_shard_manager()?.get_shard_clients())
+                futures_util::stream::iter(self.get_shard_manager()?.get_shard_clients())
                     .map(|shard| {
                         do_delete_range(
                             shard,
@@ -1493,7 +1493,7 @@ impl Client {
             };
 
             let mut result_stream =
-                futures::stream::iter(self.get_shard_manager()?.get_shard_clients())
+                futures_util::stream::iter(self.get_shard_manager()?.get_shard_clients())
                     .map(|shard| {
                         do_list(
                             shard,
@@ -1606,7 +1606,7 @@ impl Client {
             };
 
             let mut result_stream =
-                futures::stream::iter(self.get_shard_manager()?.get_shard_clients())
+                futures_util::stream::iter(self.get_shard_manager()?.get_shard_clients())
                     .map(|shard| {
                         do_range_scan(
                             shard,

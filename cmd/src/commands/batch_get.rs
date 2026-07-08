@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use clap::Args;
-use futures::stream::StreamExt;
+use futures_util::stream::StreamExt;
 use mauricebarnum_oxia_client::batch_get;
 use tracing::trace;
 

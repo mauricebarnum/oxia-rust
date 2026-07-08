@@ -604,7 +604,7 @@ impl TestCluster {
                         })
                 })
             });
-        futures::future::join_all(requests)
+        futures_util::future::join_all(requests)
             .await
             .into_iter()
             .flatten()

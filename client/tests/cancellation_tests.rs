@@ -222,7 +222,7 @@ async fn test_concurrent_ops_during_shutdown() -> anyhow::Result<()> {
 #[test_log::test(tokio::test)]
 #[allow(clippy::items_after_statements)]
 async fn test_notifications_stream_drop_completes() -> anyhow::Result<()> {
-    use futures::StreamExt;
+    use futures_util::StreamExt;
 
     let server = trace_err!(common::TestServer::start())?;
     let client = trace_err!(server.connect().await)?;

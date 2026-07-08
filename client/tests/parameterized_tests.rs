@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use futures::StreamExt;
+use futures_util::StreamExt;
 use mauricebarnum_oxia_client as client;
 use mauricebarnum_oxia_client::config;
 use tokio::sync::Barrier;

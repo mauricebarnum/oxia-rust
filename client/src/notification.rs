@@ -21,12 +21,12 @@ use std::task::Context;
 use std::task::Poll;
 use std::time::Duration;
 
-use futures::FutureExt;
-use futures::Stream;
-use futures::StreamExt;
-use futures::future::BoxFuture;
-use futures::stream::BoxStream;
-use futures::stream::FuturesUnordered;
+use futures_core::Stream;
+use futures_core::future::BoxFuture;
+use futures_util::FutureExt;
+use futures_util::StreamExt;
+use futures_util::stream::BoxStream;
+use futures_util::stream::FuturesUnordered;
 use tokio::sync::mpsc;
 use tokio_stream::StreamMap;
 use tokio_stream::StreamNotifyClose;
@@ -245,14 +245,14 @@ impl NotificationsStream {
                         .await;
                         let s = StreamNotifyClose::new(match r {
                             Ok(s) => s.boxed(),
-                            Err(e) => futures::stream::once(async { Err(e) }).boxed(),
+                            Err(e) => futures_util::stream::once(async { Err(e) }).boxed(),
                         });
                         (id, s)
                     }
                 });
             }
 
-            let results: Vec<_> = futures::stream::iter(futs)
+            let results: Vec<_> = futures_util::stream::iter(futs)
                 .buffer_unordered(max_parallel_requests)
                 .collect()
                 .await;
