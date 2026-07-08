@@ -258,8 +258,9 @@ mod tests {
     struct FailDefaultChannelFactory;
 
     impl ChannelFactory for FailDefaultChannelFactory {
-        async fn create(&self, _: &Arc<Config>, _: &str) -> Result<Channel> {
-            Err(Error::Custom("not implemented".to_string()))
+        fn create(&self, _: &Arc<Config>, _: &str) -> impl Future<Output = Result<Channel>> {
+            let result = Err(Error::Custom("not implemented".to_string()));
+            std::future::ready(result)
         }
     }
 
