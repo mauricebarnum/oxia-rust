@@ -4,7 +4,7 @@ ARG RUSTUP_HOME=/root/.rustup
 ARG HOME=/root
 ARG RUST_VERSION=1.96.1
 ARG RUST_VERSION_EXTERNAL_TYPES=nightly-2026-03-20
-ARG GO_VERSION=1.26.4
+ARG GO_VERSION=1.26.5
 
 # ===== 1. Pull Official Images =====
 FROM rust:${RUST_VERSION} AS rust-official
