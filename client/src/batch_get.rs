@@ -16,8 +16,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bon::Builder;
-use futures::stream::BoxStream;
-use futures::stream::StreamExt;
+use futures_util::stream::BoxStream;
+use futures_util::stream::StreamExt;
 
 use crate::Error;
 use crate::GetResponse;

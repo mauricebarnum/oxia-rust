@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use anyhow::Result;
-use futures::StreamExt;
+use futures_util::StreamExt;
 use mauricebarnum_oxia_client::Client;
 use mauricebarnum_oxia_client::DeleteOptions;
 use mauricebarnum_oxia_client::Error;

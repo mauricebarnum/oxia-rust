@@ -201,15 +201,15 @@ pub(crate) fn record_batch_get_stream<S>(
     metrics: Metrics,
     start: OperationStart,
     stream: S,
-) -> impl futures::Stream<Item = crate::batch_get::ResponseItem>
+) -> impl futures_core::Stream<Item = crate::batch_get::ResponseItem>
 where
-    S: futures::Stream<Item = crate::batch_get::ResponseItem>,
+    S: futures_core::Stream<Item = crate::batch_get::ResponseItem>,
 {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::Ordering;
 
-    use futures::StreamExt as _;
+    use futures_util::StreamExt as _;
 
     struct Completion {
         failed: Arc<AtomicBool>,
@@ -256,11 +256,13 @@ where
             }
         })
         .map(Some)
-        .chain(futures::stream::once(futures::future::lazy(move |_| {
-            completion.record(true);
-            None
-        })))
-        .filter_map(futures::future::ready)
+        .chain(futures_util::stream::once(futures_util::future::lazy(
+            move |_| {
+                completion.record(true);
+                None
+            },
+        )))
+        .filter_map(futures_util::future::ready)
 }
 
 #[cfg(not(feature = "metrics"))]
@@ -602,13 +604,13 @@ mod sdk_tests {
 
     #[tokio::test]
     async fn batch_get_operation_records_stream_failure_on_completion() {
-        use futures::StreamExt as _;
+        use futures_util::StreamExt as _;
 
         let (exporter, provider, metrics) = setup_metrics();
         let stream = record_batch_get_stream(
             metrics,
             operation_start(),
-            futures::stream::iter([crate::batch_get::ResponseItem::failed(
+            futures_util::stream::iter([crate::batch_get::ResponseItem::failed(
                 "key",
                 Error::Cancelled,
             )]),
@@ -635,7 +637,7 @@ mod sdk_tests {
         let stream = record_batch_get_stream(
             metrics,
             operation_start(),
-            futures::stream::iter([crate::batch_get::ResponseItem::failed(
+            futures_util::stream::iter([crate::batch_get::ResponseItem::failed(
                 "key",
                 Error::Cancelled,
             )]),
