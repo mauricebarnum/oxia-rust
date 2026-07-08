@@ -70,6 +70,7 @@ pub(crate) enum Operation {
     List,
     RangeScan,
     BatchGet,
+    GetSequenceUpdates,
 }
 
 impl Operation {
@@ -82,6 +83,7 @@ impl Operation {
             Self::List => "list",
             Self::RangeScan => "range_scan",
             Self::BatchGet => "batch_get",
+            Self::GetSequenceUpdates => "get_sequence_updates",
         }
     }
 }

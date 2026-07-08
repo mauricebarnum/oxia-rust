@@ -23,6 +23,7 @@ use arc_swap::ArcSwap;
 use bytes::Bytes;
 use futures_core::stream::Stream;
 use futures_util::FutureExt;
+use futures_util::TryStreamExt;
 use futures_util::stream::StreamExt;
 use mauricebarnum_oxia_common::proto as oxia_proto;
 use rand::SeedableRng;
@@ -59,6 +60,7 @@ use crate::RangeScanOptions;
 use crate::RangeScanResponse;
 use crate::Result;
 use crate::SecondaryIndex;
+use crate::SequenceUpdate;
 use crate::batch_get;
 use crate::config;
 use crate::create_grpc_client;
@@ -410,6 +412,35 @@ impl Client {
             self.invalidate_channel().await;
         }
         result
+    }
+
+    pub(crate) async fn get_sequence_updates(
+        &self,
+        key: String,
+    ) -> Result<impl Stream<Item = Result<SequenceUpdate>> + use<>> {
+        let req = oxia_proto::GetSequenceUpdatesRequest {
+            shard: self.data.shard_id.into(),
+            key,
+        };
+
+        let shard_id = self.data.shard_id;
+        let rsp_stream = self
+            .rpc(|mut grpc| async move { grpc.get_sequence_updates(req).await })
+            .await?
+            .into_inner();
+
+        Ok(rsp_stream
+            .filter_map(move |result| async move {
+                match result {
+                    Ok(r) if r.highest_sequence_key.is_empty() => None,
+                    Ok(r) => Some(Ok(SequenceUpdate {
+                        highest_sequence_key: r.highest_sequence_key,
+                        shard: shard_id,
+                    })),
+                    Err(e) => Some(Err(e)),
+                }
+            })
+            .map_err(Into::into))
     }
 }
 

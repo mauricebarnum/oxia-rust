@@ -25,6 +25,7 @@ use backon::FibonacciBuilder;
 use backon::Retryable;
 use bon::Builder;
 use bytes::Bytes;
+use futures_core::stream::BoxStream;
 use futures_util::stream::StreamExt;
 use futures_util::stream::TryStreamExt;
 use mauricebarnum_oxia_common::proto as oxia_proto;
@@ -553,6 +554,20 @@ pub struct NotificationsOptions {
     /// reassignment) will not trigger a reconnection attempt.
     #[builder(default = false)]
     pub(crate) reconnect_on_error: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct SequenceUpdate {
+    pub highest_sequence_key: String,
+    pub shard: ShardId,
+}
+
+pub type SequenceUpdateStream = BoxStream<'static, Result<SequenceUpdate>>;
+
+#[derive(Clone, Debug)]
+pub enum SequenceUpdateRouting {
+    PartitionKey(String),
+    Shard(i64),
 }
 
 impl NotificationsOptions {
@@ -1647,6 +1662,7 @@ impl Client {
     }
 
     /// Create a notifications stream with default options.
+    #[inline]
     pub fn create_notifications_stream(&self) -> Result<NotificationsStream> {
         self.create_notifications_stream_with_options(NotificationsOptions::default())
     }
@@ -1662,6 +1678,73 @@ impl Client {
             Arc::clone(&shard_manager),
             options,
         ))
+    }
+
+    #[inline]
+    pub fn get_sequence_updates_shard(
+        &self,
+        key: impl Into<String>,
+        shard: i64,
+    ) -> impl Future<Output = Result<SequenceUpdateStream>> {
+        self.get_sequence_updates(key, SequenceUpdateRouting::Shard(shard))
+    }
+
+    #[inline]
+    pub fn get_sequence_updates_partition(
+        &self,
+        key: impl Into<String>,
+        partition: impl Into<String>,
+    ) -> impl Future<Output = Result<SequenceUpdateStream>> {
+        self.get_sequence_updates(key, SequenceUpdateRouting::PartitionKey(partition.into()))
+    }
+
+    #[inline]
+    pub fn get_sequence_updates(
+        &self,
+        key: impl Into<String>,
+        routing: SequenceUpdateRouting,
+    ) -> impl Future<Output = Result<SequenceUpdateStream>> {
+        self.get_sequence_updates_internal(key.into(), routing)
+    }
+
+    #[tracing::instrument(
+        target = "mauricebarnum_oxia_client",
+        name = "db.operation.get_sequence_updates",
+        skip(self, key),
+        fields(
+            db.system = metrics::DB_SYSTEM,
+            db.name = %self.config.namespace(),
+            db.operation = metrics::Operation::GetSequenceUpdates.as_str(),
+            db.oxia.shard_id = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+        )
+    )]
+    async fn get_sequence_updates_internal(
+        &self,
+        key: String,
+        routing: SequenceUpdateRouting,
+    ) -> Result<SequenceUpdateStream> {
+        let start = metrics::operation_start();
+        let shard = match routing {
+            SequenceUpdateRouting::PartitionKey(pk) => self.get_shard(&pk),
+            SequenceUpdateRouting::Shard(s) => self.get_shard_by_id(s.into()),
+        };
+
+        let result = match shard {
+            Ok(shard) => {
+                tracing::Span::current().record("db.oxia.shard_id", i64::from(shard.id()));
+                shard.get_sequence_updates(key).await
+            }
+            Err(error) => Err(error),
+        };
+        metrics::record_operation_result(
+            &self.metrics,
+            metrics::Operation::GetSequenceUpdates,
+            metrics::result_kind,
+            start,
+            &result,
+        );
+        result.map(|stream| instrument_stream(stream, tracing::Span::current()).boxed())
     }
 }
 

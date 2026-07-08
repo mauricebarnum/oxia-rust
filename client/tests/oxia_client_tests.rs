@@ -36,12 +36,17 @@ use mauricebarnum_oxia_client::OxiaError;
 use mauricebarnum_oxia_client::PutOptions;
 use mauricebarnum_oxia_client::RangeScanOptions;
 use mauricebarnum_oxia_client::SecondaryIndex;
+use mauricebarnum_oxia_client::SequenceUpdateRouting;
+use mauricebarnum_oxia_client::ShardId;
 use mauricebarnum_oxia_client::config;
 
 mod common;
 use common::TestResultExt;
 use common::non_zero;
 use tokio::time::timeout;
+use xxhash_rust::xxh3::xxh3_64;
+
+const SEQUENCE_TEST_SHARD_COUNT: u64 = 3;
 
 /// Helper function to create a test client
 async fn create_test_client_nshards(nshards: u32) -> Result<(common::TestServer, Client)> {
@@ -66,6 +71,21 @@ fn test_key(suffix: &str) -> String {
         chrono::Utc::now().timestamp_nanos_opt().unwrap(),
         suffix
     )
+}
+
+fn shard_for_key(key: &str, shard_count: u64) -> i64 {
+    let hash = xxh3_64(key.as_bytes()) & u64::from(u32::MAX);
+    i64::try_from((hash * shard_count) >> u32::BITS).expect("test shard id should fit in i64")
+}
+
+fn keys_on_different_shards(shard_count: u64) -> (String, String) {
+    let first = test_key("sequence-routing-prefix");
+    let first_shard = shard_for_key(&first, shard_count);
+    let second = (0..100)
+        .map(|suffix| test_key(&format!("sequence-routing-partition-{suffix}")))
+        .find(|key| shard_for_key(key, shard_count) != first_shard)
+        .expect("a key on another shard should be found");
+    (first, second)
 }
 
 #[test_log::test(tokio::test)]
@@ -385,6 +405,264 @@ async fn test_sequential_keys() -> Result<()> {
         .await?;
     assert!(get_result.is_some());
     assert_eq!(get_result.unwrap().value.unwrap().as_ref(), b"0");
+
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn test_sequence_updates_filters_empty_initial_response() -> Result<()> {
+    let (_server, client) = create_test_client().await?;
+    let key = test_key("sequence-updates-empty");
+    let subscriber = client.clone();
+    let subscription_key = key.clone();
+    let partition_key = key.clone();
+    let subscription = tokio::spawn(async move {
+        subscriber
+            .get_sequence_updates(
+                subscription_key,
+                SequenceUpdateRouting::PartitionKey(partition_key),
+            )
+            .await
+    });
+    tokio::task::yield_now().await;
+
+    let put_result = client
+        .put_with_options(
+            &key,
+            "value",
+            PutOptions::builder()
+                .partition_key(key.clone())
+                .sequence_key_deltas([1])
+                .build(),
+        )
+        .await?;
+    let expected_key = put_result.key.expect("sequential put should return a key");
+    let mut updates = timeout(Duration::from_secs(5), subscription).await???;
+    let update = timeout(Duration::from_secs(5), updates.next())
+        .await?
+        .expect("sequence update stream should remain open")?;
+
+    assert_eq!(update.highest_sequence_key, expected_key);
+    assert_eq!(update.shard, ShardId::new(0));
+
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn test_sequence_updates_converges_when_updates_are_collapsed() -> Result<()> {
+    let (_server, client) = create_test_client().await?;
+    let key = test_key("sequence-updates-collapsed");
+    let subscriber = client.clone();
+    let subscription_key = key.clone();
+    let partition_key = key.clone();
+    let subscription = tokio::spawn(async move {
+        subscriber
+            .get_sequence_updates(
+                subscription_key,
+                SequenceUpdateRouting::PartitionKey(partition_key),
+            )
+            .await
+    });
+    tokio::task::yield_now().await;
+
+    let mut expected_key = None;
+    for value in 0..8 {
+        let put_result = client
+            .put_with_options(
+                &key,
+                value.to_string(),
+                PutOptions::builder()
+                    .partition_key(key.clone())
+                    .sequence_key_deltas([1])
+                    .build(),
+            )
+            .await?;
+        expected_key = put_result.key;
+    }
+    let expected_key = expected_key.expect("sequential put should return a key");
+    let mut updates = timeout(Duration::from_secs(5), subscription).await???;
+
+    let observed_keys = timeout(Duration::from_secs(5), async {
+        let mut observed_keys = Vec::new();
+        loop {
+            let update = updates
+                .next()
+                .await
+                .expect("sequence update stream should remain open")?;
+            assert_eq!(update.shard, ShardId::new(0));
+            assert!(
+                update.highest_sequence_key <= expected_key,
+                "an update must not exceed the final generated key"
+            );
+
+            let reached_expected_key = update.highest_sequence_key == expected_key;
+            observed_keys.push(update.highest_sequence_key);
+            if reached_expected_key {
+                return Ok::<_, mauricebarnum_oxia_client::Error>(observed_keys);
+            }
+        }
+    })
+    .await??;
+
+    assert!(
+        observed_keys.windows(2).all(|keys| keys[0] < keys[1]),
+        "observed sequence updates should be strictly increasing: {observed_keys:?}"
+    );
+    assert_eq!(observed_keys.last(), Some(&expected_key));
+
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn test_sequence_updates_uses_partition_key_routing() -> Result<()> {
+    let (_server, client) = create_test_client_nshards(SEQUENCE_TEST_SHARD_COUNT as u32).await?;
+    let (key, partition_key) = keys_on_different_shards(SEQUENCE_TEST_SHARD_COUNT);
+    let expected_shard = ShardId::new(shard_for_key(&partition_key, SEQUENCE_TEST_SHARD_COUNT));
+
+    let incorrect_subscriber = client.clone();
+    let incorrect_key = key.clone();
+    let incorrect_partition_key = key.clone();
+    let incorrect_subscription = tokio::spawn(async move {
+        incorrect_subscriber
+            .get_sequence_updates(
+                incorrect_key,
+                SequenceUpdateRouting::PartitionKey(incorrect_partition_key),
+            )
+            .await
+    });
+    let subscriber = client.clone();
+    let subscription_key = key.clone();
+    let subscription_partition_key = partition_key.clone();
+    let subscription = tokio::spawn(async move {
+        subscriber
+            .get_sequence_updates(
+                subscription_key,
+                SequenceUpdateRouting::PartitionKey(subscription_partition_key),
+            )
+            .await
+    });
+    tokio::task::yield_now().await;
+
+    let put_result = client
+        .put_with_options(
+            &key,
+            "value",
+            PutOptions::builder()
+                .partition_key(partition_key)
+                .sequence_key_deltas([1])
+                .build(),
+        )
+        .await?;
+    let expected_key = put_result.key.expect("sequential put should return a key");
+    let mut updates = timeout(Duration::from_secs(5), subscription).await???;
+    let update = timeout(Duration::from_secs(5), updates.next())
+        .await?
+        .expect("sequence update stream should remain open")?;
+
+    assert_eq!(update.highest_sequence_key, expected_key);
+    assert_eq!(update.shard, expected_shard);
+
+    let incorrectly_routed_key = client
+        .put_with_options(
+            &key,
+            "incorrectly routed value",
+            PutOptions::builder()
+                .partition_key(key.clone())
+                .sequence_key_deltas([1])
+                .build(),
+        )
+        .await?
+        .key
+        .expect("sequential put should return a key");
+    let mut incorrectly_routed =
+        timeout(Duration::from_secs(5), incorrect_subscription).await???;
+    let incorrectly_routed_update = timeout(Duration::from_secs(5), incorrectly_routed.next())
+        .await?
+        .expect("sequence update stream should remain open")?;
+
+    assert_eq!(
+        incorrectly_routed_update.highest_sequence_key,
+        incorrectly_routed_key
+    );
+    assert_eq!(
+        incorrectly_routed_update.shard,
+        ShardId::new(shard_for_key(&key, SEQUENCE_TEST_SHARD_COUNT))
+    );
+
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn test_sequence_updates_uses_shard_routing() -> Result<()> {
+    let (_server, client) = create_test_client_nshards(SEQUENCE_TEST_SHARD_COUNT as u32).await?;
+    let (key, partition_key) = keys_on_different_shards(SEQUENCE_TEST_SHARD_COUNT);
+    let expected_shard = shard_for_key(&partition_key, SEQUENCE_TEST_SHARD_COUNT);
+    let incorrect_shard = shard_for_key(&key, SEQUENCE_TEST_SHARD_COUNT);
+
+    let incorrect_subscriber = client.clone();
+    let incorrect_key = key.clone();
+    let incorrect_subscription = tokio::spawn(async move {
+        incorrect_subscriber
+            .get_sequence_updates(incorrect_key, SequenceUpdateRouting::Shard(incorrect_shard))
+            .await
+    });
+    let subscriber = client.clone();
+    let subscription_key = key.clone();
+    let subscription = tokio::spawn(async move {
+        subscriber
+            .get_sequence_updates(
+                subscription_key,
+                SequenceUpdateRouting::Shard(expected_shard),
+            )
+            .await
+    });
+    tokio::task::yield_now().await;
+
+    let put_result = client
+        .put_with_options(
+            &key,
+            "value",
+            PutOptions::builder()
+                .partition_key(partition_key)
+                .sequence_key_deltas([1])
+                .build(),
+        )
+        .await?;
+    let expected_key = put_result.key.expect("sequential put should return a key");
+    let mut updates = timeout(Duration::from_secs(5), subscription).await???;
+    let update = timeout(Duration::from_secs(5), updates.next())
+        .await?
+        .expect("sequence update stream should remain open")?;
+
+    assert_eq!(update.highest_sequence_key, expected_key);
+    assert_eq!(update.shard, ShardId::new(expected_shard));
+
+    let incorrectly_routed_key = client
+        .put_with_options(
+            &key,
+            "incorrectly routed value",
+            PutOptions::builder()
+                .partition_key(key.clone())
+                .sequence_key_deltas([1])
+                .build(),
+        )
+        .await?
+        .key
+        .expect("sequential put should return a key");
+    let mut incorrectly_routed =
+        timeout(Duration::from_secs(5), incorrect_subscription).await???;
+    let incorrectly_routed_update = timeout(Duration::from_secs(5), incorrectly_routed.next())
+        .await?
+        .expect("sequence update stream should remain open")?;
+
+    assert_eq!(
+        incorrectly_routed_update.highest_sequence_key,
+        incorrectly_routed_key
+    );
+    assert_eq!(
+        incorrectly_routed_update.shard,
+        ShardId::new(incorrect_shard)
+    );
 
     Ok(())
 }

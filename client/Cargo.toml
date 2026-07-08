@@ -71,6 +71,7 @@ allowed_external_types = [
     "tonic::status::Status",
     "tonic::transport::error::Error",
     "futures_core::future::BoxFuture",
+    "futures_core::stream::BoxStream",
     "futures_core::stream::Stream",
     "bon::builder_state::IsSet",
     "bon::builder_state::IsUnset",
