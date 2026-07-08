@@ -24,6 +24,7 @@ mod list;
 mod notifications;
 mod put;
 mod range_scan;
+mod sequence_updates;
 mod shell;
 
 pub use batch_get::BatchGetCommand;
@@ -35,6 +36,7 @@ pub use list::ListCommand;
 pub use notifications::NotificationsCommand;
 pub use put::PutCommand;
 pub use range_scan::RangeScanCommand;
+pub use sequence_updates::SequenceUpdatesCommand;
 pub use shell::ShellCommand;
 
 #[async_trait]
@@ -74,6 +76,9 @@ pub enum Commands {
 
     /// Start a shell to run commands
     Shell(ShellCommand),
+
+    /// Get sequence updates for a key
+    SequenceUpdates(SequenceUpdatesCommand),
 }
 
 #[async_trait]
@@ -89,6 +94,7 @@ impl CommandRunnable for Commands {
             Self::Notifications(cmd) => cmd.run(ctx).await,
             Self::Put(cmd) => cmd.run(ctx).await,
             Self::RangeScan(cmd) => cmd.run(ctx).await,
+            Self::SequenceUpdates(cmd) => cmd.run(ctx).await,
             Self::Shell(cmd) => cmd.run(ctx).await,
         }
     }
