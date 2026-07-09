@@ -20,7 +20,7 @@ echo "✅ Testing ARM64 build..."
 docker run --rm ${IMAGE_NAME}:${TAG}-arm64 sh -c "
     echo 'Architecture: \$(uname -m)'
     echo 'Rust: \$(rustc --version)'
-    echo 'Go: \$(go version)'
+    echo 'Oxia: \$(oxia --help >/dev/null && echo available)'
     echo 'Protoc: \$(protoc --version)'
     echo 'Cargo nextest: \$(cargo nextest --version)'
     echo 'Sccache: \$(sccache --version)'
@@ -35,7 +35,7 @@ echo "✅ Testing AMD64 build..."
 docker run --rm ${IMAGE_NAME}:${TAG}-amd64 sh -c "
     echo 'Architecture: \$(uname -m)'
     echo 'Rust: \$(rustc --version)'
-    echo 'Go: \$(go version)'
+    echo 'Oxia: \$(oxia --help >/dev/null && echo available)'
     echo 'Protoc: \$(protoc --version)'
     echo 'Cargo nextest: \$(cargo nextest --version)'
     echo 'Sccache: \$(sccache --version)'
