@@ -22,8 +22,8 @@ check:
     cargo check --all-targets --all-features
 
 lint:
-    cargo clippy --all-targets -- -D warnings
-    cargo clippy --all-targets --all-features -- -D warnings
+    CARGO_BUILD_WARNINGS=deny cargo clippy --all-targets
+    CARGO_BUILD_WARNINGS=deny cargo clippy --all-targets --all-features
     cd client && cargo +{{rust_version_external_types}} check-external-types --all-features
 
 install-check-external-types:

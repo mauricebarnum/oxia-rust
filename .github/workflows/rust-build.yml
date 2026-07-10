@@ -147,7 +147,7 @@ jobs:
       - name: clippy
         run: |
           # shellcheck disable=SC2086
-          cargo clippy $RELEASE_FLAG --no-deps --frozen --all-targets --features metrics
+          CARGO_BUILD_WARNINGS=deny cargo clippy $RELEASE_FLAG --no-deps --frozen --all-targets --features metrics
 
       - name: test
         timeout-minutes: 15
