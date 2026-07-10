@@ -54,7 +54,7 @@ jobs:
           EXTRA_ENV: ${{ inputs.extra_env }}
         run: |
           echo "Setting extra environment variables: $EXTRA_ENV"
-          echo "$EXTRA_ENV" >> $GITHUB_ENV
+          echo "$EXTRA_ENV" >> "$GITHUB_ENV"
 
       - name: checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -71,29 +71,31 @@ jobs:
         run: |
           BUILD_MODE="$BUILD_MODE_INPUT"
           EVENT="$EVENT_INPUT"
-          if [ "$BUILD_MODE" = "ci" ]; then
-            echo "CARGO_PROFILE=ci" >> $GITHUB_ENV
-            echo "RELEASE_FLAG=--profile ci" >> $GITHUB_ENV
-            echo "NEXTEST_FLAG=--cargo-profile ci" >> $GITHUB_ENV
-          elif [ "$BUILD_MODE" = "debug" ]; then
-            echo "CARGO_PROFILE=debug" >> $GITHUB_ENV
-            echo "RELEASE_FLAG=" >> $GITHUB_ENV
-            echo "NEXTEST_FLAG=" >> $GITHUB_ENV
-          elif [ "$BUILD_MODE" = "ci-debug" ]; then
-            echo "CARGO_PROFILE=ci-debug" >> $GITHUB_ENV
-            echo "RELEASE_FLAG=--profile ci-debug" >> $GITHUB_ENV
-            echo "NEXTEST_FLAG=--cargo-profile ci-debug" >> $GITHUB_ENV
-          elif [ "$EVENT" = "pull_request" ]; then
-            # Auto mode: ci-debug for PRs
-            echo "CARGO_PROFILE=ci-debug" >> $GITHUB_ENV
-            echo "RELEASE_FLAG=--profile ci-debug" >> $GITHUB_ENV
-            echo "NEXTEST_FLAG=--cargo-profile ci-debug" >> $GITHUB_ENV
-          else
-            # Auto mode: ci profile for branch pushes (main or any other branch)
-            echo "CARGO_PROFILE=ci" >> $GITHUB_ENV
-            echo "RELEASE_FLAG=--profile ci" >> $GITHUB_ENV
-            echo "NEXTEST_FLAG=--cargo-profile ci" >> $GITHUB_ENV
-          fi
+          {
+            if [ "$BUILD_MODE" = "ci" ]; then
+              echo "CARGO_PROFILE=ci"
+              echo "RELEASE_FLAG=--profile ci"
+              echo "NEXTEST_FLAG=--cargo-profile ci"
+            elif [ "$BUILD_MODE" = "debug" ]; then
+              echo "CARGO_PROFILE=debug"
+              echo "RELEASE_FLAG="
+              echo "NEXTEST_FLAG="
+            elif [ "$BUILD_MODE" = "ci-debug" ]; then
+              echo "CARGO_PROFILE=ci-debug"
+              echo "RELEASE_FLAG=--profile ci-debug"
+              echo "NEXTEST_FLAG=--cargo-profile ci-debug"
+            elif [ "$EVENT" = "pull_request" ]; then
+              # Auto mode: ci-debug for PRs
+              echo "CARGO_PROFILE=ci-debug"
+              echo "RELEASE_FLAG=--profile ci-debug"
+              echo "NEXTEST_FLAG=--cargo-profile ci-debug"
+            else
+              # Auto mode: ci profile for branch pushes (main or any other branch)
+              echo "CARGO_PROFILE=ci"
+              echo "RELEASE_FLAG=--profile ci"
+              echo "NEXTEST_FLAG=--cargo-profile ci"
+            fi
+          } >> "$GITHUB_ENV"
           echo "Build mode: $BUILD_MODE, Event: $EVENT, Profile: $CARGO_PROFILE"
 
       - name: sync-mtimes-to-git-history
@@ -110,7 +112,7 @@ jobs:
           fi
 
       - name: Compute rustc hash
-        run: echo "RUSTC_HASH=$(rustc --version | sha256sum | cut -d' ' -f1)" >> $GITHUB_ENV
+        run: echo "RUSTC_HASH=$(rustc --version | sha256sum | cut -d' ' -f1)" >> "$GITHUB_ENV"
 
       - name: enable-sccache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -138,17 +140,25 @@ jobs:
       - name: build
         env:
           CARGO_LOG: ${{ inputs.diagnose_build_fingerprints && 'cargo::core::compiler::fingerprint=info' || '' }}
-        run: cargo build $RELEASE_FLAG --frozen --all-targets --features metrics
+        run: |
+          # shellcheck disable=SC2086
+          cargo build $RELEASE_FLAG --frozen --all-targets --features metrics
 
       - name: clippy
-        run: cargo clippy $RELEASE_FLAG --no-deps --frozen --all-targets --features metrics -- -D warnings
+        run: |
+          # shellcheck disable=SC2086
+          cargo clippy $RELEASE_FLAG --no-deps --frozen --all-targets --features metrics
 
       - name: test
         timeout-minutes: 15
-        run: cargo nextest run $NEXTEST_FLAG --frozen --features metrics --no-fail-fast --verbose
+        run: |
+          # shellcheck disable=SC2086
+          cargo nextest run $NEXTEST_FLAG --frozen --features metrics --no-fail-fast --verbose
 
       - name: doc-test
-        run: cargo test --doc $RELEASE_FLAG --frozen --verbose
+        run: |
+          # shellcheck disable=SC2086
+          cargo test --doc $RELEASE_FLAG --frozen --verbose
 
       - name: check-external-types
         run: |
