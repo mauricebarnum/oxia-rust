@@ -14,25 +14,38 @@
       "semanticCommits": true
     },
     {
-      "matchPackagePatterns": ["^tonic", "^prost"],
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "all non-major dependencies",
+      "groupSlug": "cargo-non-major"
+    },
+    {
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["major"],
+      "groupName": "all major dependencies",
+      "groupSlug": "cargo-major",
+      "dependencyDashboardApproval": true
+    },
+    {
+      "matchPackageNames": ["/^tonic/", "/^prost/"],
       "groupName": "tonic/prost",
       "groupSlug": "tonic-prost",
       "description": "gRPC code generation and runtime"
     },
     {
-      "matchPackagePatterns": ["^tokio"],
+      "matchPackageNames": ["/^tokio/"],
       "groupName": "tokio",
       "groupSlug": "tokio",
       "description": "async runtime and utilities"
     },
     {
-      "matchPackagePatterns": ["^tracing"],
+      "matchPackageNames": ["/^tracing/"],
       "groupName": "tracing",
       "groupSlug": "tracing",
       "description": "structured logging and diagnostics"
     },
     {
-      "matchPackagePatterns": ["^clap"],
+      "matchPackageNames": ["/^clap/"],
       "groupName": "clap",
       "groupSlug": "clap",
       "description": "CLI argument parsing"
