@@ -1,4 +1,4 @@
-// Copyright 2023-2025 The Oxia Authors
+// Copyright 2023-2026 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/oxia-db/oxia/oxiad/dataserver/database/kvstore"
 
@@ -32,6 +33,15 @@ import (
 
 func init() {
 	logging.ConfigureLogger()
+}
+
+func findNotification(nb *proto.NotificationBatch, key string) (*proto.Notification, bool) {
+	for _, e := range nb.Notifications {
+		if e.GetKey() == key {
+			return e.Value, true
+		}
+	}
+	return nil, false
 }
 
 func TestDB_Notifications(t *testing.T) {
@@ -57,7 +67,7 @@ func TestDB_Notifications(t *testing.T) {
 	assert.EqualValues(t, 0, nb.Offset)
 	assert.EqualValues(t, 1, nb.Shard)
 	assert.Equal(t, 1, len(nb.Notifications))
-	n, found := nb.Notifications["a"]
+	n, found := findNotification(nb, "a")
 	assert.True(t, found)
 	assert.Equal(t, proto.NotificationType_KEY_CREATED, n.Type)
 	assert.EqualValues(t, 0, *n.VersionId)
@@ -87,7 +97,7 @@ func TestDB_Notifications(t *testing.T) {
 	assert.EqualValues(t, 1, nb.Offset)
 	assert.EqualValues(t, 1, nb.Shard)
 	assert.Equal(t, 1, len(nb.Notifications))
-	n, found = nb.Notifications["a"]
+	n, found = findNotification(nb, "a")
 	assert.True(t, found)
 	assert.Equal(t, proto.NotificationType_KEY_MODIFIED, n.Type)
 	assert.EqualValues(t, wr1.Puts[0].Version.VersionId, *n.VersionId)
@@ -97,7 +107,7 @@ func TestDB_Notifications(t *testing.T) {
 	assert.EqualValues(t, 2, nb.Offset)
 	assert.EqualValues(t, 1, nb.Shard)
 	assert.Equal(t, 1, len(nb.Notifications))
-	n, found = nb.Notifications["b"]
+	n, found = findNotification(nb, "b")
 	assert.True(t, found)
 	assert.Equal(t, proto.NotificationType_KEY_CREATED, n.Type)
 	assert.EqualValues(t, wr2.Puts[0].Version.VersionId, *n.VersionId)
@@ -126,15 +136,15 @@ func TestDB_Notifications(t *testing.T) {
 	assert.EqualValues(t, 3, nb.Offset)
 	assert.EqualValues(t, 1, nb.Shard)
 	assert.Equal(t, 3, len(nb.Notifications))
-	n, found = nb.Notifications["c"]
+	n, found = findNotification(nb, "c")
 	assert.True(t, found)
 	assert.Equal(t, proto.NotificationType_KEY_CREATED, n.Type)
 	assert.EqualValues(t, wr3.Puts[0].Version.VersionId, *n.VersionId)
-	n, found = nb.Notifications["d"]
+	n, found = findNotification(nb, "d")
 	assert.True(t, found)
 	assert.Equal(t, proto.NotificationType_KEY_CREATED, n.Type)
 	assert.EqualValues(t, wr3.Puts[1].Version.VersionId, *n.VersionId)
-	n, found = nb.Notifications["a"]
+	n, found = findNotification(nb, "a")
 	assert.True(t, found)
 	assert.Equal(t, proto.NotificationType_KEY_DELETED, n.Type)
 	assert.Nil(t, n.VersionId)
@@ -161,7 +171,7 @@ func TestDB_Notifications(t *testing.T) {
 	assert.EqualValues(t, 4, nb.Offset)
 	assert.EqualValues(t, 1, nb.Shard)
 	assert.Equal(t, 1, len(nb.Notifications))
-	n, found = nb.Notifications["x1"]
+	n, found = findNotification(nb, "x1")
 	assert.True(t, found)
 	assert.Equal(t, proto.NotificationType_KEY_MODIFIED, n.Type)
 	assert.EqualValues(t, wr4.Puts[1].Version.VersionId, *n.VersionId)
@@ -337,11 +347,49 @@ func TestDB_NotificationsDeleteRange(t *testing.T) {
 	assert.EqualValues(t, 1, nb.Offset)
 	assert.EqualValues(t, 1, nb.Shard)
 	assert.Equal(t, 1, len(nb.Notifications))
-	n, found := nb.Notifications["a"]
+	n, found := findNotification(nb, "a")
 	assert.True(t, found)
 	assert.Equal(t, proto.NotificationType_KEY_RANGE_DELETED, n.Type)
 	assert.Equal(t, "c", *n.KeyRangeLast)
 	assert.Nil(t, n.VersionId)
+
+	assert.NoError(t, db.Close())
+	assert.NoError(t, factory.Close())
+}
+
+// A subscriber catching up from an old offset must receive the backlog in
+// bounded chunks, not the entire retention window in one slice: the dispatch
+// loop in the leader controller resumes from the last delivered offset + 1.
+func TestDB_NotificationsReadBatchLimit(t *testing.T) {
+	factory, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	assert.NoError(t, err)
+	db, err := NewDB(constant.DefaultNamespace, 1, factory, proto.KeySortingType_NATURAL, 1*time.Hour, time2.SystemClock)
+	assert.NoError(t, err)
+
+	const total = maxNotificationBatchSize + 50
+	for i := 0; i < total; i++ {
+		_, err := db.ProcessWrite(&proto.WriteRequest{
+			Puts: []*proto.PutRequest{{Key: "a", Value: []byte("v")}},
+		}, int64(i), now(), NoOpCallback)
+		assert.NoError(t, err)
+	}
+
+	// First read is capped at maxNotificationBatchSize batches. require, not
+	// assert: with an uncapped read the resume below would ask for an offset
+	// past the backlog and block until the suite timeout.
+	notifications, err := db.ReadNextNotifications(context.Background(), 0)
+	require.NoError(t, err)
+	require.Equal(t, maxNotificationBatchSize, len(notifications))
+	assert.EqualValues(t, 0, notifications[0].Offset)
+	lastDelivered := notifications[len(notifications)-1].Offset
+	assert.EqualValues(t, maxNotificationBatchSize-1, lastDelivered)
+
+	// Resuming from the last delivered offset + 1 returns the remainder
+	rest, err := db.ReadNextNotifications(context.Background(), lastDelivered+1)
+	assert.NoError(t, err)
+	assert.Equal(t, total-maxNotificationBatchSize, len(rest))
+	assert.EqualValues(t, maxNotificationBatchSize, rest[0].Offset)
+	assert.EqualValues(t, total-1, rest[len(rest)-1].Offset)
 
 	assert.NoError(t, db.Close())
 	assert.NoError(t, factory.Close())

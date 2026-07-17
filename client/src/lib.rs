@@ -661,26 +661,13 @@ impl NotificationBatch {
             notifications: x
                 .notifications
                 .into_iter()
-                .map(|(k, v)| (k, Notification::from_proto(v)))
+                .map(|entry| {
+                    (
+                        entry.key.unwrap_or_default(),
+                        Notification::from_proto(entry.value.unwrap_or_default()),
+                    )
+                })
                 .collect(),
-        }
-    }
-}
-
-/// Redirect hint attached to [`OxiaRpcError::NodeIsNotLeader`] responses.
-///
-/// Populated when the server knows which node is the current leader for the shard.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LeaderHint {
-    pub shard: ShardId,
-    pub leader_address: String,
-}
-
-impl LeaderHint {
-    pub(crate) fn from_proto(x: oxia_proto::LeaderHint) -> Self {
-        Self {
-            shard: x.shard.into(),
-            leader_address: x.leader_address,
         }
     }
 }
@@ -753,14 +740,6 @@ pub(crate) async fn create_grpc_client(
     Ok(GrpcClient::new(channel).max_decoding_message_size(MAX_GRPC_DECODING_SIZE))
 }
 
-const fn extract_leader_hint(e: &Error) -> Option<&LeaderHint> {
-    if let Error::OxiaRpc(OxiaRpcError::NodeIsNotLeader { hint }) = e {
-        hint.as_ref()
-    } else {
-        None
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RetrySafety {
     Idempotent,
@@ -810,8 +789,7 @@ where
             && let Err(ref e) = result
             && e.is_wrong_leader()
         {
-            let hint = extract_leader_hint(e).cloned();
-            return stale_shard_map_retry(config, sm, hint, &op).await;
+            return stale_shard_map_retry(config, sm, &op).await;
         }
 
         let Some(retry_config) = config.retry() else {
@@ -833,16 +811,11 @@ where
 
 /// Retry loop for stale shard map (wrong leader) errors.
 ///
-/// When `initial_hint` is `Some`, the first iteration applies the hint immediately (fast path)
-/// instead of waiting for a discovery refresh.  Subsequent iterations use the hint extracted
-/// from the retry result, or fall back to the slow path when no hint is available.
-///
-/// Each slow-path iteration: capture epoch → trigger refresh → wait for update → retry op.
+/// Each iteration: capture epoch → trigger refresh → wait for update → retry op.
 /// Bounded by retry attempts (or 1 if no retry config) and the outer request timeout.
 async fn stale_shard_map_retry<F, Fut, R>(
     config: &Arc<config::Config>,
     shard_manager: &Arc<shard::Manager>,
-    initial_hint: Option<LeaderHint>,
     op: F,
 ) -> Result<R>
 where
@@ -856,20 +829,10 @@ where
         .filter(|timeout| *timeout > Duration::ZERO)
         .unwrap_or(Duration::from_secs(30));
 
-    let mut hint = initial_hint;
-
     for _ in 0..max_attempts {
-        if let Some(ref h) = hint {
-            // Fast path: leader hint known — apply immediately without waiting
-            // apply_leader_hint also calls trigger_refresh internally
-            shard_manager.apply_leader_hint(h);
-        } else {
-            // Slow path: wait for discovery refresh
-            let epoch = shard_manager.epoch();
-            shard_manager.trigger_refresh();
-
-            shard_manager.wait_for_update(epoch, wait_timeout).await?;
-        }
+        let epoch = shard_manager.epoch();
+        shard_manager.trigger_refresh();
+        shard_manager.wait_for_update(epoch, wait_timeout).await?;
 
         let result = op().await;
 
@@ -877,9 +840,7 @@ where
         match &result {
             Ok(_) => return result,
             Err(Error::RequestTimeout) => return result,
-            Err(e) if e.is_wrong_leader() => {
-                hint = extract_leader_hint(e).cloned();
-            }
+            Err(e) if e.is_wrong_leader() => {}
             Err(_) => return result,
         }
     }

@@ -1,4 +1,4 @@
-// Copyright 2023-2025 The Oxia Authors
+// Copyright 2023-2026 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ package rpc
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -47,8 +48,13 @@ type GrpcServer interface {
 	Port() int
 }
 
+type Interceptors struct {
+	Unary  []grpc.UnaryServerInterceptor
+	Stream []grpc.StreamServerInterceptor
+}
+
 type GrpcProvider interface {
-	StartGrpcServer(name, bindAddress string, registerFunc func(grpc.ServiceRegistrar), tlsConf *tls.Config, options *auth.Options) (GrpcServer, error)
+	StartGrpcServer(name, bindAddress string, registerFunc func(grpc.ServiceRegistrar), tlsConf *tls.Config, options *auth.Options, interceptors *Interceptors) (GrpcServer, error)
 }
 
 var Default = &defaultProvider{}
@@ -56,8 +62,8 @@ var Default = &defaultProvider{}
 type defaultProvider struct {
 }
 
-func (*defaultProvider) StartGrpcServer(name, bindAddress string, registerFunc func(grpc.ServiceRegistrar), tlsConf *tls.Config, options *auth.Options) (GrpcServer, error) {
-	return newDefaultGrpcProvider(name, bindAddress, registerFunc, tlsConf, options)
+func (*defaultProvider) StartGrpcServer(name, bindAddress string, registerFunc func(grpc.ServiceRegistrar), tlsConf *tls.Config, options *auth.Options, interceptors *Interceptors) (GrpcServer, error) {
+	return newDefaultGrpcProvider(name, bindAddress, registerFunc, tlsConf, options, interceptors)
 }
 
 type defaultGrpcServer struct {
@@ -68,7 +74,7 @@ type defaultGrpcServer struct {
 }
 
 func newDefaultGrpcProvider(name, bindAddress string, registerFunc func(grpc.ServiceRegistrar),
-	tlsConf *tls.Config, authOptions *auth.Options) (GrpcServer, error) {
+	tlsConf *tls.Config, authOptions *auth.Options, extraInterceptors *Interceptors) (GrpcServer, error) {
 	tcs := insecure.NewCredentials()
 	if tlsConf != nil {
 		tcs = credentials.NewTLS(tlsConf)
@@ -96,6 +102,10 @@ func newDefaultGrpcProvider(name, bindAddress string, registerFunc func(grpc.Ser
 		}
 		unaryInterceptors = append(unaryInterceptors, delegator.GetUnaryInterceptor())
 		streamInterceptors = append(streamInterceptors, delegator.GetStreamInterceptor())
+	}
+	if extraInterceptors != nil {
+		unaryInterceptors = append(unaryInterceptors, extraInterceptors.Unary...)
+		streamInterceptors = append(streamInterceptors, extraInterceptors.Stream...)
 	}
 
 	c := &defaultGrpcServer{
@@ -133,7 +143,9 @@ func newDefaultGrpcProvider(name, bindAddress string, registerFunc func(grpc.Ser
 			"bind": listener.Addr().String(),
 		},
 		func() {
-			if err := c.server.Serve(listener); err != nil {
+			// Serve returns ErrServerStopped when Close() completed before this
+			// goroutine was scheduled: a benign race, not a startup failure.
+			if err := c.server.Serve(listener); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 				c.log.Error(
 					"Failed to start serving",
 					slog.Any("error", err),

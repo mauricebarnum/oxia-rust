@@ -1,4 +1,4 @@
-// Copyright 2023-2025 The Oxia Authors
+// Copyright 2023-2026 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -29,7 +29,6 @@ import (
 
 	"github.com/pkg/errors"
 	"go.uber.org/multierr"
-	pb "google.golang.org/protobuf/proto"
 
 	"github.com/oxia-db/oxia/oxiad/common/crc"
 
@@ -119,6 +118,9 @@ type DB interface {
 
 	// Delete and close the database and all its files
 	Delete() error
+
+	// Stats returns cumulative shard statistics for auto-split monitoring.
+	Stats() *proto.ShardStats
 }
 
 func NewDB(namespace string, shardId int64, factory kvstore.Factory,
@@ -214,6 +216,9 @@ type db struct {
 	listCounter               metric.Counter
 	rangeScanCounter          metric.Counter
 
+	readOpsTotal  atomic.Uint64
+	writeOpsTotal atomic.Uint64
+
 	batchWriteLatencyHisto metric.LatencyHistogram
 	getLatencyHisto        metric.LatencyHistogram
 	listLatencyHisto       metric.LatencyHistogram
@@ -245,6 +250,14 @@ func (d *db) Close() error {
 		d.notificationsTracker.Close(),
 		d.kv.Close(),
 	)
+}
+
+func (d *db) Stats() *proto.ShardStats {
+	return &proto.ShardStats{
+		DbSizeBytes:   d.kv.DiskSpaceUsage(),
+		ReadOpsTotal:  d.readOpsTotal.Load(),
+		WriteOpsTotal: d.writeOpsTotal.Load(),
+	}
 }
 
 func (d *db) Delete() error {
@@ -296,6 +309,8 @@ func (d *db) applyWriteRequest(b *proto.WriteRequest, batch kvstore.WriteBatch,
 
 		res.DeleteRanges = append(res.DeleteRanges, dr)
 	}
+
+	d.writeOpsTotal.Add(uint64(len(b.Puts) + len(b.Deletes) + len(b.DeleteRanges)))
 
 	return notifications, res, nil
 }
@@ -409,14 +424,11 @@ func (d *db) ProcessWrite(b *proto.WriteRequest, commitOffset int64, timestamp u
 }
 
 func (*db) addNotifications(batch kvstore.WriteBatch, notifications *Notifications) error {
-	// Use deterministic marshaling to ensure consistent serialization order
-	// for the Notifications map, which is critical for checksum reproducibility.
-	value, err := pb.MarshalOptions{Deterministic: true}.Marshal(&notifications.batch)
-	if err != nil {
-		return err
-	}
-
-	return batch.Put(notificationKey(notifications.batch.Offset), value)
+	// seal() sorts the entries by key, which makes the generated marshal
+	// deterministic — required because the value feeds the replicated batch
+	// checksum. The bytes land directly in the batch arena.
+	nb := notifications.seal()
+	return batch.PutMarshalable(notificationKey(nb.Offset), nb)
 }
 
 func (d *db) addASCIILong(key string, value int64, batch kvstore.WriteBatch, timestamp uint64) error {
@@ -434,6 +446,7 @@ func (d *db) Get(request *proto.GetRequest) (*proto.GetResponse, error) {
 	defer timer.Done()
 
 	d.getCounter.Add(1)
+	d.readOpsTotal.Add(1)
 	return applyGet(d.kv, request)
 }
 
@@ -470,6 +483,7 @@ func (it *listIterator) Close() error {
 
 func (d *db) List(request *proto.ListRequest) (kvstore.KeyIterator, error) {
 	d.listCounter.Add(1)
+	d.readOpsTotal.Add(1)
 
 	it, err := d.kv.KeyRangeScan(request.StartInclusive, request.EndExclusive,
 		kvstore.IteratorOpts{IncludeInternalKeys: request.IncludeInternalKeys})
@@ -496,17 +510,20 @@ func (it *rangeScanIterator) Value() (*proto.GetResponse, error) {
 
 	se := &proto.StorageEntry{}
 
+	// Key() decodes the key on every call: do it once per entry
+	key := it.Key()
+
 	// Notifications are not using the stats headers so they would
 	// fail to deserialize. We just provide the content without the
 	// version object
-	if strings.HasPrefix(it.Key(), notificationsPrefix) {
+	if strings.HasPrefix(key, notificationsPrefix) {
 		se.Value = value
 	} else if err = Deserialize(value, se); err != nil {
 		return nil, err
 	}
 
 	res := &proto.GetResponse{
-		Key:    pb.String(it.Key()),
+		Key:    &key,
 		Value:  se.Value,
 		Status: proto.Status_OK,
 		Version: &proto.Version{
@@ -529,6 +546,7 @@ func (it *rangeScanIterator) Close() error {
 
 func (d *db) RangeScan(request *proto.RangeScanRequest) (RangeScanIterator, error) {
 	d.rangeScanCounter.Add(1)
+	d.readOpsTotal.Add(1)
 
 	it, err := d.kv.RangeScan(request.StartInclusive, request.EndExclusive,
 		kvstore.IteratorOpts{IncludeInternalKeys: request.IncludeInternalKeys})
@@ -773,12 +791,9 @@ func (d *db) applyPut(batch kvstore.WriteBatch, baseVersionId *atomic.Int64, not
 
 	defer se.ReturnToVTPool()
 
-	ser, err := se.MarshalVT()
-	if err != nil {
-		return nil, err
-	}
-
-	if err = batch.Put(putReq.Key, ser); err != nil {
+	// Marshal the entry directly into the batch arena: marshal-then-Put would
+	// allocate an intermediate buffer and copy the entry twice
+	if err = batch.PutMarshalable(putReq.Key, se); err != nil {
 		return nil, err
 	}
 
@@ -910,29 +925,25 @@ func applyGet(kv kvstore.KV, getReq *proto.GetRequest) (*proto.GetResponse, erro
 	}
 
 	var se *proto.StorageEntry
+	var deserializeErr error
 	if getReq.IncludeValue {
 		// If we need to return the value we cannot pool the objects, because
 		// the Value slice would be returned to pool
 		se = &proto.StorageEntry{}
+		deserializeErr = Deserialize(value, se)
 	} else {
+		// Metadata-only read: skip copying the value that would be dropped
 		se = proto.StorageEntryFromVTPool()
 		defer se.ReturnToVTPool()
+		deserializeErr = DeserializeMetadata(value, se)
 	}
 
-	if err = multierr.Append(
-		Deserialize(value, se),
-		closer.Close(),
-	); err != nil {
+	if err = multierr.Append(deserializeErr, closer.Close()); err != nil {
 		return nil, err
 	}
 
-	resValue := se.Value
-	if !getReq.IncludeValue {
-		resValue = nil
-	}
-
 	res := &proto.GetResponse{
-		Value: resValue,
+		Value: se.Value,
 		Version: &proto.Version{
 			VersionId:          se.VersionId,
 			ModificationsCount: se.ModificationsCount,
@@ -950,7 +961,13 @@ func applyGet(kv kvstore.KV, getReq *proto.GetRequest) (*proto.GetResponse, erro
 	return res, nil
 }
 
-func GetStorageEntry(batch kvstore.WriteBatch, key string) (*proto.StorageEntry, error) {
+// GetStorageEntryMetadata reads the storage entry for key, skipping the value
+// payload: the returned entry has Value nil and owns the rest of its fields.
+// All the consumers of an existing entry (version checks, session shadows,
+// secondary-index cleanup) only need the metadata, and copying the old value
+// just to discard it costs a full memcpy per overwrite — and pins
+// max-value-sized buffers in the entry pool.
+func GetStorageEntryMetadata(batch kvstore.WriteBatch, key string) (*proto.StorageEntry, error) {
 	value, closer, err := batch.Get(key)
 	if err != nil {
 		return nil, err
@@ -959,7 +976,7 @@ func GetStorageEntry(batch kvstore.WriteBatch, key string) (*proto.StorageEntry,
 	se := proto.StorageEntryFromVTPool()
 
 	if err = multierr.Append(
-		Deserialize(value, se),
+		DeserializeMetadata(value, se),
 		closer.Close(),
 	); err != nil {
 		se.ReturnToVTPool()
@@ -969,7 +986,7 @@ func GetStorageEntry(batch kvstore.WriteBatch, key string) (*proto.StorageEntry,
 }
 
 func checkExpectedVersionId(batch kvstore.WriteBatch, key string, expectedVersionId *int64) (*proto.StorageEntry, error) {
-	se, err := GetStorageEntry(batch, key)
+	se, err := GetStorageEntryMetadata(batch, key)
 	if err != nil {
 		if errors.Is(err, kvstore.ErrKeyNotFound) {
 			if expectedVersionId == nil || *expectedVersionId == -1 {
@@ -988,6 +1005,30 @@ func checkExpectedVersionId(batch kvstore.WriteBatch, key string, expectedVersio
 	}
 
 	return se, nil
+}
+
+// DeserializeMetadata fills se from buf without copying the value payload:
+// the unmarshal aliases buf, then every field that must outlive buf is copied
+// out and Value is dropped.
+func DeserializeMetadata(buf []byte, se *proto.StorageEntry) error {
+	if err := se.UnmarshalVTUnsafe(buf); err != nil {
+		return errors.Wrap(err, "failed to Deserialize storage entry")
+	}
+
+	se.Value = nil
+	if se.ClientIdentity != nil {
+		ci := strings.Clone(*se.ClientIdentity)
+		se.ClientIdentity = &ci
+	}
+	if se.PartitionKey != nil {
+		pk := strings.Clone(*se.PartitionKey)
+		se.PartitionKey = &pk
+	}
+	for _, si := range se.SecondaryIndexes {
+		si.IndexName = strings.Clone(si.IndexName)
+		si.SecondaryKey = strings.Clone(si.SecondaryKey)
+	}
+	return nil
 }
 
 func Deserialize(value []byte, se *proto.StorageEntry) error {

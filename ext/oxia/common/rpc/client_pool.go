@@ -1,4 +1,4 @@
-// Copyright 2023-2025 The Oxia Authors
+// Copyright 2023-2026 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -104,7 +104,7 @@ func (cp *clientPool) GetClientRpc(target string) (proto.OxiaClientClient, error
 		return nil, err
 	}
 
-	return &loggingClientRpc{target, proto.NewOxiaClientClient(cnx)}, nil
+	return &loggingClientRpc{client: proto.NewOxiaClientClient(cnx)}, nil
 }
 
 func (cp *clientPool) GetCoordinationRpc(target string) (proto.OxiaCoordinationClient, error) {

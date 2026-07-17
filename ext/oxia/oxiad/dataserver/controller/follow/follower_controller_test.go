@@ -1,4 +1,4 @@
-// Copyright 2023-2025 The Oxia Authors
+// Copyright 2023-2026 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,6 +17,8 @@ package follow
 import (
 	"context"
 	"fmt"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -25,12 +27,9 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	pb "google.golang.org/protobuf/proto"
 
-	dserror "github.com/oxia-db/oxia/oxiad/dataserver/errors"
-
 	"github.com/oxia-db/oxia/oxiad/dataserver/option"
 
 	"github.com/oxia-db/oxia/common/rpc"
-	"github.com/oxia-db/oxia/oxiad/coordinator/model"
 	constant2 "github.com/oxia-db/oxia/oxiad/dataserver/constant"
 	"github.com/oxia-db/oxia/oxiad/dataserver/database"
 	"github.com/oxia-db/oxia/oxiad/dataserver/database/kvstore"
@@ -348,7 +347,7 @@ func TestFollower_NewTerm(t *testing.T) {
 	// We cannot fence with earlier term
 	fr, err := fc.NewTerm(&proto.NewTermRequest{Term: 0})
 	assert.Nil(t, fr)
-	assert.Equal(t, dserror.ErrInvalidTerm, err)
+	assert.Equal(t, constant.ErrInvalidTerm, err)
 	assert.Equal(t, proto.ServingStatus_FENCED, fc.Status())
 	assert.EqualValues(t, 1, fc.Term())
 
@@ -426,6 +425,139 @@ func TestFollower_DuplicateNewTermInFollowerState(t *testing.T) {
 	assert.NoError(t, walFactory.Close())
 }
 
+// After a leader reconnection, the entries are resent from the last ack
+// position known to the leader. The follower might already have them and
+// must still ack them, otherwise the leader would not make progress.
+func TestFollower_DuplicateEntryAckAfterReconnect(t *testing.T) {
+	var shardId int64
+	kvFactory, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	assert.NoError(t, err)
+	walFactory := newTestWalFactory(t)
+
+	fc, err := NewFollowerController(&option.StorageOptions{}, constant.DefaultNamespace, shardId, walFactory, kvFactory, nil)
+	assert.NoError(t, err)
+	_, err = fc.NewTerm(&proto.NewTermRequest{Term: 1})
+	assert.NoError(t, err)
+
+	stream := rpc.NewMockServerReplicateStream()
+	wg := concurrent.NewWaitGroup(1)
+	go func() {
+		assert.ErrorIs(t, fc.AppendEntries(stream), context.Canceled)
+		wg.Done()
+	}()
+
+	for i := int64(0); i < 10; i++ {
+		stream.AddRequest(createAddRequest(t, 1, i, map[string]string{"a": "0"}, wal.InvalidOffset))
+		assert.EqualValues(t, i, stream.GetResponse().Offset)
+	}
+
+	// Simulate a leader reconnection: the acks were lost, so all the entries
+	// are resent, followed by new entries
+	stream.Cancel()
+	assert.NoError(t, wg.Wait(context.Background()))
+
+	stream = rpc.NewMockServerReplicateStream()
+	wg = concurrent.NewWaitGroup(1)
+	go func() {
+		assert.ErrorIs(t, fc.AppendEntries(stream), context.Canceled)
+		wg.Done()
+	}()
+
+	for i := int64(0); i < 10; i++ {
+		stream.AddRequest(createAddRequest(t, 1, i, map[string]string{"a": "0"}, wal.InvalidOffset))
+	}
+	for i := int64(0); i < 10; i++ {
+		assert.EqualValues(t, i, stream.GetResponse().Offset)
+	}
+
+	stream.AddRequest(createAddRequest(t, 1, 10, map[string]string{"a": "1"}, wal.InvalidOffset))
+	assert.EqualValues(t, 10, stream.GetResponse().Offset)
+
+	stream.Cancel()
+	assert.NoError(t, wg.Wait(context.Background()))
+
+	assert.NoError(t, fc.Close())
+	assert.NoError(t, kvFactory.Close())
+	assert.NoError(t, walFactory.Close())
+}
+
+// syncerOnlySendStream fails the test if an ack is sent from any goroutine
+// other than the syncer: gRPC streams do not support concurrent Send() calls,
+// so the syncer must be the only goroutine sending on the stream.
+type syncerOnlySendStream struct {
+	*rpc.MockServerReplicateStream
+	t *testing.T
+}
+
+func (s *syncerOnlySendStream) Send(ack *proto.Ack) error {
+	buf := make([]byte, 16*1024)
+	stack := string(buf[:runtime.Stack(buf, false)])
+	if !strings.Contains(stack, "bgSyncer") {
+		s.t.Errorf("ack for offset %d was not sent from the syncer goroutine:\n%s", ack.Offset, stack)
+	}
+	return s.MockServerReplicateStream.Send(ack)
+}
+
+func TestFollower_DuplicateEntryAckConcurrentAppends(t *testing.T) {
+	const numEntries = int64(100)
+
+	var shardId int64
+	kvFactory, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	assert.NoError(t, err)
+	walFactory := newTestWalFactory(t)
+
+	fc, err := NewFollowerController(&option.StorageOptions{}, constant.DefaultNamespace, shardId, walFactory, kvFactory, nil)
+	assert.NoError(t, err)
+	_, err = fc.NewTerm(&proto.NewTermRequest{Term: 1})
+	assert.NoError(t, err)
+
+	stream := rpc.NewMockServerReplicateStream()
+	wg := concurrent.NewWaitGroup(1)
+	go func() {
+		assert.ErrorIs(t, fc.AppendEntries(stream), context.Canceled)
+		wg.Done()
+	}()
+
+	for i := int64(0); i < numEntries; i++ {
+		stream.AddRequest(createAddRequest(t, 1, i, map[string]string{"a": "0"}, wal.InvalidOffset))
+	}
+	for i := int64(0); i < numEntries; i++ {
+		assert.EqualValues(t, i, stream.GetResponse().Offset)
+	}
+
+	// Simulate a leader reconnection
+	stream.Cancel()
+	assert.NoError(t, wg.Wait(context.Background()))
+
+	stream2 := &syncerOnlySendStream{MockServerReplicateStream: rpc.NewMockServerReplicateStream(), t: t}
+	wg = concurrent.NewWaitGroup(1)
+	go func() {
+		assert.ErrorIs(t, fc.AppendEntries(stream2), context.Canceled)
+		wg.Done()
+	}()
+
+	// Resend all the entries (duplicates) immediately followed by new ones,
+	// while concurrently consuming the acks
+	go func() {
+		for i := int64(0); i < 2*numEntries; i++ {
+			stream2.AddRequest(createAddRequest(t, 1, i, map[string]string{"a": "0"}, wal.InvalidOffset))
+		}
+	}()
+
+	// Every entry is acked exactly once and in order: first the duplicates,
+	// then the newly appended entries
+	for i := int64(0); i < 2*numEntries; i++ {
+		assert.EqualValues(t, i, stream2.GetResponse().Offset)
+	}
+
+	stream2.Cancel()
+	assert.NoError(t, wg.Wait(context.Background()))
+
+	assert.NoError(t, fc.Close())
+	assert.NoError(t, kvFactory.Close())
+	assert.NoError(t, walFactory.Close())
+}
+
 // If a node is restarted, it might get the truncate request
 // when it's in the `NotMember` state. That is ok, provided
 // the request comes in the same term that the follower
@@ -448,7 +580,7 @@ func TestFollower_TruncateAfterRestart(t *testing.T) {
 		},
 	})
 
-	assert.Equal(t, dserror.ErrInvalidStatus, err)
+	assert.Equal(t, constant.ErrInvalidStatus, err)
 	assert.Nil(t, tr)
 	assert.Equal(t, proto.ServingStatus_NOT_MEMBER, fc.Status())
 
@@ -596,7 +728,7 @@ func TestFollowerController_RejectEntriesWithDifferentTerm(t *testing.T) {
 	// Follower will reject the entry because it's from an earlier term
 	err = fc.AppendEntries(stream)
 	assert.Error(t, err)
-	assert.Equal(t, dserror.ErrInvalidTerm, err)
+	assert.Equal(t, constant.ErrInvalidTerm, err)
 	assert.Equal(t, proto.ServingStatus_FENCED, fc.Status())
 	assert.EqualValues(t, 5, fc.Term())
 	stream.Cancel()
@@ -626,7 +758,7 @@ func TestFollowerController_RejectEntriesWithDifferentTerm(t *testing.T) {
 	stream.AddRequest(createAddRequest(t, 6, 0, map[string]string{"a": "2", "b": "2"}, wal.InvalidOffset))
 	err = fc.AppendEntries(stream)
 	stream.Cancel()
-	assert.Equal(t, dserror.ErrInvalidTerm, err)
+	assert.Equal(t, constant.ErrInvalidTerm, err)
 	assert.Equal(t, proto.ServingStatus_FENCED, fc.Status())
 	assert.EqualValues(t, 5, fc.Term())
 
@@ -662,7 +794,7 @@ func TestFollower_RejectTruncateInvalidTerm(t *testing.T) {
 		},
 	})
 	assert.Nil(t, truncateResp)
-	assert.Equal(t, dserror.ErrInvalidTerm, err)
+	assert.Equal(t, constant.ErrInvalidTerm, err)
 	assert.Equal(t, proto.ServingStatus_FENCED, fc.Status())
 	assert.EqualValues(t, 5, fc.Term())
 
@@ -675,7 +807,7 @@ func TestFollower_RejectTruncateInvalidTerm(t *testing.T) {
 		},
 	})
 	assert.Nil(t, truncateResp)
-	assert.Equal(t, dserror.ErrInvalidTerm, err)
+	assert.Equal(t, constant.ErrInvalidTerm, err)
 	assert.Equal(t, proto.ServingStatus_FENCED, fc.Status())
 	assert.EqualValues(t, 5, fc.Term())
 }
@@ -909,7 +1041,7 @@ func TestFollower_DisconnectLeader(t *testing.T) {
 	assert.Eventually(t, closeChanIsNotNil(fc), 10*time.Second, 10*time.Millisecond)
 
 	// It's not possible to add a new leader stream
-	assert.ErrorIs(t, fc.AppendEntries(stream), dserror.ErrResourceConflict)
+	assert.ErrorIs(t, fc.AppendEntries(stream), constant.ErrResourceConflict)
 
 	// When we fence again, the leader should have been cutoff
 	_, err = fc.NewTerm(&proto.NewTermRequest{Term: 2})
@@ -945,12 +1077,15 @@ func TestFollower_DupEntries(t *testing.T) {
 	}()
 
 	stream.AddRequest(createAddRequest(t, 1, 0, map[string]string{"a": "0", "b": "1"}, wal.InvalidOffset))
-	stream.AddRequest(createAddRequest(t, 1, 0, map[string]string{"a": "0", "b": "1"}, wal.InvalidOffset))
 
-	// Wait for responses
+	// Wait for the entry to be synced and acked, so that the duplicate below
+	// is at or below the synced offset and gets re-acknowledged immediately.
+	// (A duplicate that is not yet synced is only acked after its sync round:
+	// see TestLogSynchronizer_DuplicateAckOnlySynced.)
 	r1 := stream.GetResponse()
 	assert.EqualValues(t, 0, r1.Offset)
 
+	stream.AddRequest(createAddRequest(t, 1, 0, map[string]string{"a": "0", "b": "1"}, wal.InvalidOffset))
 	r2 := stream.GetResponse()
 	assert.EqualValues(t, 0, r2.Offset)
 
@@ -963,6 +1098,53 @@ func TestFollower_DupEntries(t *testing.T) {
 	stream.AddRequest(createAddRequest(t, 1, 0, map[string]string{"a": "4", "b": "5"}, wal.InvalidOffset))
 	r4 := stream.GetResponse()
 	assert.EqualValues(t, 0, r4.Offset)
+
+	assert.NoError(t, fc.Close())
+	assert.NoError(t, kvFactory.Close())
+	assert.NoError(t, walFactory.Close())
+}
+
+// A fresh follower (empty wal and db) whose first entries were lost in
+// transit receives its first append at a non-zero offset: the append must be
+// rejected and the stream must fail, so that the leader reconnects and
+// resends from the beginning. Accepting the gap would let the follower ack
+// entries it does not have, and the leader would count those acks towards the
+// commit quorum.
+func TestFollower_RejectGapOnEmptyWal(t *testing.T) {
+	var shardId int64
+	kvFactory, _ := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	walFactory := newTestWalFactory(t)
+
+	fc, _ := NewFollowerController(&option.StorageOptions{}, constant.DefaultNamespace, shardId, walFactory, kvFactory, nil)
+	_, _ = fc.NewTerm(&proto.NewTermRequest{Term: 1})
+
+	stream1 := rpc.NewMockServerReplicateStream()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- fc.AppendEntries(stream1)
+		stream1.Cancel()
+	}()
+
+	// First-ever entry arrives at offset 5: entries 0..4 were lost
+	stream1.AddRequest(createAddRequest(t, 1, 5, map[string]string{"a": "0"}, wal.InvalidOffset))
+	assert.ErrorIs(t, <-errCh, wal.ErrInvalidNextOffset)
+
+	// The leader reconnects and resends from the beginning: the follower
+	// accepts and acks the contiguous entries
+	stream2 := rpc.NewMockServerReplicateStream()
+	go func() {
+		// cancelled due to fc.Close() below
+		assert.ErrorIs(t, fc.AppendEntries(stream2), context.Canceled)
+		stream2.Cancel()
+	}()
+
+	stream2.AddRequest(createAddRequest(t, 1, 0, map[string]string{"a": "0"}, wal.InvalidOffset))
+	r1 := stream2.GetResponse()
+	assert.EqualValues(t, 0, r1.Offset)
+
+	stream2.AddRequest(createAddRequest(t, 1, 1, map[string]string{"a": "1"}, wal.InvalidOffset))
+	r2 := stream2.GetResponse()
+	assert.EqualValues(t, 1, r2.Offset)
 
 	assert.NoError(t, fc.Close())
 	assert.NoError(t, kvFactory.Close())
@@ -1017,7 +1199,7 @@ func TestFollowerController_DeleteShard_WrongTerm(t *testing.T) {
 		Term:      1,
 	})
 
-	assert.ErrorIs(t, err, dserror.ErrInvalidTerm)
+	assert.ErrorIs(t, err, constant.ErrInvalidTerm)
 }
 
 func TestFollowerController_Closed(t *testing.T) {
@@ -1041,7 +1223,7 @@ func TestFollowerController_Closed(t *testing.T) {
 	})
 
 	assert.Nil(t, res)
-	assert.Equal(t, dserror.ErrResourceConflict, err)
+	assert.Equal(t, constant.ErrResourceConflict, err)
 
 	res2, err := fc.Truncate(&proto.TruncateRequest{
 		Shard: shard,
@@ -1053,7 +1235,7 @@ func TestFollowerController_Closed(t *testing.T) {
 	})
 
 	assert.Nil(t, res2)
-	assert.Equal(t, dserror.ErrResourceConflict, err)
+	assert.Equal(t, constant.ErrResourceConflict, err)
 
 	assert.NoError(t, kvFactory.Close())
 	assert.NoError(t, walFactory.Close())
@@ -1167,7 +1349,7 @@ func TestFollower_HandleSnapshotWithWrongTerm(t *testing.T) {
 	close(snapshotStream.Chunks)
 
 	// The snapshot sending should fail because the term is invalid
-	assert.ErrorIs(t, dserror.ErrInvalidTerm, wg.Wait(context.Background()))
+	assert.ErrorIs(t, constant.ErrInvalidTerm, wg.Wait(context.Background()))
 
 	_, err = fc.NewTerm(&proto.NewTermRequest{Term: 5, Options: &proto.NewTermOptions{
 		EnableNotifications: true,
@@ -1210,7 +1392,7 @@ func TestFollower_SplitHashRangeFiltering(t *testing.T) {
 
 	// Set the split hash range to the lower half of the hash space.
 	// Keys a, b, c, e are in range; d, f are out of range.
-	fc.SetSplitHashRange(&model.Int32HashRange{
+	fc.SetSplitHashRange(&proto.HashRange{
 		Min: 0,
 		Max: 0x7FFFFFFF, // 2147483647
 	})
@@ -1413,4 +1595,53 @@ func wrapInLogEntryValue(wr *proto.WriteRequest) *proto.LogEntryValue {
 			},
 		},
 	}
+}
+
+// When the leader advertises cumulative-ack support, the follower coalesces
+// the acks of a sync round into a single message: ack offsets are strictly
+// increasing and the last one confirms the final entry.
+func TestFollower_CumulativeAcks(t *testing.T) {
+	var shardId int64
+	kvFactory, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	assert.NoError(t, err)
+	walFactory := newTestWalFactory(t)
+
+	fc, err := NewFollowerController(&option.StorageOptions{}, constant.DefaultNamespace, shardId, walFactory, kvFactory, nil)
+	assert.NoError(t, err)
+
+	_, err = fc.NewTerm(&proto.NewTermRequest{Term: 1})
+	assert.NoError(t, err)
+	_, err = fc.Truncate(&proto.TruncateRequest{
+		Term:        1,
+		HeadEntryId: &proto.EntryId{Term: 1, Offset: 0},
+	})
+	assert.NoError(t, err)
+
+	stream := rpc.NewMockServerReplicateStream()
+	wg := concurrent.NewWaitGroup(1)
+	go func() {
+		_ = fc.AppendEntries(stream)
+		stream.Cancel()
+		wg.Done()
+	}()
+
+	const entries = 10
+	for i := 0; i < entries; i++ {
+		req := createAddRequest(t, 1, int64(i), map[string]string{"k": fmt.Sprintf("%d", i)}, wal.InvalidOffset)
+		req.CumulativeAcksSupported = true
+		stream.AddRequest(req)
+	}
+
+	last := int64(-1)
+	acks := 0
+	for last < entries-1 {
+		response := stream.GetResponse()
+		assert.Greater(t, response.Offset, last)
+		last = response.Offset
+		acks++
+	}
+	assert.EqualValues(t, entries-1, last)
+	assert.LessOrEqual(t, acks, entries)
+
+	assert.NoError(t, fc.Close())
 }

@@ -1,4 +1,4 @@
-// Copyright 2023-2025 The Oxia Authors
+// Copyright 2023-2026 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -109,4 +109,42 @@ func TestEncodeInternalKeys(t *testing.T) {
 			assert.Equal(t, k, encoder.Decode(encoder.Encode(k)))
 		})
 	}
+}
+
+// The buffer passed to Decode is Pebble memory, handed out under an explicit
+// read-only contract (Iterator.Key): it must not be modified. In the current
+// pebble version it is the iterator's own position buffer, which pebble keeps
+// using internally — the layers below alias the shared block cache, with the
+// top-level iterator copying every key before it reaches the caller.
+func TestEncoderNaturalDecodeDoesNotMutateInput(t *testing.T) {
+	encoded := []byte("\xff\xffoxia/session/123")
+	original := bytes.Clone(encoded)
+
+	decoded := encoderNatural{}.Decode(encoded)
+	assert.Equal(t, "__oxia/session/123", decoded)
+	assert.Equal(t, original, encoded)
+
+	// Non-internal keys are returned as-is, also untouched
+	plain := []byte("a/b/c")
+	originalPlain := bytes.Clone(plain)
+	assert.Equal(t, "a/b/c", encoderNatural{}.Decode(plain))
+	assert.Equal(t, originalPlain, plain)
+}
+
+func BenchmarkEncoderNaturalDecode(b *testing.B) {
+	internal := []byte("\xff\xffoxia/session/0000000000123456")
+	plain := []byte("/some/regular/application/key-123456")
+
+	b.Run("internal", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_ = encoderNatural{}.Decode(internal)
+		}
+	})
+	b.Run("plain", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_ = encoderNatural{}.Decode(plain)
+		}
+	})
 }

@@ -1,4 +1,4 @@
-// Copyright 2023-2025 The Oxia Authors
+// Copyright 2023-2026 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 
 	"github.com/oxia-db/oxia/common/constant"
-	commonoption "github.com/oxia-db/oxia/oxiad/common/option"
+	commonwatch "github.com/oxia-db/oxia/oxiad/common/watch"
 
 	"github.com/oxia-db/oxia/oxiad/dataserver/option"
 
@@ -39,7 +39,7 @@ func TestNewServer(t *testing.T) {
 	options.Storage.Database.Dir = t.TempDir()
 	options.Storage.WAL.Dir = t.TempDir()
 
-	server, err := New(t.Context(), commonoption.NewWatch(options))
+	server, err := New(t.Context(), commonwatch.New(options))
 	assert.NoError(t, err)
 
 	url := fmt.Sprintf("http://localhost:%d/metrics", server.metrics.Port())
@@ -66,7 +66,7 @@ func TestNewServerClosableWithHealthWatch(t *testing.T) {
 	options.Storage.Database.Dir = t.TempDir()
 	options.Storage.WAL.Dir = t.TempDir()
 
-	server, err := New(t.Context(), commonoption.NewWatch(options))
+	server, err := New(t.Context(), commonwatch.New(options))
 	assert.NoError(t, err)
 
 	clientPool := rpc.NewClientPool(nil, nil)
@@ -88,8 +88,8 @@ func TestNewServerAuthorityValidationFeatureFlag(t *testing.T) {
 		name    string
 		enabled bool
 	}{
-		{name: "disabled by default"},
-		{name: "enabled by config", enabled: true},
+		{name: "enabled by default", enabled: true},
+		{name: "disabled by config"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			options := option.NewDefaultOptions()
@@ -98,12 +98,12 @@ func TestNewServerAuthorityValidationFeatureFlag(t *testing.T) {
 			options.Observability.Metric.Enabled = &constant.FlagFalse
 			options.Storage.Database.Dir = t.TempDir()
 			options.Storage.WAL.Dir = t.TempDir()
-			if tt.enabled {
-				authorityValidation := true
+			if !tt.enabled {
+				authorityValidation := false
 				options.FeatureFlags.AuthorityValidation = &authorityValidation
 			}
 
-			server, err := New(t.Context(), commonoption.NewWatch(options))
+			server, err := New(t.Context(), commonwatch.New(options))
 			if !assert.NoError(t, err) {
 				return
 			}

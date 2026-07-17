@@ -111,7 +111,7 @@ async fn test_failover_on_server0_kill() -> anyhow::Result<()> {
 }
 
 /// Start a 3-server cluster, connect a client with `coordinator_addr` so it
-/// discovers server addresses via `ListNodes`, then verify failover works.
+/// discovers server addresses via `ListDataServers`, then verify failover works.
 #[test_log::test(tokio::test)]
 async fn test_coordinator_bootstrap() -> anyhow::Result<()> {
     let mut cluster = TestCluster::start(3, 3, 4).await?;

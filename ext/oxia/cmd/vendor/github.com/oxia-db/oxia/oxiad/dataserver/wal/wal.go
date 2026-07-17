@@ -1,4 +1,4 @@
-// Copyright 2023-2025 The Oxia Authors
+// Copyright 2023-2026 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ var (
 	ErrReaderClosed      = errors.New("oxia: reader already closed")
 	ErrInvalidNextOffset = errors.New("oxia: invalid next offset in wal")
 	ErrSegmentFull       = errors.New("oxia: current segment is full")
+	ErrEmptySegment      = errors.New("oxia: segment has no entries")
 
 	InvalidTerm   int64 = -1
 	InvalidOffset int64 = -1
@@ -67,6 +68,12 @@ type Reader interface {
 
 type Wal interface {
 	io.Closer
+
+	// The entry passed to the Append* methods is fully consumed (serialized
+	// into the segment) before the call returns: the wal does not retain any
+	// reference to the entry or its Value, so the caller is free to reuse the
+	// backing buffers afterwards.
+
 	// Append writes an entry to the end of the log.
 	// The wal is synced when Append returns
 	Append(entry *proto.LogEntry) error

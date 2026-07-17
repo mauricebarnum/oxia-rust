@@ -1,4 +1,4 @@
-// Copyright 2023-2025 The Oxia Authors
+// Copyright 2023-2026 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,7 +15,9 @@
 package dataserver
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"testing"
@@ -31,6 +33,7 @@ import (
 	grpcstatus "google.golang.org/grpc/status"
 	"google.golang.org/protobuf/protoadapt"
 
+	"github.com/oxia-db/oxia/common/concurrent"
 	"github.com/oxia-db/oxia/common/constant"
 	"github.com/oxia-db/oxia/common/proto"
 	"github.com/oxia-db/oxia/oxiad/common/logging"
@@ -140,6 +143,121 @@ func TestWriteClientClose(t *testing.T) {
 	assert.ErrorIs(t, err, io.EOF)
 }
 
+type mockWriteStream struct {
+	proto.OxiaClient_WriteStreamServer
+	requests chan *proto.WriteRequest
+	sent     chan *proto.WriteResponse
+	sendGate chan struct{}
+}
+
+func (m *mockWriteStream) Recv() (*proto.WriteRequest, error) {
+	req, ok := <-m.requests
+	if !ok {
+		return nil, io.EOF
+	}
+	return req, nil
+}
+
+func (m *mockWriteStream) Send(response *proto.WriteResponse) error {
+	// Simulates gRPC flow control: blocks until the "client" starts reading
+	<-m.sendGate
+	m.sent <- response
+	return nil
+}
+
+type mockWriteLeaderController struct {
+	lead.LeaderController
+	writes chan concurrent.Callback[*proto.WriteResponse]
+}
+
+func (m *mockWriteLeaderController) Write(_ context.Context, _ *proto.WriteRequest, cb concurrent.Callback[*proto.WriteResponse]) {
+	m.writes <- cb
+}
+
+func receiveWithTimeout[T any](t *testing.T, ch <-chan T, msg string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(10 * time.Second):
+		t.Fatal(msg)
+		panic("unreachable")
+	}
+}
+
+// The write completion callbacks can be invoked under the quorum-ack-tracker lock:
+// they must never block on the client stream, otherwise one slow client stalls the
+// whole shard. Instead, the stream stops accepting new writes once
+// maxWriteStreamPendingWrites responses are outstanding.
+func TestWriteStreamSlowClientDoesNotBlockWriteCallbacks(t *testing.T) {
+	const extraWrites = 100
+	total := maxWriteStreamPendingWrites + extraWrites
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stream := &mockWriteStream{
+		requests: make(chan *proto.WriteRequest, total),
+		sent:     make(chan *proto.WriteResponse, total),
+		sendGate: make(chan struct{}),
+	}
+	lc := &mockWriteLeaderController{
+		writes: make(chan concurrent.Callback[*proto.WriteResponse], total),
+	}
+
+	finished := make(chan error, 1)
+	pendingWrites := make(chan struct{}, maxWriteStreamPendingWrites)
+	responses := make(chan *proto.WriteResponse, maxWriteStreamPendingWrites)
+	go processWriteStream(ctx, finished, stream, lc, pendingWrites, responses)
+	go sendWriteStreamResponses(ctx, finished, stream, pendingWrites, responses)
+
+	for i := 0; i < total; i++ {
+		stream.requests <- &proto.WriteRequest{}
+	}
+	close(stream.requests)
+
+	// The client is not reading responses (stream.Send is stuck): completing the
+	// writes that reached the leader must still not block.
+	completedResponses := make([]*proto.WriteResponse, 0, total)
+	for i := 0; i < maxWriteStreamPendingWrites; i++ {
+		cb := receiveWithTimeout(t, lc.writes, "leader did not receive the expected write")
+		response := &proto.WriteResponse{}
+		callbackDone := make(chan struct{})
+		go func() {
+			cb.OnComplete(response)
+			close(callbackDone)
+		}()
+		select {
+		case <-callbackDone:
+		case <-time.After(10 * time.Second):
+			t.Fatal("write callback blocked on a slow client")
+		}
+		completedResponses = append(completedResponses, response)
+	}
+
+	// Backpressure: no further writes are submitted while the client is stalled
+	select {
+	case <-lc.writes:
+		t.Fatal("write submitted beyond the pending-writes cap while the client is stalled")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Unblock the client: the remaining writes get submitted and every response
+	// is delivered, in completion order
+	close(stream.sendGate)
+	for i := 0; i < extraWrites; i++ {
+		cb := receiveWithTimeout(t, lc.writes, "leader did not receive the expected write")
+		response := &proto.WriteResponse{}
+		cb.OnComplete(response)
+		completedResponses = append(completedResponses, response)
+	}
+
+	for i := 0; i < total; i++ {
+		sent := receiveWithTimeout(t, stream.sent, "response was not sent to the client")
+		assert.Same(t, completedResponses[i], sent)
+	}
+}
+
 func TestPublicHealthCheck(t *testing.T) {
 	standaloneServer, err := NewStandalone(NewTestConfig(t.TempDir()))
 	require.NoError(t, err)
@@ -187,7 +305,7 @@ func TestValidateAuthorityReturnsNotInitializedBeforeAssignmentsReady(t *testing
 
 	err := server.validateAuthority(ctx)
 	require.Error(t, err)
-	assert.Equal(t, constant.CodeNotInitialized, grpcstatus.Code(err))
+	assert.Equal(t, codes.Unavailable, grpcstatus.Code(err))
 }
 
 func TestValidateAuthoritySkippedWhenDisabled(t *testing.T) {
@@ -276,9 +394,10 @@ func TestGetShardAssignmentsConvertsRegisterError(t *testing.T) {
 		})),
 	})
 
+	oxiaErr, _ := constant.FromGrpcError(err)
 	require.Error(t, err)
-	assert.Equal(t, constant.CodeNamespaceNotFound, grpcstatus.Code(err))
-	assert.ErrorIs(t, err, constant.ErrNamespaceNotFound)
+	assert.Equal(t, codes.NotFound, grpcstatus.Code(err))
+	assert.ErrorIs(t, oxiaErr, constant.ErrNamespaceNotFound)
 }
 
 func TestResolveLeaderValidatesAuthorityBeforeLeaderLookup(t *testing.T) {
@@ -287,7 +406,7 @@ func TestResolveLeaderValidatesAuthorityBeforeLeaderLookup(t *testing.T) {
 		authorityValidationEnabled: true,
 		shardsDirector: &testShardsDirector{
 			getLeader: func(int64) (lead.LeaderController, error) {
-				return nil, constant.NewNodeIsNotLeaderWithHint(1, "leader:6648")
+				return nil, constant.IntoGrpcStatusError(constant.ErrNodeIsNotLeader, constant.WithLeaderHint(1, "leader:6648"))
 			},
 		},
 		assignmentDispatcher: &testAssignmentDispatcher{initialized: true, validAuthorities: map[string]bool{
@@ -302,4 +421,26 @@ func TestResolveLeaderValidatesAuthorityBeforeLeaderLookup(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Equal(t, codes.PermissionDenied, grpcstatus.Code(err))
+}
+
+func TestWarnOnStreamErrorSkipsClientDisconnectErrors(t *testing.T) {
+	var buf bytes.Buffer
+	server := &publicRpcServer{
+		log: slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})),
+	}
+
+	server.warnOnStreamError(context.Background(), "read", errors.New("unexpected failure"))
+	assert.Contains(t, buf.String(), "level=WARN")
+
+	// When the client goes away mid-stream, the transport cancels the stream
+	// context before the send error reaches the handler.
+	doneCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	buf.Reset()
+	server.warnOnStreamError(doneCtx, "read", grpcstatus.Error(codes.Unavailable, "transport is closing"))
+	assert.Empty(t, buf.String())
+
+	buf.Reset()
+	server.warnOnStreamError(context.Background(), "read", context.Canceled)
+	assert.Empty(t, buf.String())
 }

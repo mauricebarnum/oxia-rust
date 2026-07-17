@@ -1,4 +1,4 @@
-// Copyright 2023-2025 The Oxia Authors
+// Copyright 2023-2026 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -156,7 +156,7 @@ func (*V2) WriteRecord(buf []byte, startOffset uint32, previousCrc uint32, paylo
 }
 
 func (v *V2) WriteIndex(path string, index []byte) error {
-	idxFile, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0644)
+	idxFile, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0644)
 	if err != nil {
 		return errors.Wrapf(err, "failed to open index file %s", path)
 	}
@@ -165,7 +165,9 @@ func (v *V2) WriteIndex(path string, index []byte) error {
 	binary.BigEndian.PutUint32(buf[0:], indexCrc)
 	copy(buf[v.GetIndexHeaderSize():], index)
 	if _, err = idxFile.Write(buf); err != nil {
-		return errors.Wrapf(err, "failed write index file %s", path)
+		return multierr.Combine(
+			errors.Wrapf(err, "failed write index file %s", path),
+			idxFile.Close())
 	}
 	return idxFile.Close()
 }
@@ -187,6 +189,9 @@ func (v *V2) ReadIndex(path string) ([]byte, error) {
 	}
 	if len(indexBuf) < int(v.GetIndexHeaderSize()) {
 		return nil, errors.Wrapf(ErrDataCorrupted, "index file %s is too short: %d bytes", path, len(indexBuf))
+	}
+	if len(indexBuf) == int(v.GetIndexHeaderSize()) {
+		return nil, errors.Wrapf(ErrDataCorrupted, "index file %s has no entries", path)
 	}
 	expectedCrc := ReadInt(indexBuf, 0)
 	actualCrc := crc.Checksum(0).Update(indexBuf[v.GetIndexHeaderSize():]).Value()

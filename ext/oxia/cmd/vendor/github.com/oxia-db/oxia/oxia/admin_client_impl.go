@@ -1,4 +1,4 @@
-// Copyright 2023-2025 The Oxia Authors
+// Copyright 2023-2026 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,7 +19,10 @@ import (
 	"crypto/tls"
 	"errors"
 
+	"github.com/cenkalti/backoff/v4"
+
 	"github.com/oxia-db/oxia/common/auth"
+	"github.com/oxia-db/oxia/common/constant"
 
 	"github.com/oxia-db/oxia/common/proto"
 	"github.com/oxia-db/oxia/common/rpc"
@@ -27,114 +30,129 @@ import (
 
 var _ AdminClient = (*adminClientImpl)(nil)
 
+const errUnableToConnectToAdminServer = "unable to connect to admin server"
+
 type adminClientImpl struct {
 	adminAddr string
 
 	clientPool rpc.ClientPool
 }
 
-func (admin *adminClientImpl) ListDataServers() ([]*proto.DataServer, error) {
-	client, err := admin.clientPool.GetAminRpc(admin.adminAddr)
+func (admin *adminClientImpl) ListDataServers(ctx context.Context) ([]*proto.DataServerView, error) {
+	response, err := executeAdminRPCWithRedirect(ctx, admin, func(ctx context.Context, client proto.OxiaAdminClient) (*proto.ListDataServersResponse, error) {
+		return client.ListDataServers(ctx, &proto.ListDataServersRequest{})
+	})
 	if err != nil {
-		return nil, mapAdminError(err)
-	}
-
-	if client == nil {
-		return nil, wrapAdminError(ErrUnknown, errors.New("unable to connect to admin server"))
-	}
-
-	response, err := client.ListDataServers(context.Background(), &proto.ListDataServersRequest{})
-	if err != nil {
-		return nil, mapAdminError(err)
+		return nil, err
 	}
 	return response.DataServers, nil
 }
 
-func (admin *adminClientImpl) GetDataServer(dataServer string) (*proto.DataServerInfo, error) {
-	client, err := admin.clientPool.GetAminRpc(admin.adminAddr)
+func (admin *adminClientImpl) GetDataServer(ctx context.Context, dataServer string) (*proto.DataServerView, error) {
+	response, err := executeAdminRPCWithRedirect(ctx, admin, func(ctx context.Context, client proto.OxiaAdminClient) (*proto.GetDataServerResponse, error) {
+		return client.GetDataServer(ctx, &proto.GetDataServerRequest{DataServer: dataServer})
+	})
 	if err != nil {
-		return nil, mapAdminError(err)
+		return nil, err
 	}
-
-	if client == nil {
-		return nil, wrapAdminError(ErrUnknown, errors.New("unable to connect to admin server"))
-	}
-
-	response, err := client.GetDataServer(context.Background(), &proto.GetDataServerRequest{DataServer: dataServer})
-	if err != nil {
-		return nil, mapAdminError(err)
-	}
-	return response.DataServerInfo, nil
+	return response.DataServer, nil
 }
 
-func (admin *adminClientImpl) ListNodes() *ListNodesResult {
-	client, err := admin.clientPool.GetAminRpc(admin.adminAddr)
+func (admin *adminClientImpl) CreateDataServer(ctx context.Context, dataServer *proto.DataServer) (*proto.DataServer, error) {
+	response, err := executeAdminRPCWithRedirect(ctx, admin, func(ctx context.Context, client proto.OxiaAdminClient) (*proto.CreateDataServerResponse, error) {
+		return client.CreateDataServer(ctx, &proto.CreateDataServerRequest{DataServer: dataServer})
+	})
 	if err != nil {
-		return &ListNodesResult{
-			Error: err,
-		}
+		return nil, err
 	}
+	return response.DataServer, nil
+}
 
-	if client == nil {
-		return &ListNodesResult{
-			Error: errors.New("unable to connect to admin server"),
-		}
-	}
-
-	response, err := client.ListNodes(context.Background(), &proto.ListNodesRequest{}) //nolint:staticcheck // Deprecated compatibility path.
+func (admin *adminClientImpl) PatchDataServer(ctx context.Context, dataServer *proto.DataServer) (*proto.DataServer, error) {
+	response, err := executeAdminRPCWithRedirect(ctx, admin, func(ctx context.Context, client proto.OxiaAdminClient) (*proto.PatchDataServerResponse, error) {
+		return client.PatchDataServer(ctx, &proto.PatchDataServerRequest{
+			DataServer: dataServer,
+		})
+	})
 	if err != nil {
-		return &ListNodesResult{Error: err}
+		return nil, err
 	}
+	return response.DataServer, nil
+}
 
-	nodes := make([]*Node, len(response.Nodes))
-	for i, node := range response.Nodes {
-		nodes[i] = &Node{
-			Name:            node.Name,
-			PublicAddress:   node.PublicAddress,
-			InternalAddress: node.InternalAddress,
-			Metadata:        node.Metadata,
-		}
+func (admin *adminClientImpl) DeleteDataServer(ctx context.Context, dataServer string) (*proto.DataServer, error) {
+	response, err := executeAdminRPCWithRedirect(ctx, admin, func(ctx context.Context, client proto.OxiaAdminClient) (*proto.DeleteDataServerResponse, error) {
+		return client.DeleteDataServer(ctx, &proto.DeleteDataServerRequest{
+			DataServer: dataServer,
+		})
+	})
+	if err != nil {
+		return nil, err
 	}
-	return &ListNodesResult{Nodes: nodes}
+	return response.DataServer, nil
 }
 
 func (admin *adminClientImpl) Close() error {
 	return admin.clientPool.Close()
 }
 
-func (admin *adminClientImpl) ListNamespaces() *ListNamespacesResult {
-	client, err := admin.clientPool.GetAminRpc(admin.adminAddr)
+func (admin *adminClientImpl) CreateNamespace(ctx context.Context, namespace *proto.Namespace) (*proto.Namespace, error) {
+	response, err := executeAdminRPCWithRedirect(ctx, admin, func(ctx context.Context, client proto.OxiaAdminClient) (*proto.CreateNamespaceResponse, error) {
+		return client.CreateNamespace(ctx, &proto.CreateNamespaceRequest{
+			Namespace: namespace,
+		})
+	})
 	if err != nil {
-		return &ListNamespacesResult{
-			Error: err,
-		}
+		return nil, err
 	}
-	if client == nil {
-		return &ListNamespacesResult{
-			Error: errors.New("no coordinator admin client available"),
-		}
-	}
-
-	namespaces, err := client.ListNamespaces(context.Background(), &proto.ListNamespacesRequest{})
-	if err != nil {
-		return &ListNamespacesResult{
-			Error: err,
-		}
-	}
-	return &ListNamespacesResult{
-		Namespaces: namespaces.Namespaces,
-	}
+	return response.Namespace, nil
 }
 
-func (admin *adminClientImpl) SplitShard(namespace string, shardId int64, splitPoint *uint32) *SplitShardResult {
-	client, err := admin.clientPool.GetAminRpc(admin.adminAddr)
+func (admin *adminClientImpl) PatchNamespace(ctx context.Context, namespace *proto.Namespace) (*proto.Namespace, error) {
+	response, err := executeAdminRPCWithRedirect(ctx, admin, func(ctx context.Context, client proto.OxiaAdminClient) (*proto.PatchNamespaceResponse, error) {
+		return client.PatchNamespace(ctx, &proto.PatchNamespaceRequest{
+			Namespace: namespace,
+		})
+	})
 	if err != nil {
-		return &SplitShardResult{Error: err}
+		return nil, err
 	}
-	if client == nil {
-		return &SplitShardResult{Error: errors.New("no coordinator admin client available")}
-	}
+	return response.Namespace, nil
+}
 
+func (admin *adminClientImpl) DeleteNamespace(ctx context.Context, namespace string) (*proto.Namespace, error) {
+	response, err := executeAdminRPCWithRedirect(ctx, admin, func(ctx context.Context, client proto.OxiaAdminClient) (*proto.DeleteNamespaceResponse, error) {
+		return client.DeleteNamespace(ctx, &proto.DeleteNamespaceRequest{
+			Namespace: namespace,
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return response.Namespace, nil
+}
+
+func (admin *adminClientImpl) ListNamespaces(ctx context.Context) ([]*proto.NamespaceView, error) {
+	response, err := executeAdminRPCWithRedirect(ctx, admin, func(ctx context.Context, client proto.OxiaAdminClient) (*proto.ListNamespacesResponse, error) {
+		return client.ListNamespaces(ctx, &proto.ListNamespacesRequest{})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return response.Namespaces, nil
+}
+
+func (admin *adminClientImpl) GetNamespace(ctx context.Context, namespace string) (*proto.NamespaceView, error) {
+	response, err := executeAdminRPCWithRedirect(ctx, admin, func(ctx context.Context, client proto.OxiaAdminClient) (*proto.GetNamespaceResponse, error) {
+		return client.GetNamespace(ctx, &proto.GetNamespaceRequest{Namespace: namespace})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return response.Namespace, nil
+}
+
+func (admin *adminClientImpl) SplitShard(ctx context.Context, namespace string, shardId int64, splitPoint *uint32) *SplitShardResult {
 	req := &proto.SplitShardRequest{
 		Namespace: namespace,
 		Shard:     shardId,
@@ -143,7 +161,9 @@ func (admin *adminClientImpl) SplitShard(namespace string, shardId int64, splitP
 		req.SplitPoint = splitPoint
 	}
 
-	response, err := client.SplitShard(context.Background(), req)
+	response, err := executeAdminRPCWithRedirect(ctx, admin, func(ctx context.Context, client proto.OxiaAdminClient) (*proto.SplitShardResponse, error) {
+		return client.SplitShard(ctx, req)
+	})
 	if err != nil {
 		return &SplitShardResult{Error: err}
 	}
@@ -159,4 +179,36 @@ func NewAdminClient(adminAddr string, tlsConf *tls.Config, authentication auth.A
 		adminAddr:  adminAddr,
 		clientPool: c,
 	}, nil
+}
+
+func executeAdminRPCWithRedirect[T any](ctx context.Context, admin *adminClientImpl, operation func(context.Context, proto.OxiaAdminClient) (T, error)) (T, error) {
+	var result T
+	target := admin.adminAddr
+
+	ctx, cancel := context.WithTimeout(ctx, rpc.DefaultRpcTimeout)
+	defer cancel()
+	err := backoff.Retry(func() error {
+		client, err := admin.clientPool.GetAminRpc(target)
+		if err != nil {
+			return backoff.Permanent(err)
+		}
+		if client == nil {
+			return backoff.Permanent(errors.New(errUnableToConnectToAdminServer))
+		}
+
+		result, err = operation(ctx, client)
+		if err == nil {
+			return nil
+		}
+
+		oxiaErr, metadata := constant.FromGrpcError(err)
+		leader, ok := metadata.GetCoordinatorLeaderHint()
+		if errors.Is(oxiaErr, constant.ErrNodeIsNotLeader) && ok && leader != target {
+			target = leader
+			return err
+		}
+
+		return backoff.Permanent(err)
+	}, backoff.WithContext(&backoff.ZeroBackOff{}, ctx))
+	return result, mapAdminError(err)
 }

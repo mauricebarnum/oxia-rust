@@ -1,4 +1,4 @@
-// Copyright 2023-2025 The Oxia Authors
+// Copyright 2023-2026 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -1461,4 +1461,48 @@ func TestDB_ShowInternalKeys(t *testing.T) {
 
 	assert.NoError(t, db.Close())
 	assert.NoError(t, factory.Close())
+}
+
+// The deserialized metadata aliases nothing: the source buffer is Pebble-owned
+// memory that is released right after deserialization, so every retained field
+// must survive the buffer being overwritten. Value is intentionally dropped.
+func TestDeserializeMetadata(t *testing.T) {
+	sessionId := int64(42)
+	clientIdentity := "client-1"
+	partitionKey := "part-key"
+	entry := &proto.StorageEntry{
+		Value:                 []byte("payload-bytes"),
+		VersionId:             7,
+		ModificationsCount:    3,
+		CreationTimestamp:     100,
+		ModificationTimestamp: 200,
+		SessionId:             &sessionId,
+		ClientIdentity:        &clientIdentity,
+		PartitionKey:          &partitionKey,
+		SecondaryIndexes: []*proto.SecondaryIndex{
+			{IndexName: "idx", SecondaryKey: "sk"},
+		},
+	}
+	buf, err := entry.MarshalVT()
+	assert.NoError(t, err)
+
+	se := proto.StorageEntryFromVTPool()
+	defer se.ReturnToVTPool()
+	assert.NoError(t, DeserializeMetadata(buf, se))
+
+	for i := range buf {
+		buf[i] = 0xAA
+	}
+
+	assert.Nil(t, se.Value)
+	assert.EqualValues(t, 7, se.VersionId)
+	assert.EqualValues(t, 3, se.ModificationsCount)
+	assert.EqualValues(t, 100, se.CreationTimestamp)
+	assert.EqualValues(t, 200, se.ModificationTimestamp)
+	assert.EqualValues(t, 42, *se.SessionId)
+	assert.Equal(t, "client-1", *se.ClientIdentity)
+	assert.Equal(t, "part-key", *se.PartitionKey)
+	assert.Equal(t, 1, len(se.SecondaryIndexes))
+	assert.Equal(t, "idx", se.SecondaryIndexes[0].IndexName)
+	assert.Equal(t, "sk", se.SecondaryIndexes[0].SecondaryKey)
 }

@@ -1,4 +1,4 @@
-// Copyright 2023-2025 The Oxia Authors
+// Copyright 2023-2026 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -55,6 +55,13 @@ const (
 	maxTotalListKeySize    = 2 << (10 * 2) // 2Mi
 	maxTotalReadCount      = 0
 	maxTotalReadValueSize  = 2 << (10 * 2) // 2Mi
+
+	// maxWriteStreamPendingWrites caps the in-flight writes of a single WriteStream:
+	// a slot is acquired before a write is submitted to the leader and released only
+	// after its response has been sent to the client. Un-sent responses can therefore
+	// never exceed the in-flight writes, so the responses channel (same capacity) can
+	// always be pushed to without blocking.
+	maxWriteStreamPendingWrites = 1024
 )
 
 type publicRpcServer struct {
@@ -85,7 +92,7 @@ func newPublicRpcServer(provider oxiadcommonrpc.GrpcProvider, bindAddress string
 		proto.RegisterOxiaClientServer(registrar, server)
 		compat.RegisterOxiaClientServer(registrar, &compatPublicRpcServer{impl: server})
 		grpc_health_v1.RegisterHealthServer(registrar, server.healthServer)
-	}, tlsConf, options)
+	}, tlsConf, options, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +106,7 @@ func (s *publicRpcServer) validateAuthority(ctx context.Context) error {
 	}
 
 	if !s.assignmentDispatcher.Initialized() {
-		return constant.ErrNotInitialized
+		return constant.IntoGrpcStatusError(constant.ErrNotInitialized)
 	}
 
 	actualAuthority, err := oxiadcommonrpc.GetAuthority(ctx)
@@ -130,18 +137,20 @@ func (s *publicRpcServer) GetShardAssignments(req *proto.ShardAssignmentsRequest
 			slog.Any("error", err),
 			slog.String("peer", rpc.GetPeer(streamContext)),
 		)
-		return err
+		return constant.IntoGrpcStatusError(err)
 	}
 
-	return err
+	return nil
 }
 
 func (s *publicRpcServer) Write(ctx context.Context, write *proto.WriteRequest) (*proto.WriteResponse, error) {
-	s.log.Debug(
-		"Write request",
-		slog.String("peer", rpc.GetPeer(ctx)),
-		slog.Any("req", write),
-	)
+	if s.log.Enabled(ctx, slog.LevelDebug) {
+		s.log.Debug(
+			"Write request",
+			slog.String("peer", rpc.GetPeer(ctx)),
+			slog.Any("req", write),
+		)
+	}
 
 	lc, err := s.resolveLeader(ctx, write.Shard)
 	if err != nil {
@@ -154,13 +163,14 @@ func (s *publicRpcServer) Write(ctx context.Context, write *proto.WriteRequest) 
 			"Failed to perform write operation",
 			slog.Any("error", err),
 		)
-		return nil, err
+		return nil, constant.IntoGrpcStatusError(err)
 	}
 
 	return wr, err
 }
 
-func processWriteStream(streamCtx context.Context, finished chan<- error, stream proto.OxiaClient_WriteStreamServer, lc lead.LeaderController) {
+func processWriteStream(streamCtx context.Context, finished chan<- error, stream proto.OxiaClient_WriteStreamServer,
+	lc lead.LeaderController, pendingWrites chan<- struct{}, responses chan<- *proto.WriteResponse) {
 	for {
 		if streamCtx.Err() != nil {
 			return
@@ -180,14 +190,39 @@ func processWriteStream(streamCtx context.Context, finished chan<- error, stream
 			return
 		}
 
+		select {
+		case pendingWrites <- struct{}{}:
+		case <-streamCtx.Done():
+			channel.PushNoBlock(finished, streamCtx.Err())
+			return
+		}
+
 		lc.Write(streamCtx, req, concurrent.NewOnce(
 			func(t *proto.WriteResponse) {
-				if err := stream.Send(t); err != nil {
-					channel.PushNoBlock(finished, err)
-				}
+				// The write callback can be invoked under the quorum-ack-tracker lock:
+				// hand the response off to the sender goroutine instead of calling
+				// stream.Send here, where a slow client would stall the whole shard.
+				// The push cannot block (see maxWriteStreamPendingWrites).
+				responses <- t
 			}, func(err error) {
 				channel.PushNoBlock(finished, err)
 			}))
+	}
+}
+
+func sendWriteStreamResponses(streamCtx context.Context, finished chan<- error, stream proto.OxiaClient_WriteStreamServer,
+	pendingWrites <-chan struct{}, responses <-chan *proto.WriteResponse) {
+	for {
+		select {
+		case response := <-responses:
+			if err := stream.Send(response); err != nil {
+				channel.PushNoBlock(finished, err)
+				return
+			}
+			<-pendingWrites
+		case <-streamCtx.Done():
+			return
+		}
 	}
 }
 
@@ -222,6 +257,8 @@ func (s *publicRpcServer) WriteStream(stream proto.OxiaClient_WriteStreamServer)
 	}
 
 	finished := make(chan error, 1)
+	pendingWrites := make(chan struct{}, maxWriteStreamPendingWrites)
+	responses := make(chan *proto.WriteResponse, maxWriteStreamPendingWrites)
 	go process.DoWithLabels(
 		streamCtx,
 		map[string]string{
@@ -230,7 +267,18 @@ func (s *publicRpcServer) WriteStream(stream proto.OxiaClient_WriteStreamServer)
 			"shard":     fmt.Sprintf("%d", lc.ShardID()),
 		},
 		func() {
-			processWriteStream(streamCtx, finished, stream, lc)
+			processWriteStream(streamCtx, finished, stream, lc, pendingWrites, responses)
+		},
+	)
+	go process.DoWithLabels(
+		streamCtx,
+		map[string]string{
+			"oxia":      "write-stream-send",
+			"namespace": lc.Namespace(),
+			"shard":     fmt.Sprintf("%d", lc.ShardID()),
+		},
+		func() {
+			sendWriteStreamResponses(streamCtx, finished, stream, pendingWrites, responses)
 		},
 	)
 
@@ -239,8 +287,9 @@ func (s *publicRpcServer) WriteStream(stream proto.OxiaClient_WriteStreamServer)
 	case err := <-finished:
 		if err != nil {
 			s.log.Warn("Failed to perform write operation", slog.Any("error", err))
+			return constant.IntoGrpcStatusError(err)
 		}
-		return err
+		return nil
 	case <-streamCtx.Done():
 		return streamCtx.Err()
 	// Monitor the leader context to make sure the gRPC server can be gracefully shut down.
@@ -249,117 +298,103 @@ func (s *publicRpcServer) WriteStream(stream proto.OxiaClient_WriteStreamServer)
 	}
 }
 
-func (s *publicRpcServer) Read(request *proto.ReadRequest, stream proto.OxiaClient_ReadServer) error {
-	s.log.Debug(
-		"Read request",
-		slog.String("peer", rpc.GetPeer(stream.Context())),
-		slog.Any("req", request),
-	)
+// warnOnStreamError logs failures of streaming data operations, except the
+// expected ones. The stream context ends whenever the client goes away — it
+// cancels the RPC, its deadline expires, or its connection shuts down — so
+// failures with a done context are not worth a warning.
+func (s *publicRpcServer) warnOnStreamError(ctx context.Context, operation string, err error) {
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return
+	}
+	s.log.Warn("Failed to perform operation", slog.String("operation", operation), slog.Any("error", err))
+}
 
-	lc, err := s.resolveLeader(stream.Context(), request.Shard)
+func (s *publicRpcServer) Read(request *proto.ReadRequest, stream proto.OxiaClient_ReadServer) error {
+	ctx := stream.Context()
+	if s.log.Enabled(ctx, slog.LevelDebug) {
+		s.log.Debug(
+			"Read request",
+			slog.String("peer", rpc.GetPeer(ctx)),
+			slog.Any("req", request),
+		)
+	}
+
+	lc, err := s.resolveLeader(ctx, request.Shard)
 	if err != nil {
 		return err
 	}
 
-	ctx := stream.Context()
-
-	finish := make(chan error, 1)
-	lc.Read(stream.Context(), request, concurrent.NewBatchStreamOnce[*proto.GetResponse](maxTotalReadCount, maxTotalReadValueSize,
+	batcher := concurrent.NewBatcher[*proto.GetResponse](maxTotalReadCount, maxTotalReadValueSize,
 		func(result *proto.GetResponse) int { return protowire.SizeBytes(len(result.Value)) },
-		func(container []*proto.GetResponse) error { return stream.Send(&proto.ReadResponse{Gets: container}) },
-		func(err error) { finish <- err },
-	))
+		func(container []*proto.GetResponse) error { return stream.Send(&proto.ReadResponse{Gets: container}) })
 
-	for {
-		select {
-		case err = <-finish:
-			if err != nil {
-				s.log.Warn(
-					"Failed to perform list operation",
-					slog.Any("error", err),
-				)
-			}
-			return err
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+	if err = lc.Read(ctx, request, batcher.Add); err == nil {
+		err = batcher.Flush()
 	}
+	if err != nil {
+		s.warnOnStreamError(ctx, "read", err)
+		return constant.IntoGrpcStatusError(err)
+	}
+	return nil
 }
 
 func (s *publicRpcServer) List(request *proto.ListRequest, stream proto.OxiaClient_ListServer) error {
-	s.log.Debug(
-		"List request",
-		slog.String("peer", rpc.GetPeer(stream.Context())),
-		slog.Any("req", request),
-	)
-	lc, err := s.resolveLeader(stream.Context(), request.Shard)
+	ctx := stream.Context()
+	if s.log.Enabled(ctx, slog.LevelDebug) {
+		s.log.Debug(
+			"List request",
+			slog.String("peer", rpc.GetPeer(ctx)),
+			slog.Any("req", request),
+		)
+	}
+	lc, err := s.resolveLeader(ctx, request.Shard)
 	if err != nil {
 		return err
 	}
-	ctx := stream.Context()
-	finish := make(chan error, 1)
-	lc.List(ctx, request, concurrent.NewBatchStreamOnce[string](maxTotalListKeyCount, maxTotalListKeySize,
+	batcher := concurrent.NewBatcher[string](maxTotalListKeyCount, maxTotalListKeySize,
 		func(key string) int { return protowire.SizeBytes(len(key)) },
-		func(container []string) error { return stream.Send(&proto.ListResponse{Keys: container}) },
-		func(err error) { finish <- err },
-	))
-	for {
-		select {
-		case err = <-finish:
-			if err != nil {
-				s.log.Warn(
-					"Failed to perform list operation",
-					slog.Any("error", err),
-				)
-			}
-			return err
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+		func(container []string) error { return stream.Send(&proto.ListResponse{Keys: container}) })
+
+	if err = lc.List(ctx, request, batcher.Add); err == nil {
+		err = batcher.Flush()
 	}
+	if err != nil {
+		s.warnOnStreamError(ctx, "list", err)
+		return constant.IntoGrpcStatusError(err)
+	}
+	return nil
 }
 
 func (s *publicRpcServer) RangeScan(request *proto.RangeScanRequest, stream proto.OxiaClient_RangeScanServer) error {
-	s.log.Debug(
-		"RangeScan request",
-		slog.String("peer", rpc.GetPeer(stream.Context())),
-		slog.Any("req", request),
-	)
 	ctx := stream.Context()
+	if s.log.Enabled(ctx, slog.LevelDebug) {
+		s.log.Debug(
+			"RangeScan request",
+			slog.String("peer", rpc.GetPeer(ctx)),
+			slog.Any("req", request),
+		)
+	}
 
 	var lc lead.LeaderController
 	var err error
-	if lc, err = s.resolveLeader(stream.Context(), request.Shard); err != nil {
+	if lc, err = s.resolveLeader(ctx, request.Shard); err != nil {
 		return err
 	}
 
-	finish := make(chan error, 1)
-	lc.RangeScan(ctx, request,
-		concurrent.NewBatchStreamOnce[*proto.GetResponse](maxTotalScanBatchCount, maxTotalReadValueSize,
-			func(response *proto.GetResponse) int { return len(response.Value) },
-			func(container []*proto.GetResponse) error {
-				return stream.Send(&proto.RangeScanResponse{Records: container})
-			},
-			func(err error) {
-				finish <- err
-				close(finish)
-			}),
-	)
+	batcher := concurrent.NewBatcher[*proto.GetResponse](maxTotalScanBatchCount, maxTotalReadValueSize,
+		func(response *proto.GetResponse) int { return len(response.Value) },
+		func(container []*proto.GetResponse) error {
+			return stream.Send(&proto.RangeScanResponse{Records: container})
+		})
 
-	for {
-		select {
-		case err := <-finish:
-			if err != nil {
-				s.log.Warn(
-					"Failed to perform range-scan operation",
-					slog.Any("error", err),
-				)
-			}
-			return err
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+	if err = lc.RangeScan(ctx, request, batcher.Add); err == nil {
+		err = batcher.Flush()
 	}
+	if err != nil {
+		s.warnOnStreamError(ctx, "range-scan", err)
+		return constant.IntoGrpcStatusError(err)
+	}
+	return nil
 }
 
 func (s *publicRpcServer) GetNotifications(req *proto.NotificationsRequest, stream proto.OxiaClient_GetNotificationsServer) error {
@@ -393,12 +428,13 @@ func (s *publicRpcServer) GetNotifications(req *proto.NotificationsRequest, stre
 					"Failed to handle notifications request",
 					slog.Any("error", err),
 				)
+				return constant.IntoGrpcStatusError(err)
 			}
-			return err
+			return nil
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-leaderCtx.Done():
-			return constant.ErrAlreadyClosed
+			return constant.IntoGrpcStatusError(constant.ErrResourceUnavailable)
 		}
 	}
 }
@@ -423,18 +459,20 @@ func (s *publicRpcServer) CreateSession(ctx context.Context, req *proto.CreateSe
 			"Failed to create session",
 			slog.Any("error", err),
 		)
-		return nil, err
+		return nil, constant.IntoGrpcStatusError(err)
 	}
 	return res, nil
 }
 
 func (s *publicRpcServer) KeepAlive(ctx context.Context, req *proto.SessionHeartbeat) (*proto.KeepAliveResponse, error) {
-	s.log.Debug(
-		"Session keep alive",
-		slog.Int64("shard", req.Shard),
-		slog.Int64("session", req.SessionId),
-		slog.String("peer", rpc.GetPeer(ctx)),
-	)
+	if s.log.Enabled(ctx, slog.LevelDebug) {
+		s.log.Debug(
+			"Session keep alive",
+			slog.Int64("shard", req.Shard),
+			slog.Int64("session", req.SessionId),
+			slog.String("peer", rpc.GetPeer(ctx)),
+		)
+	}
 	lc, err := s.resolveLeader(ctx, &req.Shard)
 	if err != nil {
 		return nil, err
@@ -445,7 +483,7 @@ func (s *publicRpcServer) KeepAlive(ctx context.Context, req *proto.SessionHeart
 			"Failed to listen to heartbeats",
 			slog.Any("error", err),
 		)
-		return nil, err
+		return nil, constant.IntoGrpcStatusError(err)
 	}
 	return &proto.KeepAliveResponse{}, nil
 }
@@ -462,10 +500,10 @@ func (s *publicRpcServer) CloseSession(ctx context.Context, req *proto.CloseSess
 	}
 	res, err := lc.CloseSession(req)
 	if err != nil {
-		if status.Code(err) != constant.CodeSessionNotFound {
+		if !errors.Is(err, constant.ErrSessionNotFound) {
 			s.log.Warn("Failed to close session", slog.Any("error", err))
 		}
-		return nil, err
+		return nil, constant.IntoGrpcStatusError(err)
 	}
 	return res, nil
 }
@@ -484,7 +522,7 @@ func (s *publicRpcServer) GetSequenceUpdates(req *proto.GetSequenceUpdatesReques
 	ctx := stream.Context()
 	sequenceWaiter, err := lc.GetSequenceUpdates(ctx, req)
 	if err != nil {
-		return err
+		return constant.IntoGrpcStatusError(err)
 	}
 
 	defer func() {
@@ -516,11 +554,11 @@ func (s *publicRpcServer) resolveLeader(ctx context.Context, shardId *int64) (le
 	shardID := *shardId
 	lc, err := s.shardsDirector.GetLeader(shardID)
 	if err != nil {
-		if status.Code(err) == constant.CodeNodeIsNotLeader {
-			return nil, constant.NewNodeIsNotLeaderWithHint(shardID, s.assignmentDispatcher.GetLeader(shardID))
+		if errors.Is(err, constant.ErrNodeIsNotLeader) {
+			return nil, constant.IntoGrpcStatusError(err, constant.WithLeaderHint(shardID, s.assignmentDispatcher.GetLeader(shardID)))
 		}
 		s.log.Warn("Failed to get the leader controller", slog.Any("error", err))
-		return nil, err
+		return nil, constant.IntoGrpcStatusError(err)
 	}
 	return lc, nil
 }

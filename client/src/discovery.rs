@@ -16,7 +16,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use futures_core::future::BoxFuture;
-use mauricebarnum_oxia_common::proto::ListNodesRequest;
+use mauricebarnum_oxia_common::proto::ListDataServersRequest;
 use mauricebarnum_oxia_common::proto::OxiaAdminClient;
 use tracing::debug;
 use tracing::warn;
@@ -88,7 +88,7 @@ impl ServiceDiscovery for StaticServiceDiscovery {
     }
 }
 
-/// Discovers addresses via the coordinator's `ListNodes` admin API.
+/// Discovers addresses via the coordinator's `ListDataServers` admin API.
 #[derive(Debug)]
 pub struct CoordinatorServiceDiscovery {
     coordinator_addr: String,
@@ -106,23 +106,28 @@ impl ServiceDiscovery for CoordinatorServiceDiscovery {
         Box::pin(async {
             let url = format!("http://{}", self.coordinator_addr);
             match OxiaAdminClient::connect(url).await {
-                Ok(mut admin) => match admin.list_nodes(ListNodesRequest {}).await {
+                Ok(mut admin) => match admin.list_data_servers(ListDataServersRequest {}).await {
                     Ok(resp) => {
-                        let nodes = resp.into_inner().nodes;
-                        let addrs: Vec<String> = nodes
+                        let data_servers = resp.into_inner().data_servers;
+                        let addrs: Vec<String> = data_servers
                             .into_iter()
-                            .filter(|n| !n.public_address.is_empty())
-                            .map(|n| n.public_address)
+                            .filter_map(|view| view.data_server)
+                            .filter_map(|server| server.identity)
+                            .map(|identity| identity.public)
+                            .filter(|addr| !addr.is_empty())
                             .collect();
                         if addrs.is_empty() {
-                            warn!("ListNodes returned no addresses");
+                            warn!("ListDataServers returned no addresses");
                         } else {
-                            debug!(count = addrs.len(), "discovered addresses via ListNodes");
+                            debug!(
+                                count = addrs.len(),
+                                "discovered addresses via ListDataServers"
+                            );
                         }
                         addrs
                     }
                     Err(e) => {
-                        warn!(?e, "ListNodes failed");
+                        warn!(?e, "ListDataServers failed");
                         vec![]
                     }
                 },

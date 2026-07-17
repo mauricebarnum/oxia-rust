@@ -12,10 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[doc(hidden)]
+pub mod io {
+    pub mod oxia {
+        pub mod proto {
+            pub mod v1 {
+                tonic::include_proto!("io.oxia.proto.v1");
+            }
+        }
+    }
+}
+
 pub mod proto {
-    tonic::include_proto!("io.oxia.proto.v1");
-    pub use oxia_admin_client::OxiaAdminClient;
-    pub use oxia_client_client::OxiaClientClient;
+    pub use crate::io::oxia::proto::v1::oxia_admin_client::OxiaAdminClient;
+    pub use crate::io::oxia::proto::v1::oxia_client_client::OxiaClientClient;
+    pub use crate::io::oxia::proto::v1::*;
 
     pub mod google {
         pub mod rpc {
@@ -26,15 +37,4 @@ pub mod proto {
 
 pub mod replication {
     tonic::include_proto!("replication");
-}
-
-#[doc(hidden)]
-pub mod io {
-    pub mod oxia {
-        pub mod proto {
-            pub mod v1 {
-                pub use crate::proto::*;
-            }
-        }
-    }
 }

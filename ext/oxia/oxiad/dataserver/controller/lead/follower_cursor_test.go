@@ -1,4 +1,4 @@
-// Copyright 2023-2025 The Oxia Authors
+// Copyright 2023-2026 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -127,6 +127,10 @@ func TestFollowerCursor(t *testing.T) {
 	assert.EqualValues(t, 0, req.CommitOffset)
 
 	assert.NoError(t, fc.Close())
+	assert.NoError(t, w.Close())
+	assert.NoError(t, wf.Close())
+	assert.NoError(t, db.Close())
+	assert.NoError(t, kvf.Close())
 }
 
 func TestFollowerCursor_SendSnapshot(t *testing.T) {
@@ -164,13 +168,23 @@ func TestFollowerCursor_SendSnapshot(t *testing.T) {
 		assert.NoError(t, err)
 	}
 
+	// Trim the WAL: an empty follower can only be brought up to date through
+	// a snapshot when the first entries are no longer available in the WAL
+	reader, err := w.NewReverseReader()
+	assert.NoError(t, err)
+	_, _, lastCrc, err := reader.ReadNext()
+	assert.NoError(t, err)
+	assert.NoError(t, reader.Close())
+	assert.NoError(t, w.Clear())
+
 	// Append one more entry so there is something to stream after the snapshot
-	assert.NoError(t, w.Append(&proto.LogEntry{
+	assert.NoError(t, w.AppendAsyncWithPreviousCrc(&proto.LogEntry{
 		Term:      1,
 		Offset:    n,
 		Value:     []byte("post-snapshot"),
 		Timestamp: uint64(n),
-	}))
+	}, &lastCrc))
+	assert.NoError(t, w.Sync(context.Background()))
 
 	ackTracker := NewQuorumAckTracker(3, n, n-1)
 
@@ -206,6 +220,71 @@ func TestFollowerCursor_SendSnapshot(t *testing.T) {
 	assert.EqualValues(t, n, firstAppend.Entry.Offset)
 
 	assert.NoError(t, fc.Close())
+	assert.NoError(t, w.Close())
+	assert.NoError(t, wf.Close())
+	assert.NoError(t, db.Close())
+	assert.NoError(t, kvf.Close())
+}
+
+func TestFollowerCursor_StreamToEmptyFollowerWhenWalComplete(t *testing.T) {
+	var term int64 = 1
+	var shard int64 = 2
+
+	n := int64(10)
+	stream := rpc.NewMockRpcClient()
+	kvf, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	assert.NoError(t, err)
+	db, err := database.NewDB(constant.DefaultNamespace, shard, kvf, proto.KeySortingType_HIERARCHICAL, 1*time.Hour, time2.SystemClock)
+	assert.NoError(t, err)
+	wf := wal.NewWalFactory(&wal.FactoryOptions{BaseWalDir: t.TempDir()})
+	w, err := wf.NewWal(constant.DefaultNamespace, shard, nil)
+	assert.NoError(t, err)
+
+	// Load some entries into the db & wal, keeping the full history in the WAL
+	for i := int64(0); i < n; i++ {
+		wr := &proto.WriteRequest{
+			Shard: &shard,
+			Puts: []*proto.PutRequest{{
+				Key:   fmt.Sprintf("key-%d", i),
+				Value: []byte(fmt.Sprintf("value-%d", i)),
+			}},
+		}
+		e, _ := pb.Marshal(wrapInLogEntryValue(wr))
+		assert.NoError(t, w.Append(&proto.LogEntry{
+			Term:      1,
+			Offset:    i,
+			Value:     e,
+			Timestamp: uint64(i),
+		}))
+
+		_, err := db.ProcessWrite(wr, i, uint64(i), database.NoOpCallback)
+		assert.NoError(t, err)
+	}
+
+	ackTracker := NewQuorumAckTracker(3, n-1, n-1)
+
+	fc, err := NewFollowerCursor("f1", term, constant.DefaultNamespace, shard, stream, ackTracker, w, db, wal.InvalidOffset)
+	assert.NoError(t, err)
+
+	// The WAL still contains the full history: the empty follower must be
+	// brought up to date by tailing the log, not with a snapshot, so that its
+	// own WAL gets populated and it stays eligible for leader election
+	for i := int64(0); i < n; i++ {
+		select {
+		case req := <-stream.AppendReqs:
+			assert.EqualValues(t, 1, req.Term)
+			assert.EqualValues(t, i, req.Entry.Offset)
+		case <-time.After(10 * time.Second):
+			t.Fatalf("did not receive the append for offset %d", i)
+		}
+	}
+	assert.Empty(t, stream.SendSnapshotStream.Requests)
+
+	assert.NoError(t, fc.Close())
+	assert.NoError(t, w.Close())
+	assert.NoError(t, wf.Close())
+	assert.NoError(t, db.Close())
+	assert.NoError(t, kvf.Close())
 }
 
 func TestFollowerCursor_CloseWaitsForInFlightSnapshot(t *testing.T) {
@@ -227,13 +306,8 @@ func TestFollowerCursor_CloseWaitsForInFlightSnapshot(t *testing.T) {
 			Value: []byte("value"),
 		}},
 	}
-	e, _ := pb.Marshal(wrapInLogEntryValue(wr))
-	assert.NoError(t, w.Append(&proto.LogEntry{
-		Term:      1,
-		Offset:    0,
-		Value:     e,
-		Timestamp: 0,
-	}))
+	// Keep the WAL empty: the empty follower can then only be brought up to
+	// date through a snapshot
 	_, err = db.ProcessWrite(wr, 0, 0, database.NoOpCallback)
 	assert.NoError(t, err)
 
@@ -381,4 +455,69 @@ func (*blockingSnapshotStream) SendMsg(any) error {
 
 func (*blockingSnapshotStream) RecvMsg(any) error {
 	return io.EOF
+}
+
+// An observer cursor parked at the head of the wal must advertise a commit
+// offset advancement with an entry-less Append: with no more writes arriving,
+// the observer (split child) would otherwise never learn the commit offset and
+// the split catch-up phase would stall.
+func TestObserverFollowerCursor_AdvertisesCommitOffsetAtHead(t *testing.T) {
+	var term int64 = 1
+	var shard int64 = 2
+
+	stream := rpc.NewMockRpcClient()
+	ackTracker := NewQuorumAckTracker(3, wal.InvalidOffset, wal.InvalidOffset)
+	kvf, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	assert.NoError(t, err)
+	db, err := database.NewDB(constant.DefaultNamespace, shard, kvf, proto.KeySortingType_HIERARCHICAL, 1*time.Hour, time2.SystemClock)
+	assert.NoError(t, err)
+	wf := wal.NewWalFactory(&wal.FactoryOptions{BaseWalDir: t.TempDir()})
+	w, err := wf.NewWal(constant.DefaultNamespace, shard, nil)
+	assert.NoError(t, err)
+
+	assert.NoError(t, w.Append(&proto.LogEntry{
+		Term:   1,
+		Offset: 0,
+		Value:  []byte("v1"),
+	}))
+
+	// A regular follower acking through the quorum tracker
+	regular, err := ackTracker.NewCursorAcker(wal.InvalidOffset)
+	assert.NoError(t, err)
+
+	fc, err := NewObserverFollowerCursor("child-1", term, constant.DefaultNamespace, shard, stream, ackTracker,
+		w, db, wal.InvalidOffset, &proto.Int32HashRange{MinHashInclusive: 0, MaxHashInclusive: 100})
+	assert.NoError(t, err)
+
+	// The observer streams entry 0 with the commit offset of that moment (-1)
+	// and parks at the head of the wal
+	req := <-stream.AppendReqs
+	assert.EqualValues(t, 0, req.Entry.Offset)
+	assert.Equal(t, wal.InvalidOffset, req.CommitOffset)
+
+	// The quorum ack advances the commit offset with no new writes
+	ackTracker.AdvanceHeadOffset(0)
+	regular.Ack(0)
+	assert.EqualValues(t, 0, ackTracker.CommitOffset())
+
+	// The parked observer sends the advertisement on its own
+	req = <-stream.AppendReqs
+	assert.Nil(t, req.Entry)
+	assert.EqualValues(t, 0, req.CommitOffset)
+	assert.EqualValues(t, term, req.Term)
+
+	// No repeated advertisement while nothing advances
+	time.Sleep(100 * time.Millisecond)
+	select {
+	case req = <-stream.AppendReqs:
+		t.Fatalf("unexpected append: %+v", req)
+	default:
+		// Expected. There should be nothing in the channel
+	}
+
+	assert.NoError(t, fc.Close())
+	assert.NoError(t, w.Close())
+	assert.NoError(t, wf.Close())
+	assert.NoError(t, db.Close())
+	assert.NoError(t, kvf.Close())
 }

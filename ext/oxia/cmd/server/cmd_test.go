@@ -1,4 +1,4 @@
-// Copyright 2023-2025 The Oxia Authors
+// Copyright 2023-2026 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -142,7 +142,7 @@ storage:
 	assert.NotEmpty(t, opts.Observability.Metric.BindAddress)             // Default
 	assert.Equal(t, 1*time.Hour, opts.Storage.WAL.Retention.ToDuration()) // Default
 	assert.True(t, *opts.Storage.WAL.Sync)                                // Default
-	assert.False(t, opts.FeatureFlags.IsAuthorityValidationEnabled())     // Default
+	assert.True(t, opts.FeatureFlags.IsAuthorityValidationEnabled())      // Default
 }
 
 func TestServer_ConfigurationValidation(t *testing.T) {
@@ -207,7 +207,7 @@ func TestServer_EmptyConfigFile(t *testing.T) {
 	// Verify defaults are still applied
 	assert.NotEmpty(t, opts.Server.Public.BindAddress)
 	assert.NotEmpty(t, opts.Server.Internal.BindAddress)
-	assert.False(t, opts.FeatureFlags.IsAuthorityValidationEnabled())
+	assert.True(t, opts.FeatureFlags.IsAuthorityValidationEnabled())
 }
 
 func TestServer_CommandLineFlags(t *testing.T) {
