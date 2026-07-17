@@ -1,4 +1,4 @@
-// Copyright 2023-2025 The Oxia Authors
+// Copyright 2023-2026 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,9 +18,11 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sort"
 	"sync"
 	"sync/atomic"
 
+	"github.com/oxia-db/oxia/common/channel"
 	"github.com/oxia-db/oxia/common/concurrent"
 	"github.com/oxia-db/oxia/common/constant"
 )
@@ -88,6 +90,13 @@ type QuorumAckTracker interface {
 	// Waits until the specified entry is written on the wal
 	WaitForHeadOffset(ctx context.Context, offset int64) error
 
+	// WaitForHeadOffsetOrCommitAdvance
+	// Waits until the head offset reaches `headOffset` or the commit offset
+	// advances beyond `commitOffset`. Used by observer cursors parked at the
+	// head of the wal: with no new entries to piggyback it on, a commit
+	// advancement must be propagated to the follower on its own.
+	WaitForHeadOffsetOrCommitAdvance(ctx context.Context, headOffset int64, commitOffset int64) error
+
 	// NewCursorAcker creates a tracker for a new cursor
 	// The `ackOffset` is the previous last-acked position for the cursor
 	NewCursorAcker(ackOffset int64) (CursorAcker, error)
@@ -95,8 +104,11 @@ type QuorumAckTracker interface {
 
 type quorumAckTracker struct {
 	sync.Mutex
-	waitingRequests   []waitingRequest
-	waitForHeadOffset concurrent.ConditionContext
+	waitingRequests []waitingRequest
+
+	// Signaled whenever the head offset or the commit offset advances,
+	// and on close. Waiters re-check their own predicate.
+	progressCond concurrent.ConditionContext
 
 	replicationFactor uint32
 	requiredAcks      uint32
@@ -110,6 +122,14 @@ type quorumAckTracker struct {
 	tracker            map[int64]*BitSet
 	cursorIdxGenerator int
 	closed             bool
+
+	// The callbacks of the waiting requests perform the database apply and the
+	// client response on the write path: they must never run under the tracker
+	// mutex or on the cursor ack goroutines, where they would stall the whole
+	// shard pipeline. They are invoked, in offset order, by a dedicated
+	// goroutine that is woken up through commitSignal.
+	commitSignal  chan struct{}
+	callbacksDone chan struct{}
 }
 
 type CursorAcker interface {
@@ -119,6 +139,9 @@ type CursorAcker interface {
 type cursorAcker struct {
 	quorumTracker *quorumAckTracker
 	cursorIdx     int
+
+	// The highest offset acked by this cursor; guarded by the tracker mutex
+	lastAckedOffset int64
 }
 
 type waitingRequest struct {
@@ -145,8 +168,60 @@ func NewQuorumAckTracker(replicationFactor uint32, headOffset int64, commitOffse
 		q.tracker[offset] = &BitSet{}
 	}
 
-	q.waitForHeadOffset = concurrent.NewConditionContext(q)
+	q.progressCond = concurrent.NewConditionContext(q)
+	q.commitSignal = make(chan struct{}, 1)
+	q.callbacksDone = make(chan struct{})
+	go q.runCallbacks()
 	return q
+}
+
+// runCallbacks is the only place where the waiting requests get completed,
+// keeping the callbacks out of the tracker mutex and in offset order.
+func (q *quorumAckTracker) runCallbacks() {
+	defer close(q.callbacksDone)
+
+	for {
+		<-q.commitSignal
+
+		for {
+			q.Lock()
+			if q.closed {
+				pending := q.waitingRequests
+				q.waitingRequests = nil
+				q.Unlock()
+
+				for _, r := range pending {
+					r.callback.OnCompleteError(constant.ErrResourceUnavailable)
+				}
+				return
+			}
+
+			ready := q.dequeueReadyWaiters()
+			q.Unlock()
+
+			if len(ready) == 0 {
+				break
+			}
+			for _, r := range ready {
+				r.callback.OnComplete(nil)
+			}
+		}
+	}
+}
+
+// dequeueReadyWaiters must be called while holding the tracker mutex.
+// The waiting requests are kept sorted by minOffset (see insertWaitingRequest),
+// so the committed ones are always a prefix of the slice.
+func (q *quorumAckTracker) dequeueReadyWaiters() []waitingRequest {
+	commitOffset := q.commitOffset.Load()
+	n := 0
+	for n < len(q.waitingRequests) &&
+		(q.requiredAcks == 0 || q.waitingRequests[n].minOffset <= commitOffset) {
+		n++
+	}
+	ready := q.waitingRequests[:n]
+	q.waitingRequests = q.waitingRequests[n:]
+	return ready
 }
 
 func (q *quorumAckTracker) AdvanceHeadOffset(headOffset int64) {
@@ -162,11 +237,13 @@ func (q *quorumAckTracker) AdvanceHeadOffset(headOffset int64) {
 	}
 
 	q.headOffset.Store(headOffset)
-	q.waitForHeadOffset.Broadcast()
 
 	if q.requiredAcks == 0 {
+		// The commit offset advances together with the head offset:
+		// notifyCommitOffsetAdvanced broadcasts progressCond for both.
 		q.notifyCommitOffsetAdvanced(headOffset)
 	} else {
+		q.progressCond.Broadcast()
 		q.tracker[headOffset] = &BitSet{}
 	}
 }
@@ -188,7 +265,20 @@ func (q *quorumAckTracker) WaitForHeadOffset(ctx context.Context, offset int64) 
 	defer q.Unlock()
 
 	for !q.closed && q.headOffset.Load() < offset {
-		if err := q.waitForHeadOffset.Wait(ctx); err != nil {
+		if err := q.progressCond.Wait(ctx); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (q *quorumAckTracker) WaitForHeadOffsetOrCommitAdvance(ctx context.Context, headOffset int64, commitOffset int64) error {
+	q.Lock()
+	defer q.Unlock()
+
+	for !q.closed && q.headOffset.Load() < headOffset && q.commitOffset.Load() <= commitOffset {
+		if err := q.progressCond.Wait(ctx); err != nil {
 			return err
 		}
 	}
@@ -216,44 +306,56 @@ func (q *quorumAckTracker) WaitForCommitOffsetAsync(_ context.Context, offset in
 
 	if q.closed {
 		q.Unlock()
-		cb.OnCompleteError(constant.ErrAlreadyClosed)
+		cb.OnCompleteError(constant.ErrResourceUnavailable)
 		return
 	}
 
+	q.insertWaitingRequest(waitingRequest{offset, cb})
 	if q.requiredAcks == 0 || q.commitOffset.Load() >= offset {
-		q.Unlock()
-		cb.OnComplete(nil)
-		return
+		// Already satisfied: the callback is still invoked from the callbacks
+		// goroutine, never inline, so that the caller (e.g. the WAL sync
+		// goroutine) does not block behind the database apply.
+		channel.PushNoBlock(q.commitSignal, struct{}{})
 	}
-
-	q.waitingRequests = append(q.waitingRequests, waitingRequest{offset, cb})
 	q.Unlock()
+}
+
+// insertWaitingRequest keeps the waiting requests sorted by minOffset, so that
+// the committed ones always form a prefix of the slice. The requests are
+// normally registered in offset order, making this an append in practice; the
+// requests for the same offset preserve their registration order.
+// It must be called while holding the tracker mutex.
+func (q *quorumAckTracker) insertWaitingRequest(r waitingRequest) {
+	i := sort.Search(len(q.waitingRequests), func(i int) bool {
+		return q.waitingRequests[i].minOffset > r.minOffset
+	})
+	q.waitingRequests = append(q.waitingRequests, waitingRequest{})
+	copy(q.waitingRequests[i+1:], q.waitingRequests[i:])
+	q.waitingRequests[i] = r
 }
 
 func (q *quorumAckTracker) notifyCommitOffsetAdvanced(commitOffset int64) {
 	q.commitOffset.Store(commitOffset)
+	q.progressCond.Broadcast()
 
-	for _, r := range q.waitingRequests {
-		if r.minOffset > commitOffset {
-			return
-		}
-
-		q.waitingRequests = q.waitingRequests[1:]
-		r.callback.OnComplete(nil)
+	if len(q.waitingRequests) > 0 {
+		channel.PushNoBlock(q.commitSignal, struct{}{})
 	}
 }
 
 func (q *quorumAckTracker) Close() error {
 	q.Lock()
+	alreadyClosed := q.closed
 	q.closed = true
-	q.waitForHeadOffset.Broadcast()
-	waitingRequests := q.waitingRequests
-	q.waitingRequests = make([]waitingRequest, 0)
+	q.progressCond.Broadcast()
 	q.Unlock()
-	// unblock waiting request
-	for _, r := range waitingRequests {
-		r.callback.OnCompleteError(constant.ErrAlreadyClosed)
+
+	if !alreadyClosed {
+		channel.PushNoBlock(q.commitSignal, struct{}{})
 	}
+	// Wait for the callbacks goroutine to fail the pending requests and drain:
+	// once Close returns, no callback is running or will ever run.
+	<-q.callbacksDone
 	return nil
 }
 
@@ -270,8 +372,9 @@ func (q *quorumAckTracker) NewCursorAcker(ackOffset int64) (CursorAcker, error) 
 	}
 
 	qa := &cursorAcker{
-		quorumTracker: q,
-		cursorIdx:     q.cursorIdxGenerator,
+		quorumTracker:   q,
+		cursorIdx:       q.cursorIdxGenerator,
+		lastAckedOffset: ackOffset,
 	}
 
 	// If the new cursor is already past the current quorum commit offset, we have
@@ -296,14 +399,27 @@ func (*noOpCursorAcker) Ack(_ int64) {
 	// no-op: observer acks don't affect quorum commit offset
 }
 
+// Ack acknowledges all the entries up to the given offset: acks are
+// cumulative, so a follower can confirm a whole sync round with a single
+// message, and the implied range gets accounted under one lock acquisition.
+// An offset at or below the previously acked one is a no-op.
 func (c *cursorAcker) Ack(offset int64) {
-	c.quorumTracker.Lock()
-	defer c.quorumTracker.Unlock()
+	q := c.quorumTracker
+	q.Lock()
+	defer q.Unlock()
 
-	if c.quorumTracker.closed {
+	if q.closed {
 		return
 	}
-	c.ack(offset)
+
+	// Entries at or below the commit offset have already reached the quorum
+	start := max(c.lastAckedOffset, q.commitOffset.Load()) + 1
+	for o := start; o <= offset; o++ {
+		c.ack(o)
+	}
+	if offset > c.lastAckedOffset {
+		c.lastAckedOffset = offset
+	}
 }
 
 func (c *cursorAcker) ack(offset int64) {

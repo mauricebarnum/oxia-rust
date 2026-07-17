@@ -1,4 +1,4 @@
-// Copyright 2023-2025 The Oxia Authors
+// Copyright 2023-2026 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,20 +23,20 @@ import (
 
 	"github.com/oxia-db/oxia/common/process"
 	"github.com/oxia-db/oxia/oxiad/common/logging"
-	commonoption "github.com/oxia-db/oxia/oxiad/common/option"
+	commonwatch "github.com/oxia-db/oxia/oxiad/common/watch"
 
 	"github.com/oxia-db/oxia/oxiad/dataserver/option"
 
 	"github.com/oxia-db/oxia/oxiad/common/metric"
-	rpc2 "github.com/oxia-db/oxia/oxiad/common/rpc"
+	commonrpc "github.com/oxia-db/oxia/oxiad/common/rpc"
 
 	"github.com/oxia-db/oxia/oxiad/dataserver/assignment"
 	"github.com/oxia-db/oxia/oxiad/dataserver/controller"
 	"github.com/oxia-db/oxia/oxiad/dataserver/database/kvstore"
+	manifestpkg "github.com/oxia-db/oxia/oxiad/dataserver/manifest"
+	dataserverrpc "github.com/oxia-db/oxia/oxiad/dataserver/rpc"
 
 	"github.com/oxia-db/oxia/oxiad/dataserver/wal"
-
-	"github.com/oxia-db/oxia/common/rpc"
 )
 
 type Server struct {
@@ -44,35 +44,39 @@ type Server struct {
 	*publicRpcServer
 
 	// concurrent control
-	ctx              context.Context
-	ctxCancel        context.CancelFunc
-	wg               sync.WaitGroup
-	logger           *slog.Logger
-	watchableOptions *commonoption.Watch[*option.Options]
+	ctx          context.Context
+	ctxCancel    context.CancelFunc
+	wg           sync.WaitGroup
+	logger       *slog.Logger
+	optionsWatch *commonwatch.Watch[*option.Options]
 
-	replicationRpcProvider    rpc.ReplicationRpcProvider
+	replicationRpcProvider    dataserverrpc.ReplicationRpcProvider
 	shardAssignmentDispatcher assignment.ShardAssignmentsDispatcher
 	shardsDirector            controller.ShardsDirector
 	metrics                   *metric.PrometheusMetrics
 	walFactory                wal.Factory
 	kvFactory                 kvstore.Factory
 
-	healthServer rpc2.HealthServer
+	healthServer commonrpc.HealthServer
 }
 
-func New(parent context.Context, watchableOption *commonoption.Watch[*option.Options]) (*Server, error) {
-	options, _ := watchableOption.Load()
-	provider, err := rpc.NewReplicationRpcProvider(&options.Replication.TLS)
+func New(parent context.Context, optionsWatch *commonwatch.Watch[*option.Options]) (*Server, error) {
+	options := optionsWatch.Load()
+	manifest, err := manifestpkg.NewManifest(options.Storage.Database.Dir)
 	if err != nil {
 		return nil, err
 	}
-	grpcProvider, err := NewWithGrpcProvider(parent, watchableOption, rpc2.Default, provider)
+	provider, err := dataserverrpc.NewReplicationRpcProvider(&options.Replication.TLS, manifest)
+	if err != nil {
+		return nil, err
+	}
+	grpcProvider, err := NewWithGrpcProvider(parent, optionsWatch, commonrpc.Default, provider, manifest)
 	return grpcProvider, err
 }
 
-func NewWithGrpcProvider(parent context.Context, watchableOption *commonoption.Watch[*option.Options], provider rpc2.GrpcProvider,
-	replicationRpcProvider rpc.ReplicationRpcProvider) (*Server, error) {
-	options, _ := watchableOption.Load()
+func NewWithGrpcProvider(parent context.Context, optionsWatch *commonwatch.Watch[*option.Options], provider commonrpc.GrpcProvider,
+	replicationRpcProvider dataserverrpc.ReplicationRpcProvider, manifest *manifestpkg.Manifest) (*Server, error) {
+	options := optionsWatch.Load()
 	slog.Info("Starting Oxia dataServer", slog.Any("options", options))
 
 	storage := &options.Storage
@@ -92,7 +96,7 @@ func NewWithGrpcProvider(parent context.Context, watchableOption *commonoption.W
 		ctxCancel:              cancel,
 		wg:                     sync.WaitGroup{},
 		logger:                 slog.With(slog.String("component", "grpc-server")),
-		watchableOptions:       watchableOption,
+		optionsWatch:           optionsWatch,
 		replicationRpcProvider: replicationRpcProvider,
 		walFactory: wal.NewWalFactory(&wal.FactoryOptions{
 			BaseWalDir:  storage.WAL.Dir,
@@ -101,7 +105,7 @@ func NewWithGrpcProvider(parent context.Context, watchableOption *commonoption.W
 			SyncData:    storage.WAL.IsSyncEnabled(),
 		}),
 		kvFactory:    kvFactory,
-		healthServer: rpc2.NewClosableHealthServer(context.Background()),
+		healthServer: commonrpc.NewClosableHealthServer(context.Background()),
 	}
 
 	s.wg.Go(func() {
@@ -122,8 +126,9 @@ func NewWithGrpcProvider(parent context.Context, watchableOption *commonoption.W
 	if err != nil {
 		return nil, err
 	}
+	//nolint:contextcheck
 	s.internalRpcServer, err = newInternalRpcServer(provider, internalServer.BindAddress,
-		s.shardsDirector, s.shardAssignmentDispatcher, s.healthServer, internalServerTLS, &internalServer.Auth)
+		s.shardsDirector, s.shardAssignmentDispatcher, s.healthServer, internalServerTLS, &internalServer.Auth, manifest)
 	if err != nil {
 		return nil, err
 	}
@@ -166,15 +171,16 @@ func (s *Server) InternalPort() int {
 }
 
 func (s *Server) backgroundHandleConfChange() {
-	var dataServerOptions *option.Options
-	var ver uint64
-	var err error
+	receiver := s.optionsWatch.Subscribe()
+
 	for {
-		dataServerOptions, ver, err = s.watchableOptions.Wait(s.ctx, ver)
-		if err != nil {
-			s.logger.Warn("exit background configuration watch goroutine due to an error", slog.Any("error", err))
+		select {
+		case <-s.ctx.Done():
 			return
+		case <-receiver.Changed():
 		}
+
+		dataServerOptions := receiver.Load()
 
 		s.logger.Info("configuration options has changed. processing the dynamic updates.")
 		logOptions := &dataServerOptions.Observability.Log

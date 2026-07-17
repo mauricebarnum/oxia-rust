@@ -1,4 +1,4 @@
-// Copyright 2023-2025 The Oxia Authors
+// Copyright 2023-2026 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,8 +23,11 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	pb "google.golang.org/protobuf/proto"
 
+	"github.com/oxia-db/oxia/common/metric"
 	"github.com/oxia-db/oxia/oxiad/common/crc"
 
 	commonoption "github.com/oxia-db/oxia/oxiad/common/option"
@@ -36,11 +39,7 @@ import (
 
 	"github.com/oxia-db/oxia/oxiad/dataserver/wal"
 
-	"github.com/oxia-db/oxia/common/concurrent"
 	"github.com/oxia-db/oxia/common/constant"
-
-	"github.com/oxia-db/oxia/common/channel"
-	"github.com/oxia-db/oxia/common/entity"
 
 	"github.com/oxia-db/oxia/common/proto"
 )
@@ -85,6 +84,16 @@ func (m mockCloser) Close() error {
 
 func (m mockWriteBatch) Close() error {
 	return nil
+}
+
+func (m mockWriteBatch) PutMarshalable(key string, v kvstore.ProtoMarshalable) error {
+	data := make([]byte, v.SizeVT())
+	n, err := v.MarshalToSizedBufferVT(data)
+	if err != nil {
+		return err
+	}
+	// The valid bytes are the suffix of the buffer
+	return m.Put(key, data[len(data)-n:])
 }
 
 func (m mockWriteBatch) Put(key string, value []byte) error {
@@ -424,8 +433,7 @@ func TestMultipleSessionsExpiry(t *testing.T) {
 		return getSessionMetadata(t, lc, sessionId2) == nil
 	}, 10*time.Second, 30*time.Millisecond)
 
-	responses := make(chan *entity.TWithError[*proto.GetResponse], 1000)
-	lc.Read(context.Background(), &proto.ReadRequest{
+	results, err := readAll(context.Background(), lc, &proto.ReadRequest{
 		Shard: &shardId,
 		Gets: []*proto.GetRequest{{
 			Key:          "/ephemeral-1",
@@ -434,8 +442,7 @@ func TestMultipleSessionsExpiry(t *testing.T) {
 			Key:          "/ephemeral-2",
 			IncludeValue: true,
 		}},
-	}, concurrent.ReadFromStreamCallback(responses))
-	results, err := channel.ReadAll[*proto.GetResponse](context.Background(), responses) // Read entry a
+	})
 	assert.NoError(t, err)
 	assert.Equal(t, 2, len(results))
 
@@ -450,8 +457,7 @@ func TestMultipleSessionsExpiry(t *testing.T) {
 		return getSessionMetadata(t, lc, sessionId1) == nil
 	}, 10*time.Second, 30*time.Millisecond)
 
-	responses = make(chan *entity.TWithError[*proto.GetResponse], 1000)
-	lc.Read(context.Background(), &proto.ReadRequest{
+	results, err = readAll(context.Background(), lc, &proto.ReadRequest{
 		Shard: &shardId,
 		Gets: []*proto.GetRequest{{
 			Key:          "/ephemeral-1",
@@ -460,8 +466,7 @@ func TestMultipleSessionsExpiry(t *testing.T) {
 			Key:          "/ephemeral-2",
 			IncludeValue: true,
 		}},
-	}, concurrent.ReadFromStreamCallback(responses))
-	results, err = channel.ReadAll[*proto.GetResponse](context.Background(), responses)
+	})
 	assert.NoError(t, err)
 	assert.Equal(t, 2, len(results))
 	// ephemeral-1
@@ -471,6 +476,83 @@ func TestMultipleSessionsExpiry(t *testing.T) {
 	assert.Equal(t, proto.Status_KEY_NOT_FOUND, results[1].Status)
 
 	assert.NoError(t, lc.Close())
+	assert.NoError(t, kvf.Close())
+	assert.NoError(t, walf.Close())
+}
+
+// A batch of sessions larger than expiryBatchSize expiring together must be
+// fully cleaned up, ephemeral keys included, through the chunked deletes of
+// the expiry scheduler.
+func TestSessionManager_MassExpiry(t *testing.T) {
+	shardId := int64(1)
+	kvf, walf, sManager, lc := createSessionManager(t)
+
+	const numSessions = 2*expiryBatchSize + 10
+	sessionIDs := make([]int64, 0, numSessions)
+	for i := 0; i < numSessions; i++ {
+		createResp, err := sManager.createSession(&proto.CreateSessionRequest{
+			Shard:            shardId,
+			SessionTimeoutMs: uint32(2000),
+			ClientIdentity:   fmt.Sprintf("session-%d", i),
+		}, 0)
+		assert.NoError(t, err)
+		sessionIDs = append(sessionIDs, createResp.SessionId)
+	}
+
+	sessionId := sessionIDs[0]
+	_, err := lc.WriteBlock(context.Background(), &proto.WriteRequest{
+		Shard: &shardId,
+		Puts: []*proto.PutRequest{{
+			Key:       "/mass-expiry-ephemeral",
+			Value:     []byte("hello"),
+			SessionId: &sessionId,
+		}},
+	})
+	assert.NoError(t, err)
+
+	assert.Eventually(t, func() bool {
+		for _, id := range sessionIDs {
+			if getSessionMetadata(t, lc, id) != nil {
+				return false
+			}
+		}
+		return getData(t, lc, "/mass-expiry-ephemeral") == ""
+	}, 30*time.Second, 50*time.Millisecond)
+
+	assert.NoError(t, lc.Close())
+	assert.NoError(t, kvf.Close())
+	assert.NoError(t, walf.Close())
+}
+
+// Closing the leader controller while sessions are in the middle of expiring
+// must not deadlock or panic.
+func TestSessionManager_CloseDuringExpiry(t *testing.T) {
+	shardId := int64(1)
+	kvf, walf, sManager, lc := createSessionManager(t)
+
+	for i := 0; i < 100; i++ {
+		_, err := sManager.createSession(&proto.CreateSessionRequest{
+			Shard:            shardId,
+			SessionTimeoutMs: uint32(20),
+			ClientIdentity:   fmt.Sprintf("session-%d", i),
+		}, 0)
+		assert.NoError(t, err)
+	}
+
+	// Let some expirations get in flight, then close concurrently
+	time.Sleep(30 * time.Millisecond)
+
+	closeDone := make(chan struct{})
+	go func() {
+		assert.NoError(t, lc.Close())
+		close(closeDone)
+	}()
+	select {
+	case <-closeDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("leader controller close timed out during session expiry")
+	}
+
 	assert.NoError(t, kvf.Close())
 	assert.NoError(t, walf.Close())
 }
@@ -727,4 +809,97 @@ func TestIsSessionKey(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Closing the manager must not hold the manager lock while waiting for the
+// expiry scheduler: the scheduler acquires the manager lock to finish an
+// in-flight expiry cycle, and waiting for it under the lock would deadlock
+// the close.
+func TestSessionManager_CloseWithInFlightExpiry(t *testing.T) {
+	sm := newBareSessionManager()
+	newTestSession(sm, 1, 10*time.Minute)
+
+	// Mimics the tail of the expiry scheduler mid-cycle: once the manager
+	// context is canceled by Close, it still needs the manager lock to
+	// finish. With Close waiting for the scheduler under the manager lock,
+	// this deterministically deadlocks.
+	sm.latch.Add(1)
+	go func() {
+		defer sm.latch.Done()
+		<-sm.ctx.Done()
+		sm.Lock()
+		sm.removeSession(1)
+		sm.Unlock()
+	}()
+
+	closeDone := make(chan struct{})
+	go func() {
+		assert.NoError(t, sm.Close())
+		close(closeDone)
+	}()
+
+	select {
+	case <-closeDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("session manager close deadlocked with an in-flight session expiry")
+	}
+}
+
+// The active-sessions metric is a synchronous up-down counter, maintained at
+// the map insert/remove sites, instead of an observable gauge: gauge callbacks
+// run under the metrics SDK's collection lock, which is how the #597 deadlock
+// happened. The counter must move exactly once per insert and remove —
+// CloseSession and session expiry can race on the same id, and the losing
+// remove must not decrement it a second time.
+func TestSessionManager_ActiveSessionsMetric(t *testing.T) {
+	// Swap in an SDK meter so the counter value can be read back.
+	previous := metric.GetMeter()
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	metric.SetMeter(provider.Meter("test"))
+	defer metric.SetMeter(previous)
+
+	const counterName = "oxia_test_active_sessions"
+	readCounter := func() int64 {
+		var rm metricdata.ResourceMetrics
+		assert.NoError(t, reader.Collect(context.Background(), &rm))
+		for _, scope := range rm.ScopeMetrics {
+			for _, m := range scope.Metrics {
+				if m.Name != counterName {
+					continue
+				}
+				sum, ok := m.Data.(metricdata.Sum[int64])
+				if !ok || len(sum.DataPoints) != 1 {
+					t.Fatalf("unexpected data for %s: %#v", counterName, m.Data)
+				}
+				return sum.DataPoints[0].Value
+			}
+		}
+		t.Fatalf("counter %s not found", counterName)
+		return 0
+	}
+
+	sm := newBareSessionManager()
+	sm.activeSessions = metric.NewUpDownCounter(counterName, "test", "count", map[string]any{})
+
+	meta := &proto.SessionMetadata{TimeoutMs: uint32(10 * time.Minute / time.Millisecond)}
+	sm.Lock()
+	s1 := startSession(1, meta, sm)
+	startSession(2, meta, sm)
+	sm.Unlock()
+	assert.EqualValues(t, 2, readCounter())
+
+	sm.Lock()
+	sm.removeSession(s1.id)
+	sm.Unlock()
+	assert.EqualValues(t, 1, readCounter())
+
+	// Second remove of the same id: the no-op loser of a close/expiry race
+	sm.Lock()
+	sm.removeSession(s1.id)
+	sm.Unlock()
+	assert.EqualValues(t, 1, readCounter())
+
+	assert.NoError(t, sm.Close())
+	assert.EqualValues(t, 0, readCounter())
 }

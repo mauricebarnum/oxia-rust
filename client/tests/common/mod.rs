@@ -37,11 +37,15 @@ use anyhow::anyhow;
 use mauricebarnum_oxia_client::Client;
 use mauricebarnum_oxia_client::config;
 use mauricebarnum_oxia_client::errors::Error as ClientError;
+use mauricebarnum_oxia_client::errors::OxiaRpcError;
+use mauricebarnum_oxia_common::proto::OxiaClientClient;
+use mauricebarnum_oxia_common::proto::ShardAssignmentsRequest;
 use mauricebarnum_oxia_common::replication::GetStatusRequest;
 use mauricebarnum_oxia_common::replication::ServingStatus;
 use mauricebarnum_oxia_common::replication::oxia_coordination_client::OxiaCoordinationClient;
 use tempfile::TempDir;
 use tokio::time::sleep as async_sleep;
+use tonic::metadata::MetadataValue;
 
 const CLUSTER_PHASE_TIMEOUT: Duration = Duration::from_secs(45);
 const CLUSTER_BOOTSTRAP_ATTEMPTS: usize = 3;
@@ -167,11 +171,11 @@ impl TestServerArgs {
             .arg(self.db_dir.as_path())
             .arg("--wal-dir")
             .arg(self.wal_dir.as_path())
-            .arg("-p")
+            .arg("--public-addr")
             .arg(self.service_addr.clone())
-            .arg("-m")
+            .arg("--metrics-addr")
             .arg(self.metrics_addr.clone())
-            .arg("-s")
+            .arg("--shards")
             .arg(self.nshards.get().to_string())
             .stdin(Stdio::null());
         let child = trace_err!(cmd.spawn())?;
@@ -334,16 +338,24 @@ async fn wait_for_node_port(
     wait_for_process_port(process, &addr, "data server", timeout).await
 }
 
-async fn get_shard_status(addr: &str, shard: u32) -> anyhow::Result<Option<ShardStatus>> {
+async fn get_shard_status(
+    addr: &str,
+    shard: u32,
+    instance_id: &str,
+) -> anyhow::Result<Option<ShardStatus>> {
     let endpoint = format!("http://{addr}");
     let mut client = tokio::time::timeout(
         Duration::from_secs(2),
         OxiaCoordinationClient::connect(endpoint),
     )
     .await??;
-    let request = GetStatusRequest {
+    let mut request = tonic::Request::new(GetStatusRequest {
         shard: i64::from(shard),
-    };
+    });
+    request.metadata_mut().insert(
+        "instance-id",
+        MetadataValue::try_from(instance_id.to_owned())?,
+    );
     match tokio::time::timeout(Duration::from_secs(2), client.get_status(request)).await? {
         Ok(response) => {
             let response = response.into_inner();
@@ -355,9 +367,36 @@ async fn get_shard_status(addr: &str, shard: u32) -> anyhow::Result<Option<Shard
                 commit_offset: response.commit_offset,
             }))
         }
-        Err(status) if status.code() == tonic::Code::FailedPrecondition => Ok(None),
-        Err(status) => Err(status.into()),
+        Err(status) => match ClientError::from(status) {
+            ClientError::OxiaRpc(OxiaRpcError::NodeIsNotMember) => Ok(None),
+            error => Err(error.into()),
+        },
     }
+}
+
+async fn assignments_ready(addr: &str) -> bool {
+    let endpoint = format!("http://{addr}");
+    let Ok(Ok(mut client)) =
+        tokio::time::timeout(Duration::from_secs(2), OxiaClientClient::connect(endpoint)).await
+    else {
+        return false;
+    };
+    let request = ShardAssignmentsRequest {
+        namespace: "default".to_owned(),
+    };
+    let Ok(Ok(response)) = tokio::time::timeout(
+        Duration::from_secs(2),
+        client.get_shard_assignments(request),
+    )
+    .await
+    else {
+        return false;
+    };
+    let mut stream = response.into_inner();
+    matches!(
+        tokio::time::timeout(Duration::from_secs(2), stream.message()).await,
+        Ok(Ok(Some(assignments))) if assignments.namespaces.contains_key("default")
+    )
 }
 
 #[allow(dead_code)]
@@ -377,6 +416,7 @@ pub struct TestCluster {
     service_addr: String,
     replication_factor: usize,
     initial_shard_count: u32,
+    instance_id: String,
 }
 
 #[allow(dead_code)]
@@ -445,6 +485,7 @@ impl TestCluster {
         let coord_internal = format!("127.0.0.1:{}", coord_ports[0]);
         let coord_metrics = format!("127.0.0.1:{}", coord_ports[1]);
         let coord_admin = format!("127.0.0.1:{}", coord_ports[2]);
+        let instance_id = format!("test-cluster-{}", coord_ports[0]);
 
         // Write cluster-config.yaml
         let config_path = data_dir.path().join("cluster-config.yaml");
@@ -461,6 +502,12 @@ impl TestCluster {
             }
         }
 
+        let status_path = data_dir.path().join("cluster-status.json");
+        {
+            let mut f = trace_err!(fs::File::create(&status_path))?;
+            trace_err!(writeln!(f, "{{\"instanceId\":\"{instance_id}\"}}"))?;
+        }
+
         // Start data servers
         let mut processes = ClusterProcesses {
             servers: Vec::with_capacity(num_servers),
@@ -474,11 +521,11 @@ impl TestCluster {
             let child = trace_err!(
                 Command::new(oxia_cli_path())
                     .arg("server")
-                    .arg("-p")
+                    .arg("--public-addr")
                     .arg(&sa.public)
-                    .arg("-i")
+                    .arg("--internal-addr")
                     .arg(&sa.internal)
-                    .arg("-m")
+                    .arg("--metrics-addr")
                     .arg(&sa.metrics)
                     .arg("--data-dir")
                     .arg(&srv_db)
@@ -513,12 +560,14 @@ impl TestCluster {
                 .arg("--cconfig")
                 .arg(&config_path)
                 .arg("--metadata")
-                .arg("memory")
-                .arg("-i")
+                .arg("file")
+                .arg("--file-clusters-status-path")
+                .arg(&status_path)
+                .arg("--internal-addr")
                 .arg(&coord_internal)
-                .arg("-m")
+                .arg("--metrics-addr")
                 .arg(&coord_metrics)
-                .arg("-a")
+                .arg("--public-addr")
                 .arg(&coord_admin)
                 .stdin(Stdio::null())
                 .spawn()
@@ -557,10 +606,16 @@ impl TestCluster {
             service_addr,
             replication_factor: usize::try_from(replication_factor)?,
             initial_shard_count,
+            instance_id,
         };
         trace_err!(
             cluster
                 .wait_for_stable_topology(CLUSTER_PHASE_TIMEOUT)
+                .await
+        )?;
+        trace_err!(
+            cluster
+                .wait_for_assignment_streams(CLUSTER_PHASE_TIMEOUT)
                 .await
         )?;
 
@@ -594,14 +649,17 @@ impl TestCluster {
                 node.process.as_ref()?;
                 let addr = node.internal_addr.clone();
                 Some(async move {
-                    get_shard_status(&addr, shard)
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|mut status| {
+                    match get_shard_status(&addr, shard, &self.instance_id).await {
+                        Ok(Some(mut status)) => {
                             status.server = server;
-                            status
-                        })
+                            Some(status)
+                        }
+                        Ok(None) => None,
+                        Err(error) => {
+                            tracing::warn!(?error, %addr, shard, "failed to query shard status");
+                            None
+                        }
+                    }
                 })
             });
         futures_util::future::join_all(requests)
@@ -654,6 +712,31 @@ impl TestCluster {
             if Instant::now() >= deadline {
                 return Err(anyhow!(
                     "cluster topology did not stabilize within {timeout:?}: {state}"
+                ));
+            }
+            async_sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    async fn wait_for_assignment_streams(&mut self, timeout: Duration) -> anyhow::Result<()> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            self.check_processes()?;
+            let probes = self
+                .servers
+                .iter()
+                .filter(|server| server.process.is_some())
+                .map(|server| assignments_ready(&server.public_addr));
+            if futures_util::future::join_all(probes)
+                .await
+                .into_iter()
+                .all(|ready| ready)
+            {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(anyhow!(
+                    "shard assignment streams did not become ready within {timeout:?}"
                 ));
             }
             async_sleep(Duration::from_millis(200)).await;
@@ -771,11 +854,11 @@ impl TestCluster {
         let child = trace_err!(
             Command::new(oxia_cli_path())
                 .arg("server")
-                .arg("-p")
+                .arg("--public-addr")
                 .arg(&srv.public_addr)
-                .arg("-i")
+                .arg("--internal-addr")
                 .arg(&srv.internal_addr)
-                .arg("-m")
+                .arg("--metrics-addr")
                 .arg(&srv.metrics_addr)
                 .arg("--data-dir")
                 .arg(&srv.data_dir)

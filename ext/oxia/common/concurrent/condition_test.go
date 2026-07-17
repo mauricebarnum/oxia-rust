@@ -1,4 +1,4 @@
-// Copyright 2023-2025 The Oxia Authors
+// Copyright 2023-2026 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -320,6 +320,16 @@ func BenchmarkCond16(b *testing.B) {
 
 func BenchmarkCond32(b *testing.B) {
 	benchmarkCond(b, 32)
+}
+
+func BenchmarkCondBroadcastNoWaiters(b *testing.B) {
+	m := &sync.Mutex{}
+	c := NewConditionContext(m)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		c.Broadcast()
+	}
 }
 
 func benchmarkCond(b *testing.B, waiters int) {

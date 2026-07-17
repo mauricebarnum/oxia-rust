@@ -1,4 +1,4 @@
-// Copyright 2023-2025 The Oxia Authors
+// Copyright 2023-2026 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,6 +15,8 @@
 package commons
 
 import (
+	"context"
+
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/mock"
 
@@ -37,43 +39,87 @@ func (m *MockAdminClient) Close() error {
 	return args.Error(0)
 }
 
-func (m *MockAdminClient) ListNamespaces() *oxia.ListNamespacesResult {
+func (m *MockAdminClient) ListNamespaces(context.Context) ([]*proto.NamespaceView, error) {
 	args := m.MethodCalled("ListNamespaces")
-	if v, ok := args.Get(0).(*oxia.ListNamespacesResult); ok {
-		return v
+	if v, ok := args.Get(0).([]*proto.NamespaceView); ok {
+		return v, args.Error(1)
 	}
-	return &oxia.ListNamespacesResult{
-		Error: errors.New("no namespaces available"),
-	}
+	return nil, errors.New("no namespaces available")
 }
 
-func (m *MockAdminClient) ListDataServers() ([]*proto.DataServer, error) {
+func (m *MockAdminClient) ListDataServers(context.Context) ([]*proto.DataServerView, error) {
 	args := m.MethodCalled("ListDataServers")
-	if v, ok := args.Get(0).([]*proto.DataServer); ok {
+	if v, ok := args.Get(0).([]*proto.DataServerView); ok {
 		return v, args.Error(1)
 	}
 	return nil, errors.New("no data servers available")
 }
 
-func (m *MockAdminClient) GetDataServer(dataServer string) (*proto.DataServerInfo, error) {
+func (m *MockAdminClient) GetDataServer(_ context.Context, dataServer string) (*proto.DataServerView, error) {
 	args := m.MethodCalled("GetDataServer", dataServer)
-	if v, ok := args.Get(0).(*proto.DataServerInfo); ok {
+	if v, ok := args.Get(0).(*proto.DataServerView); ok {
 		return v, args.Error(1)
 	}
 	return nil, errors.New("data server not found")
 }
 
-func (m *MockAdminClient) ListNodes() *oxia.ListNodesResult {
-	args := m.MethodCalled("ListNodes")
-	if v, ok := args.Get(0).(*oxia.ListNodesResult); ok {
-		return v
+func (m *MockAdminClient) CreateDataServer(_ context.Context, dataServer *proto.DataServer) (*proto.DataServer, error) {
+	args := m.MethodCalled("CreateDataServer", dataServer)
+	if v, ok := args.Get(0).(*proto.DataServer); ok {
+		return v, args.Error(1)
 	}
-	return &oxia.ListNodesResult{
-		Error: errors.New("no namespaces available"),
-	}
+	return nil, errors.New("failed to create data server")
 }
 
-func (m *MockAdminClient) SplitShard(namespace string, shardId int64, splitPoint *uint32) *oxia.SplitShardResult {
+func (m *MockAdminClient) PatchDataServer(_ context.Context, dataServer *proto.DataServer) (*proto.DataServer, error) {
+	args := m.MethodCalled("PatchDataServer", dataServer)
+	if v, ok := args.Get(0).(*proto.DataServer); ok {
+		return v, args.Error(1)
+	}
+	return nil, errors.New("failed to patch data server")
+}
+
+func (m *MockAdminClient) DeleteDataServer(_ context.Context, dataServer string) (*proto.DataServer, error) {
+	args := m.MethodCalled("DeleteDataServer", dataServer)
+	if v, ok := args.Get(0).(*proto.DataServer); ok {
+		return v, args.Error(1)
+	}
+	return nil, errors.New("failed to delete data server")
+}
+
+func (m *MockAdminClient) CreateNamespace(_ context.Context, namespace *proto.Namespace) (*proto.Namespace, error) {
+	args := m.MethodCalled("CreateNamespace", namespace)
+	if v, ok := args.Get(0).(*proto.Namespace); ok {
+		return v, args.Error(1)
+	}
+	return nil, errors.New("failed to create namespace")
+}
+
+func (m *MockAdminClient) PatchNamespace(_ context.Context, namespace *proto.Namespace) (*proto.Namespace, error) {
+	args := m.MethodCalled("PatchNamespace", namespace)
+	if v, ok := args.Get(0).(*proto.Namespace); ok {
+		return v, args.Error(1)
+	}
+	return nil, errors.New("failed to patch namespace")
+}
+
+func (m *MockAdminClient) DeleteNamespace(_ context.Context, namespace string) (*proto.Namespace, error) {
+	args := m.MethodCalled("DeleteNamespace", namespace)
+	if v, ok := args.Get(0).(*proto.Namespace); ok {
+		return v, args.Error(1)
+	}
+	return nil, errors.New("failed to delete namespace")
+}
+
+func (m *MockAdminClient) GetNamespace(_ context.Context, namespace string) (*proto.NamespaceView, error) {
+	args := m.MethodCalled("GetNamespace", namespace)
+	if v, ok := args.Get(0).(*proto.NamespaceView); ok {
+		return v, args.Error(1)
+	}
+	return nil, errors.New("namespace not found")
+}
+
+func (m *MockAdminClient) SplitShard(_ context.Context, namespace string, shardId int64, splitPoint *uint32) *oxia.SplitShardResult {
 	args := m.MethodCalled("SplitShard", namespace, shardId, splitPoint)
 	if v, ok := args.Get(0).(*oxia.SplitShardResult); ok {
 		return v

@@ -21,6 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "admin.proto",
         "replication.proto",
         "google/rpc/status.proto",
+        "google/rpc/error_details.proto",
     ];
 
     // Configure tonic to use Bytes for all protobuf bytes fields

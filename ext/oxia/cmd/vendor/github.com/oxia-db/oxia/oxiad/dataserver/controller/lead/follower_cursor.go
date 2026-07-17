@@ -1,4 +1,4 @@
-// Copyright 2023-2025 The Oxia Authors
+// Copyright 2023-2026 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -32,8 +32,8 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/oxia-db/oxia/common/constant"
-	"github.com/oxia-db/oxia/common/rpc"
 	"github.com/oxia-db/oxia/oxiad/dataserver/database"
+	dataserverrpc "github.com/oxia-db/oxia/oxiad/dataserver/rpc"
 
 	"github.com/oxia-db/oxia/oxiad/dataserver/wal"
 
@@ -65,7 +65,7 @@ type followerCursor struct {
 
 	term                    int64
 	follower                string
-	replicateStreamProvider rpc.ReplicateStreamProvider
+	replicateStreamProvider dataserverrpc.ReplicateStreamProvider
 	stream                  proto.OxiaLogReplication_ReplicateClient
 
 	ackTracker  QuorumAckTracker
@@ -83,6 +83,7 @@ type followerCursor struct {
 	cancel         context.CancelFunc
 	latch          sync.WaitGroup
 	log            *slog.Logger
+	observer       bool                  // true for split observer cursors
 	splitHashRange *proto.Int32HashRange // non-nil for split observer cursors
 
 	snapshotsTransferTime     metric.LatencyHistogram
@@ -97,7 +98,7 @@ func NewFollowerCursor( //nolint:revive
 	term int64,
 	namespace string,
 	shardId int64,
-	replicateStreamProvider rpc.ReplicateStreamProvider,
+	replicateStreamProvider dataserverrpc.ReplicateStreamProvider,
 	ackTracker QuorumAckTracker,
 	walObject wal.Wal,
 	db database.DB,
@@ -174,7 +175,7 @@ func NewObserverFollowerCursor( //nolint:revive
 	term int64,
 	namespace string,
 	shardId int64,
-	replicateStreamProvider rpc.ReplicateStreamProvider,
+	replicateStreamProvider dataserverrpc.ReplicateStreamProvider,
 	ackTracker QuorumAckTracker,
 	walObject wal.Wal,
 	db database.DB,
@@ -196,6 +197,7 @@ func NewObserverFollowerCursor( //nolint:revive
 		db:                      db,
 		namespace:               namespace,
 		shardId:                 shardId,
+		observer:                true,
 		splitHashRange:          splitHashRange,
 
 		log: slog.With(
@@ -252,6 +254,16 @@ func (fc *followerCursor) shouldSendSnapshot() bool {
 	walFirstOffset := fc.wal.FirstOffset()
 
 	if ackOffset == wal.InvalidOffset && fc.ackTracker.CommitOffset() >= 0 {
+		if walFirstOffset == 0 && !fc.observer {
+			// The WAL still contains the full history: bring the follower up to
+			// date by tailing the log instead of sending a snapshot. This keeps
+			// the follower's WAL populated, so it remains a viable candidate in
+			// future leader elections (a snapshot leaves the WAL empty and the
+			// follower would keep fencing with an invalid head entry until the
+			// next write). Split observers are excluded: a child shard must be
+			// seeded with the hash-range-filtered snapshot.
+			return false
+		}
 		fc.log.Info(
 			"Sending snapshot to empty follower",
 			slog.Int64("follower-ack-offset", ackOffset),
@@ -297,7 +309,7 @@ func (fc *followerCursor) run() {
 			// If the follower reported that it's not a member (e.g. after a
 			// data clean-up and restart), reset the ack offset so that
 			// shouldSendSnapshot() will send a full snapshot on the next retry.
-			if status.Code(err) == constant.CodeNodeIsNotMember {
+			if errors.Is(err, constant.ErrNodeIsNotMember) {
 				fc.log.Warn("Follower reported not-member status, resetting ack offset to trigger snapshot")
 				fc.ackOffset.Store(wal.InvalidOffset)
 				fc.lastPushed.Store(wal.InvalidOffset)
@@ -412,6 +424,9 @@ func (fc *followerCursor) sendSnapshot() error {
 }
 
 func (fc *followerCursor) streamEntriesLoop(ctx context.Context, reader wal.Reader, currentOffset int64) error {
+	// The commit offset last advertised to the follower on this stream,
+	// piggybacked on the entries sent so far
+	lastSentCommitOffset := wal.InvalidOffset
 	for {
 		if fc.closed.Load() {
 			return nil
@@ -420,7 +435,8 @@ func (fc *followerCursor) streamEntriesLoop(ctx context.Context, reader wal.Read
 		if !reader.HasNext() {
 			// We have reached the head of the wal
 			// Wait for more entries to be written
-			if err := fc.ackTracker.WaitForHeadOffset(ctx, currentOffset+1); err != nil {
+			var err error
+			if lastSentCommitOffset, err = fc.waitAtHead(ctx, reader, currentOffset, lastSentCommitOffset); err != nil {
 				if errors.Is(err, context.Canceled) || status.Code(err) == codes.Canceled {
 					return nil
 				}
@@ -435,16 +451,22 @@ func (fc *followerCursor) streamEntriesLoop(ctx context.Context, reader wal.Read
 			return err
 		}
 
-		fc.log.Debug(
-			"Sending entries to follower",
-			slog.Int64("offset", le.Offset),
-		)
+		if fc.log.Enabled(ctx, slog.LevelDebug) {
+			fc.log.Debug(
+				"Sending entries to follower",
+				slog.Int64("offset", le.Offset),
+			)
+		}
 
+		commitOffset := fc.ackTracker.CommitOffset()
 		if err = fc.stream.Send(&proto.Append{
 			Term:             fc.term,
 			Entry:            le,
-			CommitOffset:     fc.ackTracker.CommitOffset(),
+			CommitOffset:     commitOffset,
 			PreviousEntryCrc: &previousCrc,
+			// This leader accounts acks cumulatively: the follower can
+			// coalesce the acks of a whole sync round into one message
+			CumulativeAcksSupported: true,
 		}); err != nil {
 			if errors.Is(err, context.Canceled) || status.Code(err) == codes.Canceled {
 				return nil
@@ -454,7 +476,47 @@ func (fc *followerCursor) streamEntriesLoop(ctx context.Context, reader wal.Read
 
 		fc.lastPushed.Store(le.Offset)
 		currentOffset = le.Offset
+		lastSentCommitOffset = commitOffset
 	}
+}
+
+// waitAtHead parks the cursor once it has reached the head of the wal, until
+// an entry past currentOffset is written. An observer cursor additionally
+// wakes up when the commit offset advances beyond lastSentCommitOffset and
+// advertises it to the follower with an entry-less Append: the observer
+// (split child) commit offset is capped at what was advertised, and the split
+// catch-up depends on it reaching the leader's commit offset even when no
+// more writes arrive to piggyback it on. Regular followers don't get the
+// advertisement: they only use the commit offset to reduce apply lag, and
+// older-version followers don't handle an Append without an entry. An
+// observer is never on an older version: it only exists for shard splits,
+// where both ends run split-capable servers.
+// It returns the commit offset last advertised to the follower.
+func (fc *followerCursor) waitAtHead(ctx context.Context, reader wal.Reader, currentOffset int64,
+	lastSentCommitOffset int64) (int64, error) {
+	if !fc.observer {
+		return lastSentCommitOffset, fc.ackTracker.WaitForHeadOffset(ctx, currentOffset+1)
+	}
+
+	if err := fc.ackTracker.WaitForHeadOffsetOrCommitAdvance(ctx, currentOffset+1, lastSentCommitOffset); err != nil {
+		return lastSentCommitOffset, err
+	}
+
+	commitOffset := fc.ackTracker.CommitOffset()
+	if commitOffset <= lastSentCommitOffset || reader.HasNext() {
+		// Nothing to advertise, or a new entry is available and will carry
+		// the commit offset itself
+		return lastSentCommitOffset, nil
+	}
+
+	if err := fc.stream.Send(&proto.Append{
+		Term:                    fc.term,
+		CommitOffset:            commitOffset,
+		CumulativeAcksSupported: true,
+	}); err != nil {
+		return lastSentCommitOffset, err
+	}
+	return commitOffset, nil
 }
 
 func (fc *followerCursor) streamEntries() error {
@@ -535,10 +597,12 @@ func (fc *followerCursor) receiveAcks(cancel context.CancelFunc, stream proto.Ox
 			return nil
 		}
 
-		fc.log.Debug(
-			"Received ack",
-			slog.Int64("offset", res.Offset),
-		)
+		if fc.log.Enabled(fc.ctx, slog.LevelDebug) {
+			fc.log.Debug(
+				"Received ack",
+				slog.Int64("offset", res.Offset),
+			)
+		}
 		fc.cursorAcker.Ack(res.Offset)
 
 		fc.ackOffset.Store(res.Offset)

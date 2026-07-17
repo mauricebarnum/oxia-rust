@@ -349,10 +349,12 @@ github.com/modern-go/reflect2
 github.com/munnerz/goautoneg
 # github.com/oxia-db/oxia/common v0.16.1 => ../common
 ## explicit; go 1.26
+github.com/oxia-db/oxia/common
 github.com/oxia-db/oxia/common/auth
 github.com/oxia-db/oxia/common/cache
 github.com/oxia-db/oxia/common/channel
 github.com/oxia-db/oxia/common/codec
+github.com/oxia-db/oxia/common/commonio
 github.com/oxia-db/oxia/common/compare
 github.com/oxia-db/oxia/common/concurrent
 github.com/oxia-db/oxia/common/constant
@@ -375,9 +377,8 @@ github.com/oxia-db/oxia/oxia/internal
 github.com/oxia-db/oxia/oxia/internal/batch
 github.com/oxia-db/oxia/oxia/internal/metrics
 github.com/oxia-db/oxia/oxia/internal/model
-# github.com/oxia-db/oxia/oxiad v0.0.0-20260311203958-42be7c29268f => ../oxiad
+# github.com/oxia-db/oxia/oxiad v0.0.0-20260428162417-110425299484 => ../oxiad
 ## explicit; go 1.26
-github.com/oxia-db/oxia/oxiad/common/collection
 github.com/oxia-db/oxia/oxiad/common/crc
 github.com/oxia-db/oxia/oxiad/common/feature
 github.com/oxia-db/oxia/oxiad/common/logging
@@ -386,21 +387,32 @@ github.com/oxia-db/oxia/oxiad/common/option
 github.com/oxia-db/oxia/oxiad/common/rpc
 github.com/oxia-db/oxia/oxiad/common/rpc/auth
 github.com/oxia-db/oxia/oxiad/common/sharding
+github.com/oxia-db/oxia/oxiad/common/watch
 github.com/oxia-db/oxia/oxiad/coordinator
-github.com/oxia-db/oxia/oxiad/coordinator/action
-github.com/oxia-db/oxia/oxiad/coordinator/balancer
-github.com/oxia-db/oxia/oxiad/coordinator/controller
 github.com/oxia-db/oxia/oxiad/coordinator/metadata
-github.com/oxia-db/oxia/oxiad/coordinator/model
+github.com/oxia-db/oxia/oxiad/coordinator/metadata/common
+github.com/oxia-db/oxia/oxiad/coordinator/metadata/common/codec
+github.com/oxia-db/oxia/oxiad/coordinator/metadata/provider
+github.com/oxia-db/oxia/oxiad/coordinator/metadata/provider/file
+github.com/oxia-db/oxia/oxiad/coordinator/metadata/provider/kubernetes
+github.com/oxia-db/oxia/oxiad/coordinator/metadata/provider/memory
+github.com/oxia-db/oxia/oxiad/coordinator/metadata/provider/raft
 github.com/oxia-db/oxia/oxiad/coordinator/option
-github.com/oxia-db/oxia/oxiad/coordinator/policy
-github.com/oxia-db/oxia/oxiad/coordinator/resource
+github.com/oxia-db/oxia/oxiad/coordinator/reconciler
 github.com/oxia-db/oxia/oxiad/coordinator/rpc
-github.com/oxia-db/oxia/oxiad/coordinator/selector
-github.com/oxia-db/oxia/oxiad/coordinator/selector/ensemble
-github.com/oxia-db/oxia/oxiad/coordinator/selector/leader
-github.com/oxia-db/oxia/oxiad/coordinator/selector/single
-github.com/oxia-db/oxia/oxiad/coordinator/util
+github.com/oxia-db/oxia/oxiad/coordinator/runtime
+github.com/oxia-db/oxia/oxiad/coordinator/runtime/action
+github.com/oxia-db/oxia/oxiad/coordinator/runtime/autosplit
+github.com/oxia-db/oxia/oxiad/coordinator/runtime/balancer
+github.com/oxia-db/oxia/oxiad/coordinator/runtime/balancer/model
+github.com/oxia-db/oxia/oxiad/coordinator/runtime/balancer/selector
+github.com/oxia-db/oxia/oxiad/coordinator/runtime/balancer/selector/ensemble
+github.com/oxia-db/oxia/oxiad/coordinator/runtime/balancer/selector/leader
+github.com/oxia-db/oxia/oxiad/coordinator/runtime/balancer/selector/single
+github.com/oxia-db/oxia/oxiad/coordinator/runtime/balancer/state
+github.com/oxia-db/oxia/oxiad/coordinator/runtime/controller
+github.com/oxia-db/oxia/oxiad/coordinator/runtime/controller/dataserver
+github.com/oxia-db/oxia/oxiad/coordinator/runtime/controller/shard
 github.com/oxia-db/oxia/oxiad/dataserver
 github.com/oxia-db/oxia/oxiad/dataserver/assignment
 github.com/oxia-db/oxia/oxiad/dataserver/constant
@@ -410,8 +422,9 @@ github.com/oxia-db/oxia/oxiad/dataserver/controller/lead
 github.com/oxia-db/oxia/oxiad/dataserver/controller/statemachine
 github.com/oxia-db/oxia/oxiad/dataserver/database
 github.com/oxia-db/oxia/oxiad/dataserver/database/kvstore
-github.com/oxia-db/oxia/oxiad/dataserver/errors
+github.com/oxia-db/oxia/oxiad/dataserver/manifest
 github.com/oxia-db/oxia/oxiad/dataserver/option
+github.com/oxia-db/oxia/oxiad/dataserver/rpc
 github.com/oxia-db/oxia/oxiad/dataserver/wal
 github.com/oxia-db/oxia/oxiad/dataserver/wal/codec
 # github.com/pelletier/go-toml v1.2.0
@@ -581,32 +594,33 @@ go.yaml.in/yaml/v3
 golang.org/x/exp/constraints
 golang.org/x/exp/maps
 golang.org/x/exp/slices
-# golang.org/x/net v0.48.0
-## explicit; go 1.24.0
+# golang.org/x/net v0.55.0
+## explicit; go 1.25.0
 golang.org/x/net/context
 golang.org/x/net/http/httpguts
 golang.org/x/net/http2
 golang.org/x/net/http2/hpack
 golang.org/x/net/idna
 golang.org/x/net/internal/httpcommon
+golang.org/x/net/internal/httpsfv
 golang.org/x/net/internal/timeseries
 golang.org/x/net/trace
-# golang.org/x/oauth2 v0.34.0
-## explicit; go 1.24.0
+# golang.org/x/oauth2 v0.36.0
+## explicit; go 1.25.0
 golang.org/x/oauth2
 golang.org/x/oauth2/internal
-# golang.org/x/sys v0.42.0
+# golang.org/x/sys v0.45.0
 ## explicit; go 1.25.0
 golang.org/x/sys/execabs
 golang.org/x/sys/plan9
 golang.org/x/sys/unix
 golang.org/x/sys/windows
 golang.org/x/sys/windows/registry
-# golang.org/x/term v0.38.0
-## explicit; go 1.24.0
+# golang.org/x/term v0.43.0
+## explicit; go 1.25.0
 golang.org/x/term
-# golang.org/x/text v0.32.0
-## explicit; go 1.24.0
+# golang.org/x/text v0.37.0
+## explicit; go 1.25.0
 golang.org/x/text/cases
 golang.org/x/text/internal
 golang.org/x/text/internal/language
@@ -621,11 +635,12 @@ golang.org/x/text/unicode/norm
 # golang.org/x/time v0.11.0
 ## explicit; go 1.23.0
 golang.org/x/time/rate
-# google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217
-## explicit; go 1.24.0
+# google.golang.org/genproto/googleapis/rpc v0.0.0-20260226221140-a57be14db171
+## explicit; go 1.25.0
+google.golang.org/genproto/googleapis/rpc/errdetails
 google.golang.org/genproto/googleapis/rpc/status
-# google.golang.org/grpc v1.79.3
-## explicit; go 1.24.0
+# google.golang.org/grpc v1.81.1
+## explicit; go 1.25.0
 google.golang.org/grpc
 google.golang.org/grpc/attributes
 google.golang.org/grpc/backoff
@@ -664,6 +679,7 @@ google.golang.org/grpc/internal/grpclog
 google.golang.org/grpc/internal/grpcsync
 google.golang.org/grpc/internal/grpcutil
 google.golang.org/grpc/internal/idle
+google.golang.org/grpc/internal/mem
 google.golang.org/grpc/internal/metadata
 google.golang.org/grpc/internal/pretty
 google.golang.org/grpc/internal/proxyattributes
@@ -679,6 +695,7 @@ google.golang.org/grpc/internal/status
 google.golang.org/grpc/internal/syscall
 google.golang.org/grpc/internal/transport
 google.golang.org/grpc/internal/transport/networktype
+google.golang.org/grpc/internal/transport/readyreader
 google.golang.org/grpc/keepalive
 google.golang.org/grpc/mem
 google.golang.org/grpc/metadata

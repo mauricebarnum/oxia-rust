@@ -1,4 +1,4 @@
-// Copyright 2023-2025 The Oxia Authors
+// Copyright 2023-2026 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -27,8 +27,6 @@ import (
 	"github.com/pkg/errors"
 	"google.golang.org/protobuf/encoding/protojson"
 	pb "google.golang.org/protobuf/proto"
-
-	"github.com/oxia-db/oxia/common/constant"
 
 	"github.com/oxia-db/oxia/common/proto"
 )
@@ -90,19 +88,32 @@ func (d *dispatcher) onOxiaStreamRequestMessage(msgType MsgType, m any, message 
 	switch msgType {
 	case MsgTypeShardAssignmentsResponse:
 		r := message.(*proto.ShardAssignments)
-		d.currentLeader = r.Namespaces[constant.DefaultNamespace].Assignments[0].Leader
-		slog.Info(
-			"Received notification of new leader",
-			slog.String("leader", d.currentLeader),
-		)
+		if leader, ok := getDefaultNamespaceLeader(r); ok {
+			d.currentLeader = leader
+			slog.Info(
+				"Received notification of new leader",
+				slog.String("leader", d.currentLeader),
+			)
+		}
 
 	case MsgTypeAppend:
+		// Deliver inline, not on a per-message goroutine: goroutine scheduling
+		// would reorder entries within a stream, which gRPC never does. The
+		// stream delivery never blocks (buffered channel, drops on overflow).
 		msg := m.(*Message[OxiaStreamMessage])
-		go d.grpcProvider.HandleOxiaStreamRequest(msgType, msg, message)
+		d.grpcProvider.HandleOxiaStreamRequest(msgType, msg, message)
 
 	case MsgTypeAck:
 		streamId := m.(*Message[OxiaStreamMessage]).Body.StreamId
-		go d.replicationProvider.HandleAck(streamId, message.(*proto.Ack))
+		d.replicationProvider.HandleAck(streamId, message.(*proto.Ack))
+
+	case MsgTypeStreamError:
+		// A peer declared one of our streams dead. The stream id alone doesn't
+		// say which side of it we hold, so try both: each side ignores unknown
+		// ids.
+		msg := m.(*Message[OxiaStreamMessage])
+		d.replicationProvider.HandleStreamError(msg.Body.StreamId)
+		d.grpcProvider.HandleStreamError(msg.Src, msg.Body.StreamId)
 
 	default:
 		panic(fmt.Sprintf("Unknown message type: %v", msgType))

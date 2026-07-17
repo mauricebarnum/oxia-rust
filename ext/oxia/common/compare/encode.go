@@ -1,4 +1,4 @@
-// Copyright 2023-2025 The Oxia Authors
+// Copyright 2023-2026 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -30,11 +30,39 @@ type Encoder interface {
 	Decode(encodedKey []byte) string
 
 	IsInternalKey(encodedKey []byte) bool
+
+	// InternalKeyRange returns the encoded half-open range [start, end) that
+	// contains every internal key. The region is always contiguous, so an
+	// iterator can seek past it in one jump instead of stepping through it.
+	//
+	// end is nil when the region runs to the end of the keyspace — no user key
+	// can sort after it — which lets the region be pruned with an upper bound
+	// instead. That is the case for the hierarchical encoder, but NOT for the
+	// natural one, where a user key is stored raw and can therefore sort after
+	// the internal keys.
+	InternalKeyRange() (start []byte, end []byte)
+}
+
+// keyRegionSuccessor returns the smallest key that sorts after every key with
+// the given prefix, or nil when no such key exists (an all-0xff prefix).
+func keyRegionSuccessor(prefix []byte) []byte {
+	end := bytes.Clone(prefix)
+	for i := len(end) - 1; i >= 0; i-- {
+		if end[i] != maxByteValue {
+			end[i]++
+			return end[:i+1]
+		}
+	}
+	return nil
 }
 
 const (
 	encodedSeparator      = 0xff
 	internalKeysBitMarker = 1 << 15
+
+	// maxByteValue is the largest byte value; a prefix made only of these has
+	// no successor.
+	maxByteValue = 0xff
 )
 
 var (
@@ -89,7 +117,11 @@ func (encoderHierarchical) Decode(encoded []byte) string {
 	}
 
 	buf := bytes.ReplaceAll(encoded[2:], encodedSeparatorSlice, separator)
-	return string(buf)
+	// ReplaceAll always returns a fresh copy here (the separator count is
+	// non-zero on this branch), so the slice can be re-typed as a string
+	// without the second allocation+copy of a string(buf) conversion: it is
+	// not aliased and never mutated after this point.
+	return unsafe.String(unsafe.SliceData(buf), len(buf))
 }
 
 func (encoderHierarchical) IsInternalKey(encodedKey []byte) bool {
@@ -100,6 +132,19 @@ func (encoderHierarchical) IsInternalKey(encodedKey []byte) bool {
 	// If the first bit is set, it means it's an internal key
 	return encodedKey[0]&(1<<7) != 0
 }
+
+// InternalKeyRange: the internal-key marker is the top bit of the 2-byte
+// prefix, so every internal key sorts after every regular one (a regular key
+// would need 32768 separators to reach that region) — the region runs to the
+// end of the keyspace.
+func (encoderHierarchical) InternalKeyRange() (start []byte, end []byte) {
+	return hierarchicalInternalKeyStart, nil
+}
+
+// The bounds returned by InternalKeyRange are constant and read-only, so build
+// them once. Callers use them as pebble iterator bounds and seek keys, never
+// mutating them (same contract as encodedInternalKeyPrefixBytes).
+var hierarchicalInternalKeyStart = []byte{internalKeysBitMarker >> 8}
 
 // EncoderHierarchical ensure that we can sort keys from same level together
 // and thus we can easily return the children of a given path
@@ -135,10 +180,18 @@ func (encoderNatural) Encode(key string) []byte {
 }
 
 func (encoderNatural) Decode(encoded []byte) string {
+	// The buffer must not be modified: it is Pebble's memory, handed out
+	// under an explicit read-only contract ("the caller should not modify
+	// the contents of the returned slice", Iterator.Key). Today it is the
+	// iterator's own position buffer — which Pebble keeps using internally —
+	// and Pebble's lower layers hand out direct block-cache references that
+	// only an implementation detail of the current version copies before
+	// they reach the caller.
 	if bytes.HasPrefix(encoded, encodedInternalKeyPrefixBytes) {
-		// Decode the internal key
-		encoded[0] = '_'
-		encoded[1] = '_'
+		// Decode the internal key into a new string. The concatenation makes
+		// a single allocation: the compiler does not allocate for a
+		// []byte-to-string conversion used directly as a concat operand.
+		return "__" + string(encoded[2:])
 	}
 
 	// Copy is necessary because the []byte memory is managed by Pebble
@@ -150,6 +203,16 @@ func (encoderNatural) Decode(encoded []byte) string {
 func (encoderNatural) IsInternalKey(encodedKey []byte) bool {
 	return bytes.HasPrefix(encodedKey, encodedInternalKeyPrefixBytes)
 }
+
+// InternalKeyRange: internal keys are the "\xff\xffoxia/" prefix region. A
+// regular key is stored raw, so one whose bytes sort after that prefix (e.g.
+// "\xff\xffz") lives *after* the internal keys — the region has a real upper
+// end and cannot be pruned away with an upper bound.
+func (encoderNatural) InternalKeyRange() (start []byte, end []byte) {
+	return encodedInternalKeyPrefixBytes, encodedInternalKeyPrefixSuccessor
+}
+
+var encodedInternalKeyPrefixSuccessor = keyRegionSuccessor(encodedInternalKeyPrefixBytes)
 
 var EncoderNatural Encoder = &encoderNatural{}
 

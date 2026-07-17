@@ -1,4 +1,4 @@
-// Copyright 2023-2025 The Oxia Authors
+// Copyright 2023-2026 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,7 +23,6 @@ import (
 	"go.uber.org/multierr"
 	"google.golang.org/grpc/health/grpc_health_v1"
 
-	"github.com/oxia-db/oxia/oxiad/coordinator/model"
 	dataserveroption "github.com/oxia-db/oxia/oxiad/dataserver/option"
 
 	"github.com/oxia-db/oxia/oxiad/common/metric"
@@ -33,14 +32,13 @@ import (
 	"github.com/oxia-db/oxia/oxiad/dataserver/controller"
 	"github.com/oxia-db/oxia/oxiad/dataserver/controller/lead"
 	"github.com/oxia-db/oxia/oxiad/dataserver/database/kvstore"
+	dataserverrpc "github.com/oxia-db/oxia/oxiad/dataserver/rpc"
 
 	"github.com/oxia-db/oxia/oxiad/common/rpc/auth"
 
 	"github.com/oxia-db/oxia/oxiad/dataserver/wal"
 
 	"github.com/oxia-db/oxia/common/constant"
-	"github.com/oxia-db/oxia/common/rpc"
-
 	"github.com/oxia-db/oxia/common/proto"
 )
 
@@ -49,7 +47,7 @@ type StandaloneConfig struct {
 
 	NumShards            uint32
 	NotificationsEnabled bool
-	KeySorting           model.KeySorting
+	KeySorting           proto.KeySortingType
 }
 
 type Standalone struct {
@@ -145,7 +143,7 @@ func (s *Standalone) initializeShards(numShards uint32) error {
 
 	newTermOptions := &proto.NewTermOptions{
 		EnableNotifications: s.config.NotificationsEnabled,
-		KeySorting:          s.config.KeySorting.ToProto(),
+		KeySorting:          s.config.KeySorting,
 	}
 
 	for i := int64(0); i < int64(numShards); i++ {
@@ -216,6 +214,6 @@ func (noOpReplicationRpcProvider) Truncate(string, *proto.TruncateRequest) (*pro
 	panic("not implemented")
 }
 
-func newNoOpReplicationRpcProvider() rpc.ReplicationRpcProvider {
+func newNoOpReplicationRpcProvider() dataserverrpc.ReplicationRpcProvider {
 	return &noOpReplicationRpcProvider{}
 }

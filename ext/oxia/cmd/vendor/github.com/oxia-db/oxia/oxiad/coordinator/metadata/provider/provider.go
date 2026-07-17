@@ -1,0 +1,48 @@
+// Copyright 2023-2026 The Oxia Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package provider
+
+import (
+	"errors"
+	"io"
+
+	gproto "google.golang.org/protobuf/proto"
+
+	commonwatch "github.com/oxia-db/oxia/oxiad/common/watch"
+	metadataconstant "github.com/oxia-db/oxia/oxiad/coordinator/metadata/common"
+)
+
+var ErrCoordinatorLeaderUnavailable = errors.New("coordinator leader unavailable")
+
+type Versioned[T any] struct {
+	Value   T
+	Version metadataconstant.Version
+}
+
+type Provider[T gproto.Message] interface {
+	io.Closer
+
+	Store(snapshot Versioned[T]) (newVersion metadataconstant.Version, err error)
+
+	// WaitToBecomeLeader blocks until this coordinator holds the leadership.
+	// The returned channel gets closed if the leadership is subsequently
+	// lost: the caller must stop coordinating when that happens. A nil
+	// channel means the leadership cannot be lost.
+	WaitToBecomeLeader() (lost <-chan struct{}, err error)
+
+	GetLeaderName() (string, error)
+
+	Watch() *commonwatch.Watch[Versioned[T]]
+}

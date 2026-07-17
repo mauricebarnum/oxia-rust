@@ -1,4 +1,4 @@
-// Copyright 2023-2025 The Oxia Authors
+// Copyright 2023-2026 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,7 +24,6 @@ import (
 
 	"github.com/pkg/errors"
 	"go.uber.org/multierr"
-	"google.golang.org/grpc/status"
 
 	"github.com/oxia-db/oxia/oxiad/common/crc"
 
@@ -36,15 +35,15 @@ import (
 
 	"github.com/oxia-db/oxia/oxiad/dataserver/wal"
 
-	"github.com/oxia-db/oxia/common/channel"
 	"github.com/oxia-db/oxia/common/concurrent"
 	"github.com/oxia-db/oxia/common/constant"
 	"github.com/oxia-db/oxia/common/entity"
 	"github.com/oxia-db/oxia/common/metric"
 	"github.com/oxia-db/oxia/common/process"
 	"github.com/oxia-db/oxia/common/proto"
-	"github.com/oxia-db/oxia/common/rpc"
+	commonrpc "github.com/oxia-db/oxia/common/rpc"
 	time2 "github.com/oxia-db/oxia/common/time"
+	dataserverrpc "github.com/oxia-db/oxia/oxiad/dataserver/rpc"
 )
 
 type LeaderController interface {
@@ -54,9 +53,13 @@ type LeaderController interface {
 	ListBlock(ctx context.Context, request *proto.ListRequest) ([]string, error)
 
 	Write(ctx context.Context, request *proto.WriteRequest, cb concurrent.Callback[*proto.WriteResponse])
-	List(ctx context.Context, request *proto.ListRequest, cb concurrent.StreamCallback[string])
-	Read(ctx context.Context, request *proto.ReadRequest, cb concurrent.StreamCallback[*proto.GetResponse])
-	RangeScan(ctx context.Context, request *proto.RangeScanRequest, cb concurrent.StreamCallback[*proto.GetResponse])
+
+	// List, Read and RangeScan run synchronously on the caller's goroutine,
+	// invoking onNext for every result; the returned error is the final
+	// status of the operation.
+	List(ctx context.Context, request *proto.ListRequest, onNext func(string) error) error
+	Read(ctx context.Context, request *proto.ReadRequest, onNext func(*proto.GetResponse) error) error
+	RangeScan(ctx context.Context, request *proto.RangeScanRequest, onNext func(*proto.GetResponse) error) error
 
 	GetSequenceUpdates(ctx context.Context, request *proto.GetSequenceUpdatesRequest) (database.SequenceWaiter, error)
 
@@ -73,6 +76,7 @@ type LeaderController interface {
 	GetStatus(request *proto.GetStatusRequest) (*proto.GetStatusResponse, error)
 	DeleteShard(request *proto.DeleteShardRequest) (*proto.DeleteShardResponse, error)
 	RemoveObserver(request *proto.RemoveObserverRequest) (*proto.RemoveObserverResponse, error)
+	Freeze(request *proto.FreezeShardRequest) (*proto.FreezeShardResponse, error)
 
 	Context() context.Context
 	// Term The current term of the leader
@@ -106,6 +110,12 @@ type leaderController struct {
 	followers         map[string]FollowerCursor
 	observers         map[string]FollowerCursor
 
+	// frozen, when set, makes the leader reject new write proposals without
+	// fencing it: existing follower/observer cursors keep streaming. Used
+	// during split cutover to quiesce the parent so children can drain the
+	// final tail before the parent is fenced. Cleared on every new term.
+	frozen atomic.Bool
+
 	// This represents the last entry in the WAL at the time this node
 	// became leader. It's used in the logic for deciding where to
 	// truncate the followers.
@@ -118,9 +128,13 @@ type leaderController struct {
 	wal            wal.Wal
 	db             database.DB
 	termOptions    database.TermOptions
-	rpcClient      rpc.ReplicationRpcProvider
+	rpcClient      dataserverrpc.ReplicationRpcProvider
 	sessionManager SessionManager
 	log            *slog.Logger
+
+	// Reusable serialization buffer: only accessed by propose, while holding
+	// the leader write lock
+	marshalBuf []byte
 
 	writeLatencyHisto       metric.LatencyHistogram
 	headOffsetGauge         metric.Gauge
@@ -131,7 +145,7 @@ type leaderController struct {
 }
 
 func NewLeaderController(storageOptions *option.StorageOptions, namespace string, shardId int64,
-	rpcClient rpc.ReplicationRpcProvider,
+	rpcClient dataserverrpc.ReplicationRpcProvider,
 	walFactory wal.Factory, kvFactory kvstore.Factory,
 	newTermOptions *proto.NewTermOptions,
 ) (LeaderController, error) {
@@ -265,7 +279,7 @@ func (lc *leaderController) NewTerm(req *proto.NewTermRequest) (*proto.NewTermRe
 	defer lc.Unlock()
 
 	if lc.closed {
-		return nil, constant.ErrAlreadyClosed
+		return nil, constant.ErrResourceUnavailable
 	}
 
 	currentTerm := lc.term.Load()
@@ -292,6 +306,9 @@ func (lc *leaderController) NewTerm(req *proto.NewTermRequest) (*proto.NewTermRe
 	lc.term.Store(req.Term)
 	lc.status = proto.ServingStatus_FENCED
 	lc.replicationFactor = 0
+	// A new term clears any freeze: a freshly fenced/re-elected leader must
+	// not inherit a stale write-freeze from a previous (aborted) cutover.
+	lc.frozen.Store(false)
 
 	lc.headOffsetGauge.Unregister()
 	lc.commitOffsetGauge.Unregister()
@@ -347,7 +364,7 @@ func (lc *leaderController) becomeLeader(ctx context.Context, req *proto.BecomeL
 	defer lc.Unlock()
 
 	if lc.closed {
-		return nil, constant.ErrAlreadyClosed
+		return nil, constant.ErrResourceUnavailable
 	}
 
 	if lc.status != proto.ServingStatus_FENCED {
@@ -458,7 +475,7 @@ func (lc *leaderController) AddFollower(req *proto.AddFollowerRequest) (*proto.A
 	}
 
 	if lc.status != proto.ServingStatus_LEADER {
-		return nil, errors.Wrap(constant.ErrInvalidStatus, "Node is not leader")
+		return nil, errors.Wrap(constant.ErrNodeIsNotLeader, "Node is not leader")
 	}
 
 	if req.Observer {
@@ -530,6 +547,44 @@ func (lc *leaderController) RemoveObserver(req *proto.RemoveObserverRequest) (*p
 	)
 
 	return &proto.RemoveObserverResponse{}, nil
+}
+
+// Freeze toggles the leader's write-freeze. When frozen, the leader rejects new
+// write proposals without fencing itself, so its follower and observer cursors
+// keep streaming the existing WAL while the head offset stops advancing. It is
+// used during split cutover to quiesce the parent shard so the children can
+// drain the final tail before the parent is fenced. Returns the leader's head
+// offset, which while frozen is the final offset the children must reach.
+func (lc *leaderController) Freeze(req *proto.FreezeShardRequest) (*proto.FreezeShardResponse, error) {
+	lc.Lock()
+	defer lc.Unlock()
+
+	if lc.closed {
+		return nil, constant.ErrResourceUnavailable
+	}
+
+	if req.Term != lc.term.Load() {
+		return nil, constant.ErrInvalidTerm
+	}
+
+	if lc.status != proto.ServingStatus_LEADER {
+		return nil, errors.Wrap(constant.ErrInvalidStatus, "Node is not leader")
+	}
+
+	lc.frozen.Store(req.Frozen)
+
+	headOffset := wal.InvalidOffset
+	if lc.quorumAckTracker != nil {
+		headOffset = lc.quorumAckTracker.HeadOffset()
+	}
+
+	lc.log.Info("Set shard write-freeze",
+		slog.Bool("frozen", req.Frozen),
+		slog.Int64("term", lc.term.Load()),
+		slog.Int64("head-offset", headOffset),
+	)
+
+	return &proto.FreezeShardResponse{HeadOffset: headOffset}, nil
 }
 
 func (lc *leaderController) addFollower(follower string, followerHeadEntryId *proto.EntryId) error {
@@ -696,7 +751,7 @@ func (lc *leaderController) truncateFollowerIfNeeded(follower string, shardId in
 	// Coordinator should never send us a follower with an invalid term.
 	// Checking for sanity here.
 	if followerHeadEntryId.Term > lc.leaderElectionHeadEntryId.Term {
-		return nil, constant.ErrInvalidStatus
+		return nil, constant.ErrInvalidTerm
 	}
 
 	lastEntryInFollowerTerm, err := getHighestEntryOfTerm(lc.wal, followerHeadEntryId.Term)
@@ -760,54 +815,50 @@ func getHighestEntryOfTerm(w wal.Wal, term int64) (*proto.EntryId, error) {
 	return constant2.InvalidEntryId, nil
 }
 
-func (lc *leaderController) Read(ctx context.Context, request *proto.ReadRequest, cb concurrent.StreamCallback[*proto.GetResponse]) {
+func (lc *leaderController) Read(ctx context.Context, request *proto.ReadRequest, onNext func(*proto.GetResponse) error) error {
 	lc.RLock()
 	err := checkStatusIsLeader(lc.status)
 	if err != nil {
 		lc.RUnlock()
-		cb.OnComplete(err)
-		return
+		return err
 	}
-	lc.waitGroup.Go(func() {
-		process.DoWithLabels(
-			ctx,
-			map[string]string{
-				"oxia":  "read",
-				"shard": fmt.Sprintf("%d", lc.shardId),
-				"peer":  rpc.GetPeer(ctx),
-			},
-			func() {
-				lc.log.Debug("Received read request", slog.Int64("term", lc.term.Load()))
-				var response *proto.GetResponse
-				var err error
-
-				for _, get := range request.Gets {
-					if get.SecondaryIndexName != nil {
-						response, err = secondaryIndexGet(get, lc.db)
-					} else {
-						response, err = lc.db.Get(get)
-					}
-					if err != nil {
-						break
-					}
-					if err = cb.OnNext(response); err != nil {
-						break
-					}
-					if err = ctx.Err(); err != nil {
-						break
-					}
-				}
-				cb.OnComplete(err)
-			},
-		)
-	})
+	// Track the in-flight read so close() waits for it — the Add must happen
+	// under the status lock, exactly like the goroutine spawn it replaces —
+	// but run the loop inline: the gRPC handler goroutine only parks on the
+	// result otherwise, and the per-request goroutine plus pprof label set
+	// were pure overhead on the hot read path.
+	lc.waitGroup.Add(1)
 	lc.RUnlock()
+	defer lc.waitGroup.Done()
+
+	if lc.log.Enabled(ctx, slog.LevelDebug) {
+		lc.log.Debug("Received read request", slog.Int64("term", lc.term.Load()))
+	}
+
+	var response *proto.GetResponse
+	for _, get := range request.Gets {
+		if get.SecondaryIndexName != nil {
+			response, err = secondaryIndexGet(get, lc.db)
+		} else {
+			response, err = lc.db.Get(get)
+		}
+		if err != nil {
+			return err
+		}
+		if err = onNext(response); err != nil {
+			return err
+		}
+		if err = ctx.Err(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (lc *leaderController) GetSequenceUpdates(_ context.Context, request *proto.GetSequenceUpdatesRequest) (database.SequenceWaiter, error) {
 	lc.RLock()
+	defer lc.RUnlock()
 	err := checkStatusIsLeader(lc.status)
-	lc.RUnlock()
 	if err != nil {
 		return nil, err
 	}
@@ -816,124 +867,119 @@ func (lc *leaderController) GetSequenceUpdates(_ context.Context, request *proto
 	return lc.db.GetSequenceUpdates(request.Key)
 }
 
-func (lc *leaderController) List(ctx context.Context, request *proto.ListRequest, cb concurrent.StreamCallback[string]) {
+func (lc *leaderController) List(ctx context.Context, request *proto.ListRequest, onNext func(string) error) error {
 	lc.RLock()
 	err := checkStatusIsLeader(lc.status)
 	if err != nil {
 		lc.RUnlock()
-		cb.OnComplete(err)
-		return
+		return err
 	}
-	lc.waitGroup.Go(func() {
-		lc.list(ctx, request, cb)
-	})
+	lc.waitGroup.Add(1)
 	lc.RUnlock()
+	defer lc.waitGroup.Done()
+	return lc.list(ctx, request, onNext)
 }
 
-func (lc *leaderController) list(ctx context.Context, request *proto.ListRequest, cb concurrent.StreamCallback[string]) {
-	process.DoWithLabels(
-		ctx,
-		map[string]string{
-			"oxia":  "list",
-			"shard": fmt.Sprintf("%d", lc.shardId),
-			"peer":  rpc.GetPeer(ctx),
-		},
-		func() {
-			lc.log.Debug("Received list request", slog.Int64("term", lc.term.Load()), slog.Any("request", request))
+func (lc *leaderController) list(ctx context.Context, request *proto.ListRequest, onNext func(string) error) error {
+	if lc.log.Enabled(ctx, slog.LevelDebug) {
+		lc.log.Debug("Received list request", slog.Int64("term", lc.term.Load()), slog.Any("request", request))
+	}
 
-			var it kvstore.KeyIterator
-			var err error
+	var it kvstore.KeyIterator
+	var err error
 
-			if request.SecondaryIndexName != nil {
-				it, err = newSecondaryIndexListIterator(request, lc.db)
-			} else {
-				it, err = lc.db.List(request)
-			}
-			if err != nil {
-				lc.log.Warn(
-					"Failed to process list request",
-					slog.Any("error", err),
-					slog.Int64("term", lc.term.Load()),
-				)
-				cb.OnComplete(err)
-				return
-			}
+	if request.SecondaryIndexName != nil {
+		it, err = newSecondaryIndexListIterator(request, lc.db)
+	} else {
+		it, err = lc.db.List(request)
+	}
+	if err != nil {
+		lc.log.Warn(
+			"Failed to process list request",
+			slog.Any("error", err),
+			slog.Int64("term", lc.term.Load()),
+		)
+		return err
+	}
 
-			for ; it.Valid(); it.Next() {
-				if err = cb.OnNext(it.Key()); err != nil {
-					break
-				}
-				if err = ctx.Err(); err != nil {
-					break
-				}
-			}
+	for ; it.Valid(); it.Next() {
+		if err = onNext(it.Key()); err != nil {
+			break
+		}
+		if err = ctx.Err(); err != nil {
+			break
+		}
+	}
 
-			err = multierr.Combine(err, it.Close())
-			cb.OnComplete(err)
-		},
-	)
+	return multierr.Combine(err, it.Close())
 }
 
 func (lc *leaderController) ListBlock(ctx context.Context, request *proto.ListRequest) ([]string, error) {
-	// todo: support leader status check without lock
-	ch := make(chan *entity.TWithError[string])
-	lc.waitGroup.Go(func() { lc.list(ctx, request, concurrent.ReadFromStreamCallback(ch)) })
-	return channel.ReadAll(ctx, ch)
+	// No status check and no RLock here, intentionally: the only caller is
+	// the session manager's Initialize, which runs while becomeLeader holds
+	// this controller's write lock — taking the RLock would self-deadlock,
+	// and the same write lock makes a race with close() (which also needs it
+	// to Wait on the group) impossible.
+	lc.waitGroup.Add(1)
+	defer lc.waitGroup.Done()
+
+	var keys []string
+	err := lc.list(ctx, request, func(key string) error {
+		keys = append(keys, key)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return keys, nil
 }
 
-func (lc *leaderController) RangeScan(ctx context.Context, request *proto.RangeScanRequest, cb concurrent.StreamCallback[*proto.GetResponse]) {
+func (lc *leaderController) RangeScan(ctx context.Context, request *proto.RangeScanRequest, onNext func(*proto.GetResponse) error) error {
 	lc.RLock()
 	err := checkStatusIsLeader(lc.status)
 	if err != nil {
 		lc.RUnlock()
-		cb.OnComplete(err)
-		return
+		return err
 	}
 
-	lc.waitGroup.Go(func() {
-		process.DoWithLabels(ctx,
-			map[string]string{
-				"oxia":  "range-scan",
-				"shard": fmt.Sprintf("%d", lc.shardId),
-				"peer":  rpc.GetPeer(ctx),
-			},
-			func() {
-				lc.log.Debug("Received range-scan request", slog.Int64("term", lc.term.Load()), slog.Any("request", request))
-
-				var it database.RangeScanIterator
-				var err error
-
-				if request.SecondaryIndexName != nil {
-					it, err = newSecondaryIndexRangeScanIterator(request, lc.db)
-				} else {
-					it, err = lc.db.RangeScan(request)
-				}
-
-				if err != nil {
-					lc.log.Warn("Failed to process range-scan request", slog.Any("error", err), slog.Int64("term", lc.term.Load()))
-					cb.OnComplete(err)
-					return
-				}
-
-				var gr *proto.GetResponse
-				for ; it.Valid(); it.Next() {
-					if gr, err = it.Value(); err != nil {
-						break
-					}
-					if err = cb.OnNext(gr); err != nil {
-						break
-					}
-					if err = ctx.Err(); err != nil {
-						break
-					}
-				}
-
-				err = multierr.Combine(err, it.Close())
-				cb.OnComplete(err)
-			},
-		)
-	})
+	lc.waitGroup.Add(1)
 	lc.RUnlock()
+	defer lc.waitGroup.Done()
+
+	if lc.log.Enabled(ctx, slog.LevelDebug) {
+		lc.log.Debug("Received range-scan request", slog.Int64("term", lc.term.Load()), slog.Any("request", request))
+	}
+
+	var it database.RangeScanIterator
+	if request.SecondaryIndexName != nil {
+		it, err = newSecondaryIndexRangeScanIterator(request, lc.db)
+	} else {
+		it, err = lc.db.RangeScan(request)
+	}
+
+	if err != nil {
+		lc.log.Warn("Failed to process range-scan request", slog.Any("error", err), slog.Int64("term", lc.term.Load()))
+		return err
+	}
+
+	err = rangeScanIterate(ctx, it, onNext)
+	return multierr.Combine(err, it.Close())
+}
+
+func rangeScanIterate(ctx context.Context, it database.RangeScanIterator, onNext func(*proto.GetResponse) error) error {
+	for ; it.Valid(); it.Next() {
+		gr, err := it.Value()
+		if err != nil {
+			return err
+		}
+		if err := onNext(gr); err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (lc *leaderController) WriteBlock(ctx context.Context, request *proto.WriteRequest) (*proto.WriteResponse, error) {
@@ -1009,6 +1055,14 @@ func (lc *leaderController) propose(ctx context.Context, proposalSupplier func(o
 		cb.OnCompleteError(err)
 		return
 	}
+	if lc.frozen.Load() {
+		// The shard is frozen for split cutover: reject new writes with a
+		// retryable error so clients re-resolve and route to the child shards
+		// once the cutover completes. Head must not advance while frozen.
+		lc.Unlock()
+		cb.OnCompleteError(constant.ErrNodeIsNotLeader)
+		return
+	}
 	newOffset := lc.quorumAckTracker.NextOffset()
 	walLog := lc.wal
 	tracker := lc.quorumAckTracker
@@ -1026,12 +1080,19 @@ func (lc *leaderController) propose(ctx context.Context, proposalSupplier func(o
 
 	proposal.ToLogEntry(entryValue)
 
-	value, err := entryValue.MarshalVT()
+	// Serialize into the reusable buffer instead of allocating per proposal.
+	// This is safe: value is consumed synchronously by AppendAndSync below,
+	// on this goroutine (serialized into the wal before it returns, per the
+	// Wal interface contract), and the next proposal can only overwrite the
+	// buffer once this one releases the lock. The completion callbacks never
+	// reference value: the database apply uses the proposal object.
+	marshalBuf, value, err := proto.MarshalToBuffer(lc.marshalBuf, entryValue)
 	if err != nil {
 		lc.Unlock()
 		cb.OnCompleteError(err)
 		return
 	}
+	lc.marshalBuf = marshalBuf
 
 	lc.waitGroup.Add(1) // inflight proposal
 	deferDbWrite := func(entryCrc uint32, err error) {
@@ -1120,7 +1181,7 @@ func (lc *leaderController) GetNotifications(ctx context.Context, req *proto.Not
 			map[string]string{
 				"oxia":  "dispatch-notifications",
 				"shard": fmt.Sprintf("%d", lc.shardId),
-				"peer":  rpc.GetPeer(ctx),
+				"peer":  commonrpc.GetPeer(ctx),
 			},
 			func() {
 				lc.log.Debug("Dispatch notifications", slog.Int64("term", lc.term.Load()), slog.Any("start-offset-include", offsetExclusive))
@@ -1128,7 +1189,7 @@ func (lc *leaderController) GetNotifications(ctx context.Context, req *proto.Not
 				for {
 					select {
 					case <-lc.ctx.Done():
-						cb.OnComplete(constant.ErrAlreadyClosed)
+						cb.OnComplete(constant.ErrResourceUnavailable)
 						return
 					case <-ctx.Done():
 						cb.OnComplete(nil)
@@ -1230,6 +1291,8 @@ func getLastEntryIdInWal(walObject wal.Wal) (*proto.EntryId, error) {
 }
 
 func (lc *leaderController) CommitOffset() int64 {
+	// WAL trimming can call back into this provider while leader close holds the
+	// leader lock and waits for WAL close. Do not take the leader lock here.
 	qat := lc.quorumAckTracker
 	if qat != nil {
 		return qat.CommitOffset()
@@ -1250,11 +1313,17 @@ func (lc *leaderController) GetStatus(_ *proto.GetStatusRequest) (*proto.GetStat
 		commitOffset = lc.quorumAckTracker.CommitOffset()
 	}
 
+	var shardStats *proto.ShardStats
+	if lc.db != nil {
+		shardStats = lc.db.Stats()
+	}
+
 	return &proto.GetStatusResponse{
 		Term:         lc.term.Load(),
 		Status:       lc.status,
 		HeadOffset:   headOffset,
 		CommitOffset: commitOffset,
+		ShardStats:   shardStats,
 	}, nil
 }
 
@@ -1262,7 +1331,7 @@ func (lc *leaderController) DeleteShard(request *proto.DeleteShardRequest) (*pro
 	lc.Lock()
 	defer lc.Unlock()
 	if lc.closed {
-		return nil, constant.ErrAlreadyClosed
+		return nil, constant.ErrResourceUnavailable
 	}
 
 	currentTerm := lc.term.Load()
@@ -1314,7 +1383,7 @@ func (lc *leaderController) Checksum() crc.Checksum {
 
 func checkStatusIsLeader(actual proto.ServingStatus) error {
 	if actual != proto.ServingStatus_LEADER {
-		return status.Errorf(constant.CodeInvalidStatus, "Received message in the wrong state. In %+v, should be %+v.", actual, proto.ServingStatus_LEADER)
+		return constant.ErrNodeIsNotLeader
 	}
 	return nil
 }

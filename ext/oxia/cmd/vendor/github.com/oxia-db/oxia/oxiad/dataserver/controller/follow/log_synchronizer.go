@@ -1,4 +1,4 @@
-// Copyright 2023-2025 The Oxia Authors
+// Copyright 2023-2026 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -30,7 +30,6 @@ import (
 	"github.com/oxia-db/oxia/common/metric"
 	"github.com/oxia-db/oxia/common/process"
 	"github.com/oxia-db/oxia/common/proto"
-	dserror "github.com/oxia-db/oxia/oxiad/dataserver/errors"
 	"github.com/oxia-db/oxia/oxiad/dataserver/wal"
 )
 
@@ -60,6 +59,22 @@ type LogSynchronizer struct {
 
 	advertisedCommitOffset *atomic.Int64
 	lastAppendedOffset     *atomic.Int64
+
+	// Whether the leader advertised cumulative-ack support on the last
+	// received Append. Atomic because the appender goroutine stores it while
+	// the syncer goroutine reads it, and the two share no lock. The value
+	// never changes within a stream in practice (one stream, one leader):
+	// the per-message store is simply the stateless way to track it, and it
+	// is idempotent and contention-free.
+	cumulativeAcks atomic.Bool
+
+	// Offsets of duplicated entries waiting to be re-acked. Duplicates don't
+	// advance the WAL head, though the leader still needs their acks to make
+	// progress after a reconnect. The acks must come from the syncer
+	// goroutine: gRPC streams don't support concurrent Send() calls and the
+	// syncer is already sending on this stream.
+	reAckMutex   sync.Mutex
+	reAckOffsets []int64
 
 	writeLatencyHisto metric.LatencyHistogram
 }
@@ -99,37 +114,87 @@ func (ls *LogSynchronizer) bgAppender(stream proto.OxiaLogReplication_ReplicateS
 		if req == nil {
 			return nil
 		}
-		if err = ls.append0(stream, syncCond, onAppend, req); err != nil {
+		if err = ls.append0(syncCond, onAppend, req); err != nil {
 			return err
 		}
 	}
 }
 
-func (ls *LogSynchronizer) append0(stream proto.OxiaLogReplication_ReplicateServer, syncCond chan struct{}, onAppend func(), req *proto.Append) error {
+func (ls *LogSynchronizer) append0(syncCond chan struct{}, onAppend func(), req *proto.Append) error {
 	timer := ls.writeLatencyHisto.Timer()
 	defer timer.Done()
 
 	if req.Term != constant.I64NegativeOne && req.Term != ls.term {
-		return dserror.ErrInvalidTerm
+		return constant.ErrInvalidTerm
 	}
 
-	ls.log.Debug(
-		"Add entry",
-		slog.Int64("commit-offset", req.CommitOffset),
-		slog.Int64("offset", req.Entry.Offset),
-	)
+	ls.cumulativeAcks.Store(req.CumulativeAcksSupported)
+
+	// This runs once per replicated entry: skip the attribute boxing entirely
+	// when debug logging is off, and check the level once for both call sites.
+	debugEnabled := ls.log.Enabled(context.Background(), slog.LevelDebug)
+
+	if req.Entry == nil {
+		// Entry-less commit-offset advertisement: the leader sends it to an
+		// observer parked at the head of the wal when the commit offset
+		// advances with no new entries to piggyback it on. Nothing to append:
+		// take the new commit offset and wake up the syncer, which in turn
+		// nudges the state applier.
+		if debugEnabled {
+			ls.log.Debug(
+				"Received commit-offset advertisement",
+				slog.Int64("commit-offset", req.CommitOffset),
+			)
+		}
+		ls.advertisedCommitOffset.Store(req.CommitOffset)
+		channel.PushNoBlock(syncCond, struct{}{})
+		return nil
+	}
+
+	if debugEnabled {
+		ls.log.Debug(
+			"Add entry",
+			slog.Int64("commit-offset", req.CommitOffset),
+			slog.Int64("offset", req.Entry.Offset),
+		)
+	}
 
 	onAppend()
 
 	lastAppendedOffset := ls.lastAppendedOffset.Load()
 	if req.Entry.Offset <= lastAppendedOffset {
 		// This was a duplicated request. We already have this entry
-		ls.log.Debug(
-			"Ignoring duplicated entry",
-			slog.Int64("commit-offset", req.CommitOffset),
-			slog.Int64("offset", req.Entry.Offset),
-		)
-		return stream.Send(&proto.Ack{Offset: req.Entry.Offset})
+		if debugEnabled {
+			ls.log.Debug(
+				"Ignoring duplicated entry",
+				slog.Int64("commit-offset", req.CommitOffset),
+				slog.Int64("offset", req.Entry.Offset),
+			)
+		}
+
+		// Only request a re-ack for what is already synced: the leader
+		// accounts the ack, cumulatively, as durable. A duplicate that is
+		// appended but not synced yet is acknowledged by the sync round
+		// itself. Either way the ack is sent by the syncer goroutine: gRPC
+		// streams do not support concurrent Send() calls, and the syncer is
+		// already sending on this stream.
+		if req.Entry.Offset <= ls.wal.LastOffset() {
+			ls.requestReAck(req.Entry.Offset)
+		}
+		channel.PushNoBlock(syncCond, struct{}{})
+		return nil
+	}
+
+	// A gap between the last known offset and the incoming entry means
+	// entries were lost in transit: reject the append and let the leader
+	// re-establish the stream from the last acked position. The WAL
+	// contiguity check cannot catch a gap when the WAL is empty (a follower
+	// bootstrapped from a snapshot legitimately starts at an arbitrary
+	// offset), and accepting it would let the follower ack entries it does
+	// not have.
+	if req.Entry.Offset != lastAppendedOffset+1 {
+		return fmt.Errorf("entry %d can not immediately follow %d: %w",
+			req.Entry.Offset, lastAppendedOffset, wal.ErrInvalidNextOffset)
 	}
 
 	// Append the entry asynchronously, passing the previous CRC from the leader.
@@ -146,6 +211,22 @@ func (ls *LogSynchronizer) append0(stream proto.OxiaLogReplication_ReplicateServ
 	return nil
 }
 
+// requestReAck records the offset of a duplicated entry so that the syncer
+// goroutine can send the ack.
+func (ls *LogSynchronizer) requestReAck(offset int64) {
+	ls.reAckMutex.Lock()
+	defer ls.reAckMutex.Unlock()
+	ls.reAckOffsets = append(ls.reAckOffsets, offset)
+}
+
+func (ls *LogSynchronizer) takeReAcks() []int64 {
+	ls.reAckMutex.Lock()
+	defer ls.reAckMutex.Unlock()
+	offsets := ls.reAckOffsets
+	ls.reAckOffsets = nil
+	return offsets
+}
+
 func (ls *LogSynchronizer) bgSyncer(stream proto.OxiaLogReplication_ReplicateServer, syncCond chan struct{}, stateApplierCond chan struct{}) error {
 	for {
 		select {
@@ -157,15 +238,45 @@ func (ls *LogSynchronizer) bgSyncer(stream proto.OxiaLogReplication_ReplicateSer
 				return err
 			}
 			newHeadOffset := ls.wal.LastOffset()
-			// Ack all the entries that were synced in the last round
-			for offset := oldHeadOffset + 1; offset <= newHeadOffset; offset++ {
-				if err := stream.Send(&proto.Ack{Offset: offset}); err != nil {
-					return err
-				}
+			if err := ls.sendAcks(stream, oldHeadOffset, newHeadOffset); err != nil {
+				return err
 			}
 			channel.PushNoBlock(stateApplierCond, struct{}{})
 		}
 	}
+}
+
+// sendAcks acknowledges the re-ack requests for duplicated entries and the
+// entries synced in the last round.
+func (ls *LogSynchronizer) sendAcks(stream proto.OxiaLogReplication_ReplicateServer, oldHeadOffset int64,
+	newHeadOffset int64) error {
+	reAcks := ls.takeReAcks()
+
+	if ls.cumulativeAcks.Load() {
+		// A single cumulative ack at the durable head covers both the
+		// re-acked duplicates and the entries synced in the last round.
+		// Always ack the head, not the duplicated offsets: it lets a
+		// reconnecting leader skip everything the follower already has.
+		if len(reAcks) == 0 && newHeadOffset <= oldHeadOffset {
+			return nil
+		}
+		return stream.Send(&proto.Ack{Offset: newHeadOffset})
+	}
+
+	// The leader did not advertise cumulative-ack support (older version):
+	// it accounts acks individually, so re-ack each duplicate and then ack
+	// every entry synced in the last round
+	for _, offset := range reAcks {
+		if err := stream.Send(&proto.Ack{Offset: offset}); err != nil {
+			return err
+		}
+	}
+	for offset := oldHeadOffset + 1; offset <= newHeadOffset; offset++ {
+		if err := stream.Send(&proto.Ack{Offset: offset}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func NewLogSynchronizer(params LogSynchronizerParams) *LogSynchronizer {

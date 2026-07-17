@@ -50,22 +50,23 @@ if [ -d "${GOOGLE_DIR}" ]; then
     fi
 fi
 
-# 4. Clean and Assemble (only the two files actually needed at compile time)
+# 4. Clean and Assemble (only the files actually needed at compile time)
 rm -rf "${GOOGLE_DIR}"
 mkdir -p "${GOOGLE_DIR}/google/rpc"
 mkdir -p "${GOOGLE_DIR}/google/protobuf"
 
 # status.proto is the only google/rpc file compiled
 cp "${API_TMP}/google/rpc/status.proto" "${GOOGLE_DIR}/google/rpc/"
+cp "${API_TMP}/google/rpc/error_details.proto" "${GOOGLE_DIR}/google/rpc/"
 
 # any.proto is imported by status.proto; all other WKTs are provided by prost-types
 cp "${CORE_TMP}/src/google/protobuf/any.proto" "${GOOGLE_DIR}/google/protobuf/"
 
 # 5. Record versions for forensics
 {
-  echo "googleapis-version: $(git -C "${API_TMP}" rev-parse HEAD)"
-  echo "protobuf-version: $(git -C "${CORE_TMP}" rev-parse HEAD)"
-} > google-protos.version
+    echo "googleapis-version: $(git -C "${API_TMP}" rev-parse HEAD)"
+    echo "protobuf-version: $(git -C "${CORE_TMP}" rev-parse HEAD)"
+} >google-protos.version
 
 git add google-protos.version "${GOOGLE_DIR}/"
 

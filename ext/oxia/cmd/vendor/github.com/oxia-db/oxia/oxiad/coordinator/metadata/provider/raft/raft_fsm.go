@@ -1,0 +1,219 @@
+// Copyright 2023-2026 The Oxia Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package raft
+
+import (
+	"encoding/json"
+	"io"
+	"log/slog"
+	"sync"
+
+	"github.com/hashicorp/raft"
+	"go.uber.org/multierr"
+
+	metadatacodec "github.com/oxia-db/oxia/oxiad/coordinator/metadata/common/codec"
+)
+
+type raftOpCmd struct {
+	Key             string          `json:"key"`
+	NewState        json.RawMessage `json:"new_state"`
+	ExpectedVersion int64           `json:"expected_version"`
+}
+
+type stateContainer struct {
+	// Guards Documents: Apply and Restore mutate it on the raft FSM
+	// goroutine, while the providers read it through documentState
+	mu          sync.RWMutex
+	Documents   map[string]*documentContainer `json:"-"`
+	logger      *slog.Logger
+	interceptor Interceptor
+}
+
+func newStateContainer(logger *slog.Logger, interceptor Interceptor) *stateContainer {
+	return &stateContainer{
+		Documents:   map[string]*documentContainer{},
+		logger:      logger,
+		interceptor: interceptor,
+	}
+}
+
+// Apply applies a Raft log entry to the FSM.
+func (sc *stateContainer) Apply(logEntry *raft.Log) any {
+	// Each log entry contains the whole state
+	opCmd := raftOpCmd{}
+	err := json.Unmarshal(logEntry.Data, &opCmd)
+	if err != nil {
+		sc.logger.Error("failed to deserialize state",
+			slog.Any("error", err))
+		return &applyResult{changeApplied: false}
+	}
+	if opCmd.Key == "" {
+		opCmd.Key = metadatacodec.ClusterStatusCodec.GetKey()
+	}
+
+	sc.mu.Lock()
+	document := sc.document(opCmd.Key)
+	if opCmd.ExpectedVersion != document.CurrentVersion {
+		currentVersion := document.CurrentVersion
+		sc.mu.Unlock()
+
+		sc.logger.Warn("Failed to apply raft state",
+			slog.String("key", opCmd.Key),
+			slog.Int64("expected-version", opCmd.ExpectedVersion),
+			slog.Int64("current-version", currentVersion),
+			slog.Any("proposed-state", opCmd.NewState))
+
+		return &applyResult{changeApplied: false}
+	}
+
+	document.State = cloneBytes(opCmd.NewState)
+	document.CurrentVersion++
+	state, newVersion := document.State, document.CurrentVersion
+	sc.mu.Unlock()
+
+	if sc.interceptor != nil {
+		sc.interceptor.OnApplied(opCmd.Key, state, newVersion)
+	}
+
+	sc.logger.Info("Applied raft log entry",
+		slog.String("key", opCmd.Key),
+		slog.Int64("new-version", newVersion))
+	return &applyResult{changeApplied: true, newVersion: newVersion}
+}
+
+// Snapshot returns a snapshot of the FSM.
+func (sc *stateContainer) Snapshot() (raft.FSMSnapshot, error) {
+	sc.mu.RLock()
+	defer sc.mu.RUnlock()
+
+	return &stateContainer{
+		Documents: cloneDocuments(sc.Documents),
+	}, nil
+}
+
+// Restore stores the key-value pairs from a snapshot.
+func (sc *stateContainer) Restore(rc io.ReadCloser) error {
+	dec := json.NewDecoder(rc)
+	persisted := &persistedStateContainer{}
+	if err := dec.Decode(persisted); err != nil {
+		return multierr.Combine(err, rc.Close())
+	}
+
+	sc.logger.Info("Restored metadata state from snapshot",
+		slog.Int("documents", len(persisted.Documents)))
+
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+
+	if len(persisted.Documents) > 0 {
+		sc.Documents = cloneDocuments(persisted.Documents)
+		return rc.Close()
+	}
+
+	sc.Documents = map[string]*documentContainer{
+		metadatacodec.ClusterStatusCodec.GetKey(): {
+			State:          cloneBytes(persisted.State),
+			CurrentVersion: persisted.CurrentVersion,
+		},
+	}
+	return rc.Close()
+}
+
+func (sc *stateContainer) Persist(sink raft.SnapshotSink) error {
+	payload, err := marshalStateContainer(sc)
+	if err != nil {
+		return multierr.Combine(err, sink.Cancel())
+	}
+
+	if _, err = sink.Write(payload); err != nil {
+		// Cancel discards the snapshot: it must only be called on failure,
+		// or no snapshot is ever retained while the raft log still gets
+		// compacted, losing the state on the next restart
+		return multierr.Combine(err, sink.Cancel())
+	}
+	if err := sink.Close(); err != nil {
+		return multierr.Combine(err, sink.Cancel())
+	}
+	return nil
+}
+
+func (*stateContainer) Release() {}
+
+type applyResult struct {
+	changeApplied bool
+	newVersion    int64
+}
+
+type persistedStateContainer struct {
+	Documents      map[string]*documentContainer `json:"documents,omitempty"`
+	State          json.RawMessage               `json:"state,omitempty"`
+	CurrentVersion int64                         `json:"current_version,omitempty"`
+}
+
+type documentContainer struct {
+	State          json.RawMessage `json:"state"`
+	CurrentVersion int64           `json:"current_version"`
+}
+
+func marshalStateContainer(sc *stateContainer) ([]byte, error) {
+	return json.Marshal(persistedStateContainer{
+		Documents: cloneDocuments(sc.Documents),
+	})
+}
+
+// document returns the container for a key, creating it when absent.
+// It must be called while holding mu.
+func (sc *stateContainer) document(key string) *documentContainer {
+	document, ok := sc.Documents[key]
+	if !ok {
+		document = &documentContainer{CurrentVersion: -1}
+		sc.Documents[key] = document
+	}
+	return document
+}
+
+// documentState returns the current state and version of a document, without
+// creating it when absent: an absent document reports version -1. The state
+// slice is replaced wholesale on every apply, never mutated in place, so it
+// is safe to hand out.
+func (sc *stateContainer) documentState(key string) ([]byte, int64) {
+	sc.mu.RLock()
+	defer sc.mu.RUnlock()
+
+	if document, ok := sc.Documents[key]; ok {
+		return document.State, document.CurrentVersion
+	}
+	return nil, -1
+}
+
+func cloneDocuments(documents map[string]*documentContainer) map[string]*documentContainer {
+	cloned := make(map[string]*documentContainer, len(documents))
+	for key, document := range documents {
+		cloned[key] = &documentContainer{
+			State:          cloneBytes(document.State),
+			CurrentVersion: document.CurrentVersion,
+		}
+	}
+	return cloned
+}
+
+func cloneBytes(data []byte) []byte {
+	if data == nil {
+		return nil
+	}
+	cloned := make([]byte, len(data))
+	copy(cloned, data)
+	return cloned
+}

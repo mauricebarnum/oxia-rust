@@ -204,12 +204,12 @@ func (so *SchedulerOptions) Validate() error {
 }
 
 type FeatureFlagsOptions struct {
-	AuthorityValidation *bool `yaml:"authorityValidation,omitempty" json:"authorityValidation,omitempty" jsonschema:"description=Enable public RPC authority validation against shard assignments,default=false"`
+	AuthorityValidation *bool `yaml:"authorityValidation,omitempty" json:"authorityValidation,omitempty" jsonschema:"description=Enable public RPC authority validation against shard assignments,default=true"`
 }
 
 func (fo *FeatureFlagsOptions) IsAuthorityValidationEnabled() bool {
 	if fo.AuthorityValidation == nil {
-		return false
+		return true
 	}
 	return *fo.AuthorityValidation
 }
@@ -217,6 +217,7 @@ func (fo *FeatureFlagsOptions) IsAuthorityValidationEnabled() bool {
 func (fo *FeatureFlagsOptions) WithDefault() {
 	if fo.AuthorityValidation == nil {
 		fo.AuthorityValidation = new(bool)
+		*fo.AuthorityValidation = true
 	}
 }
 

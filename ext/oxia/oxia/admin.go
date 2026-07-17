@@ -1,4 +1,4 @@
-// Copyright 2023-2025 The Oxia Authors
+// Copyright 2023-2026 The Oxia Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
 package oxia
 
 import (
+	"context"
 	"io"
 
 	"github.com/oxia-db/oxia/common/proto"
@@ -23,32 +24,19 @@ import (
 type AdminClient interface {
 	io.Closer
 
-	ListDataServers() ([]*proto.DataServer, error)
-	GetDataServer(dataServer string) (*proto.DataServerInfo, error)
+	ListDataServers(ctx context.Context) ([]*proto.DataServerView, error)
+	GetDataServer(ctx context.Context, dataServer string) (*proto.DataServerView, error)
+	CreateDataServer(ctx context.Context, dataServer *proto.DataServer) (*proto.DataServer, error)
+	PatchDataServer(ctx context.Context, dataServer *proto.DataServer) (*proto.DataServer, error)
+	DeleteDataServer(ctx context.Context, dataServer string) (*proto.DataServer, error)
 
-	ListNamespaces() *ListNamespacesResult
+	CreateNamespace(ctx context.Context, namespace *proto.Namespace) (*proto.Namespace, error)
+	PatchNamespace(ctx context.Context, namespace *proto.Namespace) (*proto.Namespace, error)
+	DeleteNamespace(ctx context.Context, namespace string) (*proto.Namespace, error)
+	ListNamespaces(ctx context.Context) ([]*proto.NamespaceView, error)
+	GetNamespace(ctx context.Context, namespace string) (*proto.NamespaceView, error)
 
-	// Deprecated: Use ListDataServers instead.
-	ListNodes() *ListNodesResult
-
-	SplitShard(namespace string, shardId int64, splitPoint *uint32) *SplitShardResult
-}
-
-type ListNamespacesResult struct {
-	Namespaces []string
-	Error      error
-}
-
-type Node struct {
-	Name            *string
-	PublicAddress   string
-	InternalAddress string
-	Metadata        map[string]string
-}
-
-type ListNodesResult struct {
-	Nodes []*Node
-	Error error
+	SplitShard(ctx context.Context, namespace string, shardId int64, splitPoint *uint32) *SplitShardResult
 }
 
 type SplitShardResult struct {
