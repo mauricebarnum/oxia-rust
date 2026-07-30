@@ -1055,6 +1055,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shlex",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",

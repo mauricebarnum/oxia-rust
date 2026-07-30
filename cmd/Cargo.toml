@@ -58,3 +58,4 @@ opentelemetry_sdk = { version = "0.32.1", default-features = false, features = [
     "metrics",
     "testing",
 ] }
+tempfile = "3.27.0"

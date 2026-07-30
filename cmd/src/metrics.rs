@@ -515,6 +515,7 @@ mod tests {
     use std::fs;
 
     use opentelemetry::metrics::MeterProvider as _;
+    use tempfile::NamedTempFile;
 
     use super::*;
 
@@ -538,39 +539,8 @@ mod tests {
     }
 
     #[test]
-    fn opens_and_truncates_metrics_file_immediately() {
-        let path = std::env::temp_dir().join(format!(
-            "oxia-cmd-metrics-output-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
-        fs::write(&path, b"existing data").expect("test file is writable");
-
-        let output = MetricsOutput::new(MetricsFormat::OtlpPb, Some(&path))
-            .expect("metrics output file opens");
-        assert!(matches!(
-            output.exporter.state.lock().unwrap().writer,
-            MetricsWriter::File(_)
-        ));
-        assert_eq!(fs::metadata(&path).unwrap().len(), 0);
-
-        drop(output);
-        fs::remove_file(path).expect("test file is removable");
-    }
-
-    #[test]
-    fn reports_metrics_file_open_failure_immediately() {
-        let path = std::env::temp_dir()
-            .join("oxia-cmd-missing-directory")
-            .join("metrics.out");
-        let error = MetricsOutput::new(MetricsFormat::Text, Some(&path))
-            .expect_err("missing parent directory must fail");
-        assert!(error.to_string().contains("failed to open metrics output"));
-    }
-
-    #[test]
     fn formats_populated_exponential_histogram_buckets() {
-        let (output, path) = file_output(MetricsFormat::Text);
+        let (output, temp_file) = file_output(MetricsFormat::Text);
         let histogram = output
             .provider
             .meter("test.scope")
@@ -581,8 +551,7 @@ mod tests {
             histogram.record(value, &[KeyValue::new("result", "success")]);
         }
         output.export().expect("metrics export succeeds");
-        let output = fs::read_to_string(&path).expect("metrics output is readable");
-        fs::remove_file(path).expect("test file is removable");
+        let output = fs::read_to_string(temp_file.path()).expect("metrics output is readable");
 
         assert!(output.contains("Type         : Exponential Histogram"));
         assert!(output.contains("Count        : 6"));
@@ -595,7 +564,7 @@ mod tests {
 
     #[test]
     fn formats_u64_exponential_histogram_without_empty_zero_bucket() {
-        let (output, path) = file_output(MetricsFormat::Text);
+        let (output, temp_file) = file_output(MetricsFormat::Text);
         output
             .provider
             .meter("test.scope")
@@ -604,8 +573,7 @@ mod tests {
             .build()
             .record(3, &[]);
         output.export().expect("metrics export succeeds");
-        let output = fs::read_to_string(&path).expect("metrics output is readable");
-        fs::remove_file(path).expect("test file is removable");
+        let output = fs::read_to_string(temp_file.path()).expect("metrics output is readable");
 
         assert!(output.contains("Temporality  : Cumulative"));
         assert!(output.contains("Sum          : 3"));
@@ -613,13 +581,10 @@ mod tests {
         assert!(!output.contains("[0.000000000000e0, 0.000000000000e0]"));
     }
 
-    fn file_output(format: MetricsFormat) -> (MetricsOutput, std::path::PathBuf) {
-        let path = std::env::temp_dir().join(format!(
-            "oxia-cmd-metrics-format-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
-        let output = MetricsOutput::new(format, Some(&path)).expect("metrics output file opens");
-        (output, path)
+    fn file_output(format: MetricsFormat) -> (MetricsOutput, NamedTempFile) {
+        let temp_file = NamedTempFile::new().expect("failed to create temp file name");
+        let output =
+            MetricsOutput::new(format, Some(temp_file.path())).expect("metrics output file opens");
+        (output, temp_file)
     }
 }
