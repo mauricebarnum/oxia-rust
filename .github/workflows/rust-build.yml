@@ -149,6 +149,54 @@ jobs:
           # shellcheck disable=SC2086
           CARGO_BUILD_WARNINGS=deny cargo clippy $RELEASE_FLAG --no-deps --frozen --all-targets --features metrics
 
+      - name: check-external-types
+        run: |
+          cd client
+
+          # 1. Target the PR base branch or default branch
+          BASE_BRANCH="${{ github.base_ref }}"
+          BASE_BRANCH="${BASE_BRANCH:-main}"
+
+          # Ensure origin/BASE_BRANCH is fetched
+          git fetch origin "$BASE_BRANCH" || true
+
+          # 2. Find the most recent branch point (merge-base)
+          TARGET_REF=$(git merge-base HEAD "origin/$BASE_BRANCH" 2>/dev/null || true)
+          CURRENT_HEAD=$(git rev-parse HEAD 2>/dev/null || true)
+
+          # If on the main branch itself (where merge-base == HEAD) or merge-base failed:
+          if [ -z "$TARGET_REF" ] || [ "$TARGET_REF" = "$CURRENT_HEAD" ]; then
+            if [ -n "${{ github.event.before }}" ] && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+              TARGET_REF="${{ github.event.before }}"
+            else
+              TARGET_REF="HEAD~1"
+            fi
+          fi
+
+          # 3. Diff against the branch point
+          SKIP_CHECK=0
+          if git rev-parse --verify "$TARGET_REF" >/dev/null 2>&1; then
+            CARGO_CHANGED=$(git diff --name-only "$TARGET_REF" HEAD -- Cargo.toml Cargo.lock 2>/dev/null || true)
+            PUB_TOUCHED=$(git diff "$TARGET_REF" HEAD -U0 -- 'src/**/*.rs' 'src/*.rs' 2>/dev/null \
+              | grep -E '^[+-]\s*pub\b' \
+              | grep -vE 'pub\s*\(\s*(crate|super|in\b)' || true)
+
+            if [ -z "$CARGO_CHANGED" ] && [ -z "$PUB_TOUCHED" ]; then
+              SKIP_CHECK=1
+            fi
+          else
+            echo "Warning: Target ref $TARGET_REF unresolvable. Running full check."
+          fi
+
+          # 4. Decision
+          if [ "$SKIP_CHECK" -eq 1 ]; then
+            echo "No public API or dependency changes since branching off $BASE_BRANCH. Skipping check-external-types."
+            exit 0
+          fi
+
+          echo "Public API or dependencies changed. Running full check..."
+          cargo +"$RUST_VERSION_EXTERNAL_TYPES" check-external-types --all-features
+
       - name: test
         timeout-minutes: 15
         run: |
@@ -159,11 +207,6 @@ jobs:
         run: |
           # shellcheck disable=SC2086
           cargo test --doc $RELEASE_FLAG --frozen --verbose
-
-      - name: check-external-types
-        run: |
-          cd client
-          cargo +"$RUST_VERSION_EXTERNAL_TYPES" check-external-types --all-features
 
       - name: miri-client
         run: |
