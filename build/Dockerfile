@@ -135,27 +135,14 @@ RUN cargo +nightly clean \
 FROM source-context AS final-cargo-home
 RUN rm -f "${CARGO_HOME}/bin/cargo-binstall"
 
-# ===== 6. Final Assembly (The Fan-In) =====
-FROM os-base AS final
+# ===== 6. Final Filesystem Assembly (The Fan-In) =====
+FROM scratch AS final-filesystem
 ARG CARGO_HOME
 ARG RUSTUP_HOME
-ARG HOME
-ARG RUSTFLAGS
-ARG RUST_VERSION_EXTERNAL_TYPES
 
+COPY --from=os-base / /
 COPY --from=final-cargo-home ${CARGO_HOME} ${CARGO_HOME}
 COPY --from=source-context ${RUSTUP_HOME} ${RUSTUP_HOME}
-
-ENV CARGO_HOME=${CARGO_HOME} \
-    RUSTUP_HOME=${RUSTUP_HOME} \
-    RUSTFLAGS="${RUSTFLAGS}" \
-    RUSTC_WRAPPER="sccache" \
-    CARGO_TARGET_DIR=${HOME}/deps/target \
-    MIRI_SYSROOT=${HOME}/.cache/miri \
-    RUST_VERSION_EXTERNAL_TYPES="${RUST_VERSION_EXTERNAL_TYPES}" \
-    XDG_CACHE_HOME="${HOME}/.cache" \
-    PATH=${CARGO_HOME}/bin:${RUSTUP_HOME}/bin:$PATH
-
 COPY build/cargo-config.toml ${CARGO_HOME}/config.toml
 
 # FIX: Isolated graph paths. Instead of importing the shared parent directory,
@@ -165,4 +152,24 @@ COPY --from=build-ci-debug /root/deps/target/ci-debug/ /root/deps/target/ci-debu
 COPY --from=build-miri-final-artifacts /root/deps/target/miri/ /root/deps/target/miri/
 COPY --from=build-miri-final-artifacts /root/.cache/miri/      /root/.cache/miri/
 
-WORKDIR ${HOME}
+# Collapse the assembled filesystem into one published layer. The fan-in stage
+# above retains granular BuildKit cache inputs, while changes to any input may
+# intentionally rebuild this complete final layer.
+FROM scratch AS final
+ARG CARGO_HOME
+ARG RUSTUP_HOME
+ARG HOME
+ARG RUSTFLAGS
+ARG RUST_VERSION_EXTERNAL_TYPES
+
+COPY --from=final-filesystem / /
+
+ENV CARGO_HOME=${CARGO_HOME} \
+    RUSTUP_HOME=${RUSTUP_HOME} \
+    RUSTFLAGS="${RUSTFLAGS}" \
+    RUSTC_WRAPPER="sccache" \
+    CARGO_TARGET_DIR=${HOME}/deps/target \
+    MIRI_SYSROOT=${HOME}/.cache/miri \
+    RUST_VERSION_EXTERNAL_TYPES="${RUST_VERSION_EXTERNAL_TYPES}" \
+    XDG_CACHE_HOME="${HOME}/.cache" \
+    PATH=${CARGO_HOME}/bin:${RUSTUP_HOME}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
