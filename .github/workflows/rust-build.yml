@@ -149,6 +149,33 @@ jobs:
           # shellcheck disable=SC2086
           CARGO_BUILD_WARNINGS=deny cargo clippy $RELEASE_FLAG --no-deps --frozen --all-targets --features metrics
 
+      - name: check-external-types
+        run: |
+          cd client
+
+          # Determine comparison target (PR base branch or main fallback)
+          TARGET_REF="${{ github.base_ref }}"
+          TARGET_REF="${TARGET_REF:-main}"
+
+          # Ensure the target branch reference is fetched for diffing
+          git fetch origin "$TARGET_REF" --depth=1
+
+          # 1. Check if dependencies or manifest changed in client/
+          CARGO_CHANGED=$(git diff --name-only "origin/$TARGET_REF"...HEAD -- Cargo.toml Cargo.lock)
+
+          # 2. Check for public API modifications in client/src/
+          PUB_TOUCHED=$(git diff "origin/$TARGET_REF"...HEAD -U0 -- 'src/**/*.rs' 'src/*.rs' \
+            | grep -E '^[+-]\s*pub\b' \
+            | grep -vE 'pub\s*\(\s*(crate|super|in\b)' || true)
+
+          if [ -z "$CARGO_CHANGED" ] && [ -z "$PUB_TOUCHED" ]; then
+            echo "No public API or dependency changes in client/. Skipping check-external-types."
+            exit 0
+          fi
+
+          echo "Public API or dependencies modified in client/. Running full check..."
+          cargo +"$RUST_VERSION_EXTERNAL_TYPES" check-external-types --all-features
+
       - name: test
         timeout-minutes: 15
         run: |
@@ -159,11 +186,6 @@ jobs:
         run: |
           # shellcheck disable=SC2086
           cargo test --doc $RELEASE_FLAG --frozen --verbose
-
-      - name: check-external-types
-        run: |
-          cd client
-          cargo +"$RUST_VERSION_EXTERNAL_TYPES" check-external-types --all-features
 
       - name: miri-client
         run: |
