@@ -55,11 +55,11 @@ docs/
 doc/
 site/
 
-# Ignore build support files by default. Re-include only files the Dockerfile
-# actually reads from the context.
+# Ignore build support files by default. Docker sends the Dockerfile and this
+# ignore file to the builder even when excluded, but keeping them out of
+# `COPY . .` prevents fan-in-only changes from invalidating producer stages.
+# Re-include only the file copied into an image stage.
 build/**
-!build/Dockerfile
-!build/Dockerfile.dockerignore
 !build/cargo-config.toml
 
 # -----------------------------------------------------------------------------
