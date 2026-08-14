@@ -14,7 +14,8 @@ CORE_VERSION="${2-${DEFAULT_CORE_VERSION}}"
 API_REPO=https://github.com/googleapis/googleapis
 CORE_REPO=https://github.com/protocolbuffers/protobuf
 
-GOOGLE_DIR="google-protos"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GOOGLE_DIR="${SCRIPT_DIR}/google-protos"
 
 # Temporary location setup
 tmp_dir="$(mktemp -d)"
@@ -44,7 +45,7 @@ git -C "${CORE_TMP}" checkout "${CORE_VERSION}"
 
 # 3. Safety check for uncommitted changes
 if [ -d "${GOOGLE_DIR}" ]; then
-    if ! git diff --quiet HEAD -- "${GOOGLE_DIR}" || ! git diff --cached --quiet -- "${GOOGLE_DIR}"; then
+    if ! git -C "${SCRIPT_DIR}" diff --quiet HEAD -- "${GOOGLE_DIR}" || ! git -C "${SCRIPT_DIR}" diff --cached --quiet -- "${GOOGLE_DIR}"; then
         echo "Error: ${GOOGLE_DIR} has uncommitted changes. Commit or stash them first."
         exit 1
     fi
@@ -66,8 +67,8 @@ cp "${CORE_TMP}/src/google/protobuf/any.proto" "${GOOGLE_DIR}/google/protobuf/"
 {
     echo "googleapis-version: $(git -C "${API_TMP}" rev-parse HEAD)"
     echo "protobuf-version: $(git -C "${CORE_TMP}" rev-parse HEAD)"
-} >google-protos.version
+} >"${SCRIPT_DIR}/google-protos.version"
 
-git add google-protos.version "${GOOGLE_DIR}/"
+git -C "${SCRIPT_DIR}" add "${SCRIPT_DIR}/google-protos.version" "${GOOGLE_DIR}/"
 
 echo "Successfully vendored Google protos to ${GOOGLE_DIR}"
