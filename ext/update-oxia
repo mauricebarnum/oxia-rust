@@ -9,7 +9,8 @@ VERSION="${1-${DEFAULT_VERSION}}"
 DEFAULT_REPO=https://github.com/oxia-db/oxia
 REPO="${2-${DEFAULT_REPO}}"
 
-OXIA_DIR="oxia"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+OXIA_DIR="${SCRIPT_DIR}/oxia"
 OXIA_SUBDIRS="cmd common oxia oxiad"
 
 # Temporary location
@@ -39,7 +40,7 @@ git -C "${OXIA_TMP}" sparse-checkout set ${OXIA_SUBDIRS}
 )
 
 if [ -d "${OXIA_DIR}" ]; then
-    if ! git diff --quiet HEAD -- "${OXIA_DIR}" || ! git diff --cached --quiet -- "${OXIA_DIR}"; then
+    if ! git -C "${SCRIPT_DIR}" diff --quiet HEAD -- "${OXIA_DIR}" || ! git -C "${SCRIPT_DIR}" diff --cached --quiet -- "${OXIA_DIR}"; then
         echo "Error: ${OXIA_DIR} has uncommitted changes. Commit or stash them first."
         exit 1
     fi
@@ -59,8 +60,8 @@ cmd/*/*/oxia
 *.test
 EOF
 
-git -C "${OXIA_TMP}" rev-parse HEAD >oxia.version
-git add update-oxia oxia.version "${OXIA_DIR}/"
+git -C "${OXIA_TMP}" rev-parse HEAD >"${SCRIPT_DIR}/oxia.version"
+git -C "${SCRIPT_DIR}" add "${SCRIPT_DIR}/update-oxia" "${SCRIPT_DIR}/oxia.version" "${OXIA_DIR}/"
 
 echo "Successfully updated ${OXIA_DIR} to ${VERSION}"
 echo "Review changes with: git status"
