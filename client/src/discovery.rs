@@ -111,18 +111,17 @@ impl ServiceDiscovery for CoordinatorServiceDiscovery {
                         let data_servers = resp.into_inner().data_servers;
                         let addrs: Vec<String> = data_servers
                             .into_iter()
-                            .filter_map(|view| view.data_server)
-                            .filter_map(|server| server.identity)
-                            .map(|identity| identity.public)
-                            .filter(|addr| !addr.is_empty())
+                            .filter_map(|view| {
+                                let addr = view.data_server?.identity?.public;
+                                (!addr.is_empty()).then_some(addr)
+                            })
                             .collect();
+                        debug!(
+                            count = addrs.len(),
+                            "discovered addresses via ListDataServers"
+                        );
                         if addrs.is_empty() {
                             warn!("ListDataServers returned no addresses");
-                        } else {
-                            debug!(
-                                count = addrs.len(),
-                                "discovered addresses via ListDataServers"
-                            );
                         }
                         addrs
                     }
