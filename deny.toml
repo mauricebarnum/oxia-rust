@@ -10,8 +10,13 @@ no-default-features = false
 feature-depth = 1
 
 [advisories]
-# Leave empty unless you have a documented exception.
 ignore = [
+    { id = "RUSTSEC-2026-0118", reason = "grpc 0.9.0 pin hickory-proto 0.25.x: unbounded loop in NSEC3 closest-encloser proof" },
+    { id = "RUSTSEC-2026-0119", reason = "grpc 0.0.0 pin: hickory-proto 0.25.x: O(n²) name compression CPU exhaustion" },
+    { id = "RUSTSEC-2026-0049", reason = "grpc 0.0.0 pin: rustls-webpki 0.102.x: CRL distribution point matching" },
+    { id = "RUSTSEC-2026-0098", reason = "grpc 0.0.0 pin: rustls-webpki 0.102.x: URI name constraints" },
+    { id = "RUSTSEC-2026-0099", reason = "grpc 0.0.0 pin: rustls-webpki 0.102.x: wildcard name constraints" },
+    { id = "RUSTSEC-2026-0104", reason = "grpc 0.0.0 pin: rustls-webpki 0.102.x: CRL parsing panic" },
 ]
 
 # Fail CI if Cargo.lock contains a yanked crate.
@@ -32,6 +37,8 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "BSL-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
     "MIT",
     "Unicode-3.0",
     "Unlicense",
@@ -49,8 +56,7 @@ exceptions = [
 
 [licenses.private]
 ignore = false
-registries = [
-]
+registries = []
 
 [bans]
 # Duplicate transitive versions are often normal Rust ecosystem churn.
@@ -65,17 +71,13 @@ highlight = "all"
 workspace-default-features = "allow"
 external-default-features = "allow"
 
-allow = [
-]
+allow = []
 
-deny = [
-]
+deny = []
 
-skip = [
-]
+skip = []
 
-skip-tree = [
-]
+skip-tree = []
 
 [sources]
 # Only crates.io registry dependencies should appear unless explicitly allowed.
@@ -84,17 +86,11 @@ unknown-registry = "deny"
 # Git dependencies can be legitimate, but should remain visible.
 unknown-git = "warn"
 
-allow-registry = [
-    "https://github.com/rust-lang/crates.io-index",
-]
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 
-allow-git = [
-]
+allow-git = []
 
 [sources.allow-org]
-github = [
-]
-gitlab = [
-]
-bitbucket = [
-]
+github = []
+gitlab = []
+bitbucket = []

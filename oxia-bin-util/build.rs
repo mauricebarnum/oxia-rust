@@ -31,8 +31,8 @@ const OXIA_BIN: &str = "oxia";
 
 // Derive .../target/{profile} from OUT_DIR
 fn get_target_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let out_dir = PathBuf::from(env::var("OUT_DIR")?);
-    let profile = env::var("PROFILE")?;
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let profile = env::var_os("PROFILE").unwrap();
     let mut sub_path = out_dir.as_path();
 
     while let Some(parent) = sub_path.parent() {
