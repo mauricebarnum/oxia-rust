@@ -4,7 +4,7 @@ ARG RUSTUP_HOME=/root/.rustup
 ARG HOME=/root
 ARG RUST_VERSION=1.97.1
 ARG RUST_VERSION_EXTERNAL_TYPES=nightly-2026-03-20
-ARG GO_VERSION=1.26.6
+ARG GO_VERSION=1.26.7
 
 # ===== 1. Toolchain & Tool Preparers =====
 FROM rust:${RUST_VERSION}-slim AS rust-stable-toolchain
