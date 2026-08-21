@@ -340,7 +340,7 @@ async fn test_partition_routing() -> Result<()> {
                 .build(),
         )
         .await?;
-    assert!(list_result.keys.is_empty());
+    assert_eq!(list_result.keys, [] as [std::string::String; 0]);
 
     Ok(())
 }
