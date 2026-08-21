@@ -30,6 +30,9 @@ fastrand = "2.5.0"
 prost = "0.14.4"
 prost-types = "0.14.4"
 opentelemetry = { version = "0.32.0", features = ["metrics"], optional = true }
+grpc = "0.9.0"
+grpc-protobuf = "0.9.0"
+protobuf = "4.34.0-release"
 
 [features]
 bench-dashmap = ["dep:dashmap"]
