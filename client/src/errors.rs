@@ -28,6 +28,8 @@ use crate::ShardId;
 /// gRPC-level routing errors (wrong leader, etc.) are represented separately on [`Error`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash, thiserror::Error)]
 pub enum OxiaError {
+    #[error("OK")]
+    Ok, // not an error
     #[error("key not found")]
     KeyNotFound,
     #[error("unexpected version ID")]
@@ -42,6 +44,7 @@ impl From<i32> for OxiaError {
     #[inline]
     fn from(code: i32) -> Self {
         match code {
+            0 => Self::Ok,
             1 => Self::KeyNotFound,
             2 => Self::UnexpectedVersionId,
             3 => Self::SessionDoesNotExist,
@@ -120,25 +123,27 @@ impl OxiaRpcError {
     }
 
     /// Returns `true` if it might make sense to retry when this error is seen.
+    ///
+    /// Retry policy intentionally differs from the Go client's `IsRetriable`
+    /// (`ext/oxia/oxia/internal/batch/rpc_errors.go`): Rust retries `Aborted`
+    /// and `ResourceUnavailable`.
     #[inline]
     pub const fn is_retryable(&self) -> bool {
-        // We avoid a default arm to ensure that all new error types are addressed intentionally
-        #[allow(clippy::match_same_arms)]
         match self {
-            Self::Aborted => true,
-            Self::InvalidStatus => true,
-            Self::NodeIsNotMember => true,
-            Self::NodeIsNotLeader => true,
-            Self::NotInitialized => true,
-            Self::ResourceUnavailable => true,
+            Self::Aborted
+            | Self::InvalidStatus
+            | Self::NodeIsNotLeader
+            | Self::NodeIsNotMember
+            | Self::NotInitialized
+            | Self::ResourceUnavailable => true,
 
-            Self::InvalidSessionTimeout => false,
-            Self::InvalidTerm => false,
-            Self::NamespaceNotFound => false,
-            Self::NotificationsNotEnabled => false,
-            Self::ResourceConflict => false,
-            Self::SessionNotFound => false,
-            Self::ShardNotFound => false,
+            Self::InvalidSessionTimeout
+            | Self::InvalidTerm
+            | Self::NamespaceNotFound
+            | Self::NotificationsNotEnabled
+            | Self::ResourceConflict
+            | Self::SessionNotFound
+            | Self::ShardNotFound => false,
         }
     }
 }
@@ -212,40 +217,366 @@ impl TryFrom<tonic::Status> for OxiaRpcError {
     type Error = tonic::Status;
 
     fn try_from(x: tonic::Status) -> Result<Self, Self::Error> {
+        match GrpcStatus::from_tonic_status(&x) {
+            GrpcStatus::Oxia(err) => Ok(err),
+            _ => Err(x),
+        }
+    }
+}
+
+/// Standard gRPC status codes (1–16).
+///
+/// Mirrors the integer `grpc-status` header value space independently of tonic.
+/// `Ok` (0) is not an error
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, thiserror::Error)]
+pub enum GrpcCode {
+    #[error("OK")]
+    Ok,
+    #[error("cancelled")]
+    Cancelled,
+    #[error("unknown")]
+    Unknown,
+    #[error("invalid argument")]
+    InvalidArgument,
+    #[error("deadline exceeded")]
+    DeadlineExceeded,
+    #[error("not found")]
+    NotFound,
+    #[error("already exists")]
+    AlreadyExists,
+    #[error("permission denied")]
+    PermissionDenied,
+    #[error("resource exhausted")]
+    ResourceExhausted,
+    #[error("failed precondition")]
+    FailedPrecondition,
+    #[error("aborted")]
+    Aborted,
+    #[error("out of range")]
+    OutOfRange,
+    #[error("unimplemented")]
+    Unimplemented,
+    #[error("internal")]
+    Internal,
+    #[error("unavailable")]
+    Unavailable,
+    #[error("data loss")]
+    DataLoss,
+    #[error("unauthenticated")]
+    Unauthenticated,
+    #[error("unknown gRPC code {0}")]
+    UnknownCode(i32),
+}
+
+impl From<i32> for GrpcCode {
+    #[inline]
+    fn from(code: i32) -> Self {
+        match code {
+            1 => Self::Cancelled,
+            2 => Self::Unknown,
+            3 => Self::InvalidArgument,
+            4 => Self::DeadlineExceeded,
+            5 => Self::NotFound,
+            6 => Self::AlreadyExists,
+            7 => Self::PermissionDenied,
+            8 => Self::ResourceExhausted,
+            9 => Self::FailedPrecondition,
+            10 => Self::Aborted,
+            11 => Self::OutOfRange,
+            12 => Self::Unimplemented,
+            13 => Self::Internal,
+            14 => Self::Unavailable,
+            15 => Self::DataLoss,
+            16 => Self::Unauthenticated,
+            n => Self::UnknownCode(n),
+        }
+    }
+}
+
+impl GrpcCode {
+    /// Convert from tonic's `Code` enum.
+    ///
+    /// `tonic::Code::Ok` is not an error; it maps to `UnknownCode(0)`.
+    #[inline]
+    const fn from_tonic(code: tonic::Code) -> Self {
+        match code {
+            tonic::Code::Ok => Self::Ok,
+            tonic::Code::Cancelled => Self::Cancelled,
+            tonic::Code::Unknown => Self::Unknown,
+            tonic::Code::InvalidArgument => Self::InvalidArgument,
+            tonic::Code::DeadlineExceeded => Self::DeadlineExceeded,
+            tonic::Code::NotFound => Self::NotFound,
+            tonic::Code::AlreadyExists => Self::AlreadyExists,
+            tonic::Code::PermissionDenied => Self::PermissionDenied,
+            tonic::Code::ResourceExhausted => Self::ResourceExhausted,
+            tonic::Code::FailedPrecondition => Self::FailedPrecondition,
+            tonic::Code::Aborted => Self::Aborted,
+            tonic::Code::OutOfRange => Self::OutOfRange,
+            tonic::Code::Unimplemented => Self::Unimplemented,
+            tonic::Code::Internal => Self::Internal,
+            tonic::Code::Unavailable => Self::Unavailable,
+            tonic::Code::DataLoss => Self::DataLoss,
+            tonic::Code::Unauthenticated => Self::Unauthenticated,
+        }
+    }
+
+    /// Returns `true` if this standard gRPC code is worth retrying.
+    ///
+    /// `Unknown` (2) is **not** retryable. Only transport-level
+    /// `Unavailable` and opaque `Internal` errors are retried at this layer.
+    #[inline]
+    pub const fn is_retryable(&self) -> bool {
+        match self {
+            Self::Internal | Self::Unavailable => true,
+
+            Self::Aborted
+            | Self::AlreadyExists
+            | Self::Cancelled
+            | Self::DataLoss
+            | Self::DeadlineExceeded
+            | Self::FailedPrecondition
+            | Self::InvalidArgument
+            | Self::NotFound
+            | Self::Ok
+            | Self::OutOfRange
+            | Self::PermissionDenied
+            | Self::ResourceExhausted
+            | Self::Unauthenticated
+            | Self::Unimplemented
+            | Self::Unknown
+            | Self::UnknownCode(_) => false,
+        }
+    }
+
+    /// Returns `true` if this code indicates a connection-level failure.
+    #[inline]
+    pub const fn is_connection_error(&self) -> bool {
+        matches!(self, Self::Unavailable)
+    }
+
+    /// Returns `true` if this code indicates the shard/resource is unavailable.
+    #[inline]
+    pub const fn is_shard_unavailable(&self) -> bool {
+        matches!(self, Self::NotFound)
+    }
+
+    /// Returns `true` if this code indicates the request went to the wrong leader.
+    #[inline]
+    pub const fn is_wrong_leader(&self) -> bool {
+        false
+    }
+}
+
+/// Unified representation of the integer `grpc-status` code space.
+///
+/// Covers standard gRPC codes (1–16) via [`GrpcCode`] and Oxia-specific codes
+/// (≥ 100) via [`OxiaRpcError`]. This is the single type the classifiers will
+/// match on; it is also the entry point for the future tonic-less client.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum GrpcStatus {
+    /// A standard gRPC status code (1–16).
+    #[error(transparent)]
+    Standard(#[from] GrpcCode),
+
+    /// An Oxia-specific gRPC status code (≥ 100).
+    #[error(transparent)]
+    Oxia(#[from] OxiaRpcError),
+
+    /// An unrecognized status code.
+    #[error("unknown grpc-status code {0}")]
+    Unknown(i32),
+}
+
+impl From<i32> for GrpcStatus {
+    #[inline]
+    fn from(code: i32) -> Self {
+        Self::from_grpc_status_header(code)
+    }
+}
+
+impl GrpcStatus {
+    /// Convert from a raw `grpc-status` header integer.
+    ///
+    /// This is the entry point the tonic-less client will use once
+    /// `channel_pool.rs` replaces the tonic-based `pool.rs`.
+    #[inline]
+    pub const fn from_grpc_status_header(code: i32) -> Self {
+        match code {
+            1 => Self::Standard(GrpcCode::Cancelled),
+            2 => Self::Standard(GrpcCode::Unknown),
+            3 => Self::Standard(GrpcCode::InvalidArgument),
+            4 => Self::Standard(GrpcCode::DeadlineExceeded),
+            5 => Self::Standard(GrpcCode::NotFound),
+            6 => Self::Standard(GrpcCode::AlreadyExists),
+            7 => Self::Standard(GrpcCode::PermissionDenied),
+            8 => Self::Standard(GrpcCode::ResourceExhausted),
+            9 => Self::Standard(GrpcCode::FailedPrecondition),
+            10 => Self::Standard(GrpcCode::Aborted),
+            11 => Self::Standard(GrpcCode::OutOfRange),
+            12 => Self::Standard(GrpcCode::Unimplemented),
+            13 => Self::Standard(GrpcCode::Internal),
+            14 => Self::Standard(GrpcCode::Unavailable),
+            15 => Self::Standard(GrpcCode::DataLoss),
+            16 => Self::Standard(GrpcCode::Unauthenticated),
+            100 => Self::Oxia(OxiaRpcError::NotInitialized),
+            101 => Self::Oxia(OxiaRpcError::InvalidTerm),
+            102 => Self::Oxia(OxiaRpcError::InvalidStatus),
+            103 => Self::Oxia(OxiaRpcError::Aborted),
+            104 => Self::Oxia(OxiaRpcError::ResourceUnavailable),
+            105 => Self::Oxia(OxiaRpcError::ResourceConflict),
+            106 => Self::Oxia(OxiaRpcError::NodeIsNotLeader),
+            107 | 112 => Self::Oxia(OxiaRpcError::NodeIsNotMember),
+            108 => Self::Oxia(OxiaRpcError::SessionNotFound),
+            109 => Self::Oxia(OxiaRpcError::InvalidSessionTimeout),
+            110 => Self::Oxia(OxiaRpcError::NamespaceNotFound),
+            111 => Self::Oxia(OxiaRpcError::NotificationsNotEnabled),
+            n if n < 100 => Self::Standard(GrpcCode::UnknownCode(n)),
+            n => Self::Unknown(n),
+        }
+    }
+
+    /// Convert from a `grpc-rust` trailers object.
+    ///
+    /// `grpc-rust`'s `StatusError` only carries a standard 1-16 code and a
+    /// message, so the Oxia-specific code and `ErrorInfo` details are
+    /// recovered from the trailing metadata (`grpc-status-details-bin`, then
+    /// the `grpc-status` header), mirroring the tonic path. Otherwise the
+    /// status maps to a standard [`GrpcCode`].
+    ///
+    /// A successful (Ok) status is not an error; it maps to
+    /// `Standard(GrpcCode::UnknownCode(0))`. Callers should not normally pass
+    /// an Ok status.
+    pub fn from_grpc_rust_trailers(trailers: &grpc::core::Trailers) -> Self {
         use prost::Message as _;
         use proto::google::rpc::Status as RpcStatus;
 
-        let decoded_status = if x.details().is_empty() {
+        let status_error = match trailers.status() {
+            Ok(()) => return Self::Standard(GrpcCode::UnknownCode(0)),
+            Err(status_error) => status_error,
+        };
+
+        let decoded_status = trailers
+            .metadata()
+            .get_bin("grpc-status-details-bin")
+            .and_then(|value| {
+                let bytes: bytes::Bytes = value.clone().into();
+                RpcStatus::decode(bytes).ok()
+            });
+
+        if let Some(error) = decoded_status
+            .as_ref()
+            .and_then(|s| OxiaRpcError::extract_error_info(&s.details))
+            .as_ref()
+            .and_then(OxiaRpcError::from_error_info)
+        {
+            return Self::Oxia(error);
+        }
+
+        if let Some(code) = trailers
+            .metadata()
+            .get("grpc-status")
+            .and_then(|value| value.to_str().parse::<i32>().ok())
+        {
+            return Self::from_grpc_status_header(code);
+        }
+
+        Self::Standard(GrpcCode::from(status_error.code() as i32))
+    }
+
+    /// Convert from a tonic status.
+    ///
+    /// When tonic reports `Code::Unknown` and the status carries an Oxia
+    /// `grpc-status` value (via metadata header or `grpc-status-details-bin`),
+    /// the decoded Oxia error is returned. Transport-wrapped Unknown statuses
+    /// (client-side transport failures) are mapped to `Standard(Unavailable)`
+    /// so they are retried as connection errors. Otherwise the status maps to
+    /// a standard [`GrpcCode`].
+    ///
+    fn from_tonic_status(status: &tonic::Status) -> Self {
+        use prost::Message as _;
+        use proto::google::rpc::Status as RpcStatus;
+
+        let decoded_status = if status.details().is_empty() {
             None
         } else {
-            RpcStatus::decode(x.details()).ok()
+            RpcStatus::decode(status.details()).ok()
         };
 
         if let Some(error) = decoded_status
             .as_ref()
-            .and_then(|status| Self::extract_error_info(&status.details))
+            .and_then(|s| OxiaRpcError::extract_error_info(&s.details))
             .as_ref()
-            .and_then(Self::from_error_info)
+            .and_then(OxiaRpcError::from_error_info)
         {
-            return Ok(error);
+            return Self::Oxia(error);
         }
 
-        if x.code() == tonic::Code::Unknown {
-            let legacy_code = decoded_status
-                .as_ref()
-                .map(|status| status.code)
-                .or_else(|| {
-                    x.metadata()
-                        .get("grpc-status")
-                        .and_then(|value| value.to_str().ok())
-                        .and_then(|value| value.parse().ok())
-                });
-            if let Some(error) = legacy_code.and_then(Self::from_legacy_rpc_code) {
-                return Ok(error);
+        if status.code() == tonic::Code::Unknown {
+            use std::error::Error as _;
+
+            if status.message() == "transport error"
+                || status
+                    .source()
+                    .and_then(|s| s.downcast_ref::<tonic::transport::Error>())
+                    .is_some()
+            {
+                return Self::Standard(GrpcCode::Unavailable);
+            }
+
+            let legacy_code = decoded_status.as_ref().map(|s| s.code).or_else(|| {
+                status
+                    .metadata()
+                    .get("grpc-status")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse().ok())
+            });
+            if let Some(error) = legacy_code.and_then(OxiaRpcError::from_legacy_rpc_code) {
+                return Self::Oxia(error);
             }
         }
 
-        Err(x)
+        Self::Standard(GrpcCode::from_tonic(status.code()))
+    }
+
+    /// Returns `true` if this gRPC status is worth retrying.
+    #[inline]
+    pub const fn is_retryable(&self) -> bool {
+        match self {
+            Self::Standard(code) => code.is_retryable(),
+            Self::Oxia(err) => err.is_retryable(),
+            Self::Unknown(_) => false,
+        }
+    }
+
+    /// Returns `true` if this status indicates a connection-level failure.
+    #[inline]
+    pub const fn is_connection_error(&self) -> bool {
+        matches!(self, Self::Standard(GrpcCode::Unavailable))
+    }
+
+    /// Returns `true` if this status indicates the shard/resource is unavailable.
+    ///
+    /// `Oxia::ShardNotFound` (111) means the shard does not exist
+    /// `Oxia::NodeIsNotMember` (112) means the contacted node is not a valid
+    /// cluster member; both indicate the client might want to reconfigure rather than
+    /// retry-in-place.  However, these errors could also indicate a race as
+    /// cluster configuration changes propagate.
+    #[inline]
+    pub const fn is_shard_unavailable(&self) -> bool {
+        match self {
+            Self::Standard(code) => code.is_shard_unavailable(),
+            Self::Oxia(OxiaRpcError::ShardNotFound) => true,
+            Self::Oxia(_) | Self::Unknown(_) => false,
+        }
+    }
+
+    /// Returns `true` if this status indicates the request went to the wrong leader.
+    #[inline]
+    pub const fn is_wrong_leader(&self) -> bool {
+        match self {
+            Self::Oxia(err) => err.is_wrong_leader(),
+            Self::Standard(_) | Self::Unknown(_) => false,
+        }
     }
 }
 
@@ -330,6 +661,41 @@ pub struct ShardError {
     pub err: Arc<Error>,
 }
 
+/// A gRPC error returned by the grpc-rust client, retaining the trailing
+/// metadata needed to decode Oxia-specific statuses.
+///
+/// grpc-rust's [`grpc::StatusError`] only carries a standard 1-16 code and a
+/// message; the trailing metadata holds the `grpc-status` /
+/// `grpc-status-details-bin` values that [`GrpcStatus::from_grpc_rust_trailers`]
+/// decodes. The recv loop at each grpc-rust call site must capture the
+/// trailers' metadata before the high-level builders drop it.
+#[derive(Debug, Clone)]
+pub struct GrpcCallError {
+    status: grpc::StatusError,
+    metadata: grpc::metadata::MetadataMap,
+}
+
+impl GrpcCallError {
+    /// Construct a carrier from the status and trailing metadata of a failed
+    /// grpc-rust call.
+    #[inline]
+    pub const fn new(status: grpc::StatusError, metadata: grpc::metadata::MetadataMap) -> Self {
+        Self { status, metadata }
+    }
+
+    fn to_trailers(&self) -> grpc::core::Trailers {
+        grpc::core::Trailers::new(Err(self.status.clone())).with_metadata(self.metadata.clone())
+    }
+}
+
+impl std::fmt::Display for GrpcCallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({:?})", self.status.message(), self.status.code())
+    }
+}
+
+impl std::error::Error for GrpcCallError {}
+
 /// Error: error type returned in the public API
 ///
 /// Arc-wrapping strategy:
@@ -344,6 +710,10 @@ pub enum Error {
     /// Arc-wrapped: `tonic::Status` is not Clone and is large
     #[error("gRPC error: {0}")]
     Grpc(#[source] Arc<tonic::Status>),
+
+    /// Arc-wrapped: the grpc-rust status plus trailing metadata
+    #[error("gRPC error: {0}")]
+    GrpcRust(#[source] Arc<GrpcCallError>),
 
     /// Arc-wrapped: `tonic::transport::Error` is not Clone
     #[error("gRPC transport error: {0}")]
@@ -412,18 +782,30 @@ fn format_shard_errors(errors: &[ShardError]) -> String {
 }
 
 impl Error {
+    /// Returns the [`GrpcStatus`] view of this error, if any.
+    ///
+    /// `Error::Grpc`, `Error::GrpcRust`, and `Error::OxiaRpc` all map into
+    /// the unified `grpc-status` code space; all other variants return `None`.
+    #[inline]
+    pub fn grpc_status(&self) -> Option<GrpcStatus> {
+        match self {
+            Self::Grpc(status) => Some(GrpcStatus::from_tonic_status(status)),
+            Self::GrpcRust(err) => Some(GrpcStatus::from_grpc_rust_trailers(&err.to_trailers())),
+            Self::OxiaRpc(err) => Some(GrpcStatus::Oxia(err.clone())),
+            _ => None,
+        }
+    }
+
     /// Whether the error is likely transient and worth retrying
     #[inline]
     pub fn is_retryable(&self) -> bool {
         // Do not have a default arm so that adding a new error type requires explicitly deciding
         // what to do.  Never mind that the answer is almost always `false`
 
-        #[allow(clippy::match_same_arms)]
         match self {
-            Self::Grpc(status) => matches!(
-                status.code(),
-                tonic::Code::Unavailable | tonic::Code::Unknown | tonic::Code::Internal
-            ),
+            Self::Grpc(_) | Self::GrpcRust(_) | Self::OxiaRpc(_) => {
+                self.grpc_status().is_some_and(|s| s.is_retryable())
+            }
             Self::Io(err) => matches!(
                 err.kind(),
                 io::ErrorKind::ConnectionReset
@@ -434,21 +816,19 @@ impl Error {
             ),
             Self::MultipleShardError(errs) => errs.iter().any(|e| e.err.is_retryable()),
             Self::ShardError(err) => err.err.is_retryable(),
-            Self::OxiaRpc(err) => err.is_retryable(),
 
-            Self::NoResponseFromServer(_) => true,
-            Self::Transport(_) => true,
+            Self::NoResponseFromServer(_) | Self::Transport(_) => true,
 
-            Self::Cancelled => false,
-            Self::Client(_) => false,
-            Self::Custom(_) => false,
-            Self::InvalidKeyComparisonType(_) => false,
-            Self::NoShardMapping(_) => false,
-            Self::NoShardMappingForKey(_) => false,
-            Self::Other(_) => false,
-            Self::Oxia(_) => false,
-            Self::RequestTimeout => false,
-            Self::Server(_) => false,
+            Self::Cancelled
+            | Self::Client(_)
+            | Self::Custom(_)
+            | Self::InvalidKeyComparisonType(_)
+            | Self::NoShardMapping(_)
+            | Self::NoShardMappingForKey(_)
+            | Self::Other(_)
+            | Self::Oxia(_)
+            | Self::RequestTimeout
+            | Self::Server(_) => false,
         }
     }
 
@@ -458,7 +838,9 @@ impl Error {
     pub fn is_connection_error(&self) -> bool {
         match self {
             Self::Transport(_) => true,
-            Self::Grpc(status) => status.code() == tonic::Code::Unavailable,
+            Self::Grpc(_) | Self::GrpcRust(_) | Self::OxiaRpc(_) => {
+                self.grpc_status().is_some_and(|s| s.is_connection_error())
+            }
             Self::Io(err) => matches!(
                 err.kind(),
                 io::ErrorKind::ConnectionReset
@@ -498,11 +880,11 @@ impl Error {
     pub fn is_shard_unavailable(&self) -> bool {
         match self {
             // Shard mapping errors indicate the shard is no longer valid
-            Self::NoShardMapping(_)
-            | Self::NoShardMappingForKey(_)
-            | Self::OxiaRpc(OxiaRpcError::ShardNotFound) => true,
-            // gRPC NotFound typically indicates the shard/resource doesn't exist
-            Self::Grpc(status) => status.code() == tonic::Code::NotFound,
+            Self::NoShardMapping(_) | Self::NoShardMappingForKey(_) => true,
+            // gRPC/Oxia status classification (NotFound, NodeIsNotMember, ShardNotFound)
+            Self::Grpc(_) | Self::GrpcRust(_) | Self::OxiaRpc(_) => {
+                self.grpc_status().is_some_and(|s| s.is_shard_unavailable())
+            }
             // Server configuration errors
             Self::Server(err) => matches!(
                 err.as_ref(),
@@ -519,10 +901,29 @@ impl Error {
     #[inline]
     pub fn is_wrong_leader(&self) -> bool {
         match self {
-            Self::OxiaRpc(e) => e.is_wrong_leader(),
+            Self::Grpc(_) | Self::GrpcRust(_) | Self::OxiaRpc(_) => {
+                self.grpc_status().is_some_and(|s| s.is_wrong_leader())
+            }
             Self::ShardError(e) => e.err.is_wrong_leader(),
             Self::MultipleShardError(errs) => errs.iter().any(|e| e.err.is_wrong_leader()),
             _ => false,
+        }
+    }
+}
+
+impl From<GrpcCallError> for Error {
+    fn from(call_error: GrpcCallError) -> Self {
+        let trailers = call_error.to_trailers();
+        match GrpcStatus::from_grpc_rust_trailers(&trailers) {
+            GrpcStatus::Oxia(err) => err.into(),
+            GrpcStatus::Standard(GrpcCode::DeadlineExceeded) => Self::RequestTimeout,
+            GrpcStatus::Standard(GrpcCode::Cancelled)
+                if call_error.status.message() == "Timeout expired" =>
+            {
+                Self::RequestTimeout
+            }
+            GrpcStatus::Standard(GrpcCode::Cancelled) => Self::Cancelled,
+            _ => Self::GrpcRust(Arc::new(call_error)),
         }
     }
 }
@@ -704,7 +1105,6 @@ mod tests {
         let errs = [
             Error::from(tonic::Status::new(tonic::Code::Internal, "")),
             Error::from(tonic::Status::new(tonic::Code::Unavailable, "")),
-            Error::from(tonic::Status::new(tonic::Code::Unknown, "")),
             Error::from(io::Error::from(io::ErrorKind::BrokenPipe)),
             Error::from(io::Error::from(io::ErrorKind::ConnectionAborted)),
             Error::from(io::Error::from(io::ErrorKind::ConnectionReset)),
@@ -725,6 +1125,10 @@ mod tests {
             Error::from(ClientError::Internal("client error".into())),
             Error::multiple_shard_errors(vec![]),
             Error::RequestTimeout,
+            // Unknown standard gRPC code is no longer retryable.
+            Error::from(tonic::Status::new(tonic::Code::Unknown, "")),
+            // Aborted requires higher-level retry, not a simple re-send.
+            Error::from(tonic::Status::new(tonic::Code::Aborted, "")),
         ];
         for e in &errs {
             info!(?e);
@@ -757,6 +1161,8 @@ mod tests {
             Error::from(tonic::Status::new(tonic::Code::Unknown, "")),
             Error::from(tonic::Status::new(tonic::Code::NotFound, "")),
             Error::from(tonic::Status::new(tonic::Code::PermissionDenied, "")),
+            // Oxia codes are decoded statuses, not transport failures
+            Error::OxiaRpc(OxiaRpcError::NodeIsNotMember),
             // Non-connection IO errors
             Error::from(io::Error::from(io::ErrorKind::WouldBlock)),
             Error::from(io::Error::from(io::ErrorKind::Other)),
@@ -843,6 +1249,7 @@ mod tests {
 
     #[test_log::test]
     fn test_oxia_error_from_i32() {
+        assert_eq!(OxiaError::from(0), OxiaError::Ok);
         assert_eq!(OxiaError::from(1), OxiaError::KeyNotFound);
         assert_eq!(OxiaError::from(2), OxiaError::UnexpectedVersionId);
         assert_eq!(OxiaError::from(3), OxiaError::SessionDoesNotExist);
@@ -851,6 +1258,362 @@ mod tests {
         assert_eq!(OxiaError::from(104), OxiaError::Unknown(104));
         assert_eq!(OxiaError::from(106), OxiaError::Unknown(106));
         assert_eq!(OxiaError::from(999), OxiaError::Unknown(999));
+    }
+
+    #[test_log::test]
+    fn test_grpc_code_from_i32() {
+        assert_eq!(GrpcCode::from(1), GrpcCode::Cancelled);
+        assert_eq!(GrpcCode::from(2), GrpcCode::Unknown);
+        assert_eq!(GrpcCode::from(3), GrpcCode::InvalidArgument);
+        assert_eq!(GrpcCode::from(4), GrpcCode::DeadlineExceeded);
+        assert_eq!(GrpcCode::from(5), GrpcCode::NotFound);
+        assert_eq!(GrpcCode::from(6), GrpcCode::AlreadyExists);
+        assert_eq!(GrpcCode::from(7), GrpcCode::PermissionDenied);
+        assert_eq!(GrpcCode::from(8), GrpcCode::ResourceExhausted);
+        assert_eq!(GrpcCode::from(9), GrpcCode::FailedPrecondition);
+        assert_eq!(GrpcCode::from(10), GrpcCode::Aborted);
+        assert_eq!(GrpcCode::from(11), GrpcCode::OutOfRange);
+        assert_eq!(GrpcCode::from(12), GrpcCode::Unimplemented);
+        assert_eq!(GrpcCode::from(13), GrpcCode::Internal);
+        assert_eq!(GrpcCode::from(14), GrpcCode::Unavailable);
+        assert_eq!(GrpcCode::from(15), GrpcCode::DataLoss);
+        assert_eq!(GrpcCode::from(16), GrpcCode::Unauthenticated);
+        assert_eq!(GrpcCode::from(0), GrpcCode::UnknownCode(0));
+        assert_eq!(GrpcCode::from(17), GrpcCode::UnknownCode(17));
+        assert_eq!(GrpcCode::from(-1), GrpcCode::UnknownCode(-1));
+        assert_eq!(GrpcCode::from(99), GrpcCode::UnknownCode(99));
+    }
+
+    #[test_log::test]
+    fn test_grpc_code_from_tonic() {
+        assert_eq!(GrpcCode::from_tonic(tonic::Code::Ok), GrpcCode::Ok);
+        assert_eq!(
+            GrpcCode::from_tonic(tonic::Code::Cancelled),
+            GrpcCode::Cancelled
+        );
+        assert_eq!(
+            GrpcCode::from_tonic(tonic::Code::Unknown),
+            GrpcCode::Unknown
+        );
+        assert_eq!(
+            GrpcCode::from_tonic(tonic::Code::InvalidArgument),
+            GrpcCode::InvalidArgument
+        );
+        assert_eq!(
+            GrpcCode::from_tonic(tonic::Code::DeadlineExceeded),
+            GrpcCode::DeadlineExceeded
+        );
+        assert_eq!(
+            GrpcCode::from_tonic(tonic::Code::NotFound),
+            GrpcCode::NotFound
+        );
+        assert_eq!(
+            GrpcCode::from_tonic(tonic::Code::AlreadyExists),
+            GrpcCode::AlreadyExists
+        );
+        assert_eq!(
+            GrpcCode::from_tonic(tonic::Code::PermissionDenied),
+            GrpcCode::PermissionDenied
+        );
+        assert_eq!(
+            GrpcCode::from_tonic(tonic::Code::ResourceExhausted),
+            GrpcCode::ResourceExhausted
+        );
+        assert_eq!(
+            GrpcCode::from_tonic(tonic::Code::FailedPrecondition),
+            GrpcCode::FailedPrecondition
+        );
+        assert_eq!(
+            GrpcCode::from_tonic(tonic::Code::Aborted),
+            GrpcCode::Aborted
+        );
+        assert_eq!(
+            GrpcCode::from_tonic(tonic::Code::OutOfRange),
+            GrpcCode::OutOfRange
+        );
+        assert_eq!(
+            GrpcCode::from_tonic(tonic::Code::Unimplemented),
+            GrpcCode::Unimplemented
+        );
+        assert_eq!(
+            GrpcCode::from_tonic(tonic::Code::Internal),
+            GrpcCode::Internal
+        );
+        assert_eq!(
+            GrpcCode::from_tonic(tonic::Code::Unavailable),
+            GrpcCode::Unavailable
+        );
+        assert_eq!(
+            GrpcCode::from_tonic(tonic::Code::DataLoss),
+            GrpcCode::DataLoss
+        );
+        assert_eq!(
+            GrpcCode::from_tonic(tonic::Code::Unauthenticated),
+            GrpcCode::Unauthenticated
+        );
+    }
+
+    #[test_log::test]
+    fn test_grpc_status_from_i32() {
+        assert_eq!(
+            GrpcStatus::from(0),
+            GrpcStatus::Standard(GrpcCode::UnknownCode(0))
+        );
+        assert_eq!(
+            GrpcStatus::from(1),
+            GrpcStatus::Standard(GrpcCode::Cancelled)
+        );
+        assert_eq!(
+            GrpcStatus::from(16),
+            GrpcStatus::Standard(GrpcCode::Unauthenticated)
+        );
+        assert_eq!(
+            GrpcStatus::from(17),
+            GrpcStatus::Standard(GrpcCode::UnknownCode(17))
+        );
+        assert_eq!(
+            GrpcStatus::from(99),
+            GrpcStatus::Standard(GrpcCode::UnknownCode(99))
+        );
+        assert_eq!(
+            GrpcStatus::from(100),
+            GrpcStatus::Oxia(OxiaRpcError::NotInitialized)
+        );
+        assert_eq!(
+            GrpcStatus::from(112),
+            GrpcStatus::Oxia(OxiaRpcError::NodeIsNotMember)
+        );
+        assert_eq!(GrpcStatus::from(113), GrpcStatus::Unknown(113));
+        assert_eq!(GrpcStatus::from(999), GrpcStatus::Unknown(999));
+    }
+
+    #[test_log::test]
+    fn test_grpc_status_from_i32_matches_header() {
+        // from_grpc_status_header is the single source of truth for the
+        // integer grpc-status map; From<i32> must agree with it.
+        for code in [-1, 0, 1, 2, 16, 17, 99, 100, 106, 111, 112, 113, 999] {
+            assert_eq!(
+                GrpcStatus::from(code),
+                GrpcStatus::from_grpc_status_header(code),
+                "code {code}"
+            );
+        }
+    }
+
+    #[test_log::test]
+    fn test_grpc_status_from_tonic_status_standard() {
+        assert_eq!(
+            GrpcStatus::from_tonic_status(&tonic::Status::new(tonic::Code::Unavailable, "")),
+            GrpcStatus::Standard(GrpcCode::Unavailable)
+        );
+        assert_eq!(
+            GrpcStatus::from_tonic_status(&tonic::Status::new(tonic::Code::Internal, "")),
+            GrpcStatus::Standard(GrpcCode::Internal)
+        );
+        assert_eq!(
+            GrpcStatus::from_tonic_status(&tonic::Status::new(tonic::Code::NotFound, "")),
+            GrpcStatus::Standard(GrpcCode::NotFound)
+        );
+    }
+
+    #[test_log::test]
+    fn test_grpc_status_from_tonic_status_unknown_with_legacy_code() {
+        let status_proto = proto::google::rpc::Status {
+            code: 106,
+            message: "not leader".into(),
+            details: vec![],
+        };
+        let tonic_status = tonic::Status::with_details(
+            tonic::Code::Unknown,
+            "",
+            status_proto.encode_to_vec().into(),
+        );
+
+        let grpc_status = GrpcStatus::from_tonic_status(&tonic_status);
+        assert_eq!(grpc_status, GrpcStatus::Oxia(OxiaRpcError::NodeIsNotLeader));
+    }
+
+    fn grpc_trailers_with_error_info(reason: &str, domain: &str) -> grpc::core::Trailers {
+        let info = proto::google::rpc::ErrorInfo {
+            reason: reason.to_owned(),
+            domain: domain.to_owned(),
+            metadata: HashMap::new(),
+        };
+        let detail = prost_types::Any {
+            type_url: "type.googleapis.com/google.rpc.ErrorInfo".to_owned(),
+            value: info.encode_to_vec(),
+        };
+        let status = proto::google::rpc::Status {
+            code: tonic::Code::Unknown as i32,
+            message: reason.to_owned(),
+            details: vec![detail],
+        };
+        let mut metadata = grpc::metadata::MetadataMap::new();
+        metadata.insert_bin(
+            "grpc-status-details-bin",
+            grpc::metadata::BinaryMetadataValue::from_bytes(&status.encode_to_vec()),
+        );
+        grpc::core::Trailers::new(Err(grpc::StatusError::new(
+            grpc::StatusCodeError::Unknown,
+            reason,
+        )))
+        .with_metadata(metadata)
+    }
+
+    fn grpc_legacy_trailers(code: i32) -> grpc::core::Trailers {
+        let mut metadata = grpc::metadata::MetadataMap::new();
+        metadata.insert("grpc-status", code.to_string().parse().unwrap());
+        grpc::core::Trailers::new(Err(grpc::StatusError::new(
+            grpc::StatusCodeError::Unknown,
+            format!("legacy Oxia error {code}"),
+        )))
+        .with_metadata(metadata)
+    }
+
+    #[test_log::test]
+    fn test_grpc_status_from_grpc_rust_trailers_error_info() {
+        let trailers =
+            grpc_trailers_with_error_info("NODE_IS_NOT_LEADER", OxiaRpcError::OXIA_ERROR_DOMAIN);
+        assert_eq!(
+            GrpcStatus::from_grpc_rust_trailers(&trailers),
+            GrpcStatus::Oxia(OxiaRpcError::NodeIsNotLeader)
+        );
+    }
+
+    #[test_log::test]
+    fn test_grpc_status_from_grpc_rust_trailers_legacy_header() {
+        let trailers = grpc_legacy_trailers(106);
+        assert_eq!(
+            GrpcStatus::from_grpc_rust_trailers(&trailers),
+            GrpcStatus::Oxia(OxiaRpcError::NodeIsNotLeader)
+        );
+    }
+
+    #[test_log::test]
+    fn test_grpc_status_from_grpc_rust_trailers_standard() {
+        let trailers = grpc::core::Trailers::new(Err(grpc::StatusError::new(
+            grpc::StatusCodeError::Unavailable,
+            "unavailable",
+        )));
+        assert_eq!(
+            GrpcStatus::from_grpc_rust_trailers(&trailers),
+            GrpcStatus::Standard(GrpcCode::Unavailable)
+        );
+    }
+
+    fn grpc_call_error_from_trailers(trailers: &grpc::core::Trailers) -> GrpcCallError {
+        let status = match trailers.status() {
+            Ok(()) => panic!("expected an error status"),
+            Err(status) => status.clone(),
+        };
+        GrpcCallError::new(status, trailers.metadata().clone())
+    }
+
+    #[test_log::test]
+    fn test_error_from_grpc_call_error_oxia() {
+        let trailers =
+            grpc_trailers_with_error_info("NODE_IS_NOT_LEADER", OxiaRpcError::OXIA_ERROR_DOMAIN);
+        assert!(matches!(
+            Error::from(grpc_call_error_from_trailers(&trailers)),
+            Error::OxiaRpc(OxiaRpcError::NodeIsNotLeader)
+        ));
+    }
+
+    #[test_log::test]
+    fn test_error_from_grpc_call_error_legacy_header() {
+        let trailers = grpc_legacy_trailers(106);
+        assert!(matches!(
+            Error::from(grpc_call_error_from_trailers(&trailers)),
+            Error::OxiaRpc(OxiaRpcError::NodeIsNotLeader)
+        ));
+    }
+
+    #[test_log::test]
+    fn test_error_from_grpc_call_error_deadline() {
+        let call_error = GrpcCallError::new(
+            grpc::StatusError::new(grpc::StatusCodeError::DeadlineExceeded, "deadline exceeded"),
+            grpc::metadata::MetadataMap::new(),
+        );
+        assert!(matches!(Error::from(call_error), Error::RequestTimeout));
+    }
+
+    #[test_log::test]
+    fn test_error_from_grpc_call_error_cancelled() {
+        let call_error = GrpcCallError::new(
+            grpc::StatusError::new(grpc::StatusCodeError::Cancelled, "cancelled"),
+            grpc::metadata::MetadataMap::new(),
+        );
+        assert!(matches!(Error::from(call_error), Error::Cancelled));
+    }
+
+    #[test_log::test]
+    fn test_error_from_grpc_call_error_generic_classifies() {
+        let call_error = GrpcCallError::new(
+            grpc::StatusError::new(grpc::StatusCodeError::Unavailable, "unavailable"),
+            grpc::metadata::MetadataMap::new(),
+        );
+        let err = Error::from(call_error);
+        assert!(matches!(err, Error::GrpcRust(_)));
+        assert_eq!(
+            err.grpc_status(),
+            Some(GrpcStatus::Standard(GrpcCode::Unavailable))
+        );
+        assert!(err.is_retryable());
+        assert!(err.is_connection_error());
+        assert!(!err.is_wrong_leader());
+        assert!(!err.is_shard_unavailable());
+    }
+
+    #[test_log::test]
+    fn test_grpc_code_classification() {
+        assert!(GrpcCode::Unavailable.is_retryable());
+        assert!(GrpcCode::Internal.is_retryable());
+        assert!(!GrpcCode::Unknown.is_retryable());
+        assert!(!GrpcCode::Aborted.is_retryable());
+        assert!(!GrpcCode::ResourceExhausted.is_retryable());
+        assert!(!GrpcCode::UnknownCode(99).is_retryable());
+
+        assert!(GrpcCode::Unavailable.is_connection_error());
+        assert!(!GrpcCode::Internal.is_connection_error());
+
+        assert!(GrpcCode::NotFound.is_shard_unavailable());
+        assert!(!GrpcCode::Unavailable.is_shard_unavailable());
+
+        assert!(!GrpcCode::Unavailable.is_wrong_leader());
+    }
+
+    #[test_log::test]
+    fn test_grpc_status_classification() {
+        assert!(GrpcStatus::Standard(GrpcCode::Unavailable).is_retryable());
+        assert!(GrpcStatus::Standard(GrpcCode::Internal).is_retryable());
+        assert!(!GrpcStatus::Standard(GrpcCode::Unknown).is_retryable());
+        assert!(!GrpcStatus::Unknown(999).is_retryable());
+
+        assert!(GrpcStatus::Oxia(OxiaRpcError::NodeIsNotLeader).is_wrong_leader());
+        assert!(GrpcStatus::Oxia(OxiaRpcError::InvalidStatus).is_wrong_leader());
+        assert!(!GrpcStatus::Oxia(OxiaRpcError::NodeIsNotMember).is_wrong_leader());
+        assert!(!GrpcStatus::Standard(GrpcCode::Unavailable).is_wrong_leader());
+
+        assert!(!GrpcStatus::Oxia(OxiaRpcError::NodeIsNotMember).is_shard_unavailable());
+        assert!(!GrpcStatus::Oxia(OxiaRpcError::NodeIsNotLeader).is_shard_unavailable());
+        assert!(GrpcStatus::Standard(GrpcCode::NotFound).is_shard_unavailable());
+
+        assert!(GrpcStatus::Standard(GrpcCode::Unavailable).is_connection_error());
+        assert!(!GrpcStatus::Oxia(OxiaRpcError::NodeIsNotMember).is_connection_error());
+    }
+
+    #[test_log::test]
+    fn test_error_grpc_status_accessor() {
+        assert_eq!(
+            Error::from(tonic::Status::new(tonic::Code::Unavailable, "")).grpc_status(),
+            Some(GrpcStatus::Standard(GrpcCode::Unavailable))
+        );
+        assert_eq!(
+            Error::OxiaRpc(OxiaRpcError::NodeIsNotMember).grpc_status(),
+            Some(GrpcStatus::Oxia(OxiaRpcError::NodeIsNotMember))
+        );
+        assert!(Error::custom("x").grpc_status().is_none());
+        assert!(Error::RequestTimeout.grpc_status().is_none());
     }
 
     #[test_log::test]
@@ -869,9 +1632,26 @@ mod tests {
         assert!(Error::OxiaRpc(OxiaRpcError::NodeIsNotLeader).is_retryable());
         assert!(Error::OxiaRpc(OxiaRpcError::InvalidStatus).is_retryable());
         assert!(Error::OxiaRpc(OxiaRpcError::Aborted).is_retryable());
-        assert!(Error::OxiaRpc(OxiaRpcError::NodeIsNotMember).is_retryable());
         assert!(Error::OxiaRpc(OxiaRpcError::ResourceUnavailable).is_retryable());
         assert!(!Error::OxiaRpc(OxiaRpcError::ResourceConflict).is_retryable());
         assert!(!Error::Oxia(OxiaError::KeyNotFound).is_retryable());
+    }
+
+    #[test_log::test]
+    fn test_is_shard_unavailable_node_is_not_member() {
+        assert!(
+            !Error::from(tonic::Status::new(tonic::Code::Unavailable, "")).is_shard_unavailable()
+        );
+        assert!(!Error::OxiaRpc(OxiaRpcError::NodeIsNotLeader).is_shard_unavailable());
+    }
+
+    #[test_log::test]
+    fn test_is_shard_unavailable_shard_not_found() {
+        // ShardNotFound means the shard does not exist, so the client should
+        // reconfigure rather than retry-in-place.
+        assert!(Error::OxiaRpc(OxiaRpcError::ShardNotFound).is_shard_unavailable());
+
+        // ShardNotFound is not retryable (terminal).
+        assert!(!OxiaRpcError::ShardNotFound.is_retryable());
     }
 }
