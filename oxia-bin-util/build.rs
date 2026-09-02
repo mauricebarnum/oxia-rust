@@ -105,6 +105,8 @@ fn build_oxia_cli() -> io::Result<OsString> {
         assert!(status.success(), "oxia build failed");
     }
 
+    println!("cargo:rerun-if-changed={oxia_path_str}");
+
     // Keep exporting the path to the built binary for consumers
     Ok(oxia_path_str.into())
 }
