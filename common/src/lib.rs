@@ -38,3 +38,14 @@ pub mod proto {
 pub mod replication {
     tonic::include_proto!("replication");
 }
+
+pub mod pb {
+    include!(concat!(env!("OUT_DIR"), "/generated.rs"));
+}
+
+pub mod grpc {
+    #![allow(unused_imports)]
+    pub use super::pb::*;
+    include!(concat!(env!("OUT_DIR"), "/client_grpc.pb.rs"));
+    include!(concat!(env!("OUT_DIR"), "/replication_grpc.pb.rs"));
+}
