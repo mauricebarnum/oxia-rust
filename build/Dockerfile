@@ -2,7 +2,7 @@
 ARG CARGO_HOME=/root/.cargo
 ARG RUSTUP_HOME=/root/.rustup
 ARG HOME=/root
-ARG RUST_VERSION=1.98.0
+ARG RUST_VERSION=1.98.1
 ARG RUST_VERSION_EXTERNAL_TYPES=nightly-2026-03-20
 ARG GO_VERSION=1.27.1
 
@@ -17,8 +17,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl \
-    && rm -rf /var/lib/apt/lists/*
+    ca-certificates curl
 RUN curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash && \
     cargo binstall -y cargo-deny cargo-nextest sccache
 
@@ -45,8 +44,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     build-essential ca-certificates curl git git-restore-mtime gnupg jq libssl-dev \
     pkg-config protobuf-compiler python3 python3-git python3-pip unzip zstd \
     && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
-    && apt-get install -y nodejs \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get install -y nodejs
 
 # ===== 3. Go Builder =====
 FROM os-base AS go-builder
