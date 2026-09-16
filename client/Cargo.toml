@@ -24,7 +24,7 @@ xxhash-rust = { version = "0.8.18", default-features = false, features = [
 backon = "1.6.0"
 arc-swap = "1.9"
 tokio-util = "0.7.19"
-bon = { version = "3.9.3", features = ["implied-bounds"] }
+bon = { version = "3.10.1", features = ["implied-bounds"] }
 dashmap = { version = "6", optional = true }
 fastrand = "2.5.0"
 prost = "0.14.4"
