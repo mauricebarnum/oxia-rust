@@ -29,7 +29,7 @@ dashmap = { version = "6", optional = true }
 fastrand = "2.5.0"
 prost = "0.14.4"
 prost-types = "0.14.4"
-opentelemetry = { version = "0.32.0", features = ["metrics"], optional = true }
+opentelemetry = { version = "0.33.0", features = ["metrics"], optional = true }
 
 [features]
 bench-dashmap = ["dep:dashmap"]
@@ -47,7 +47,7 @@ tempfile = "3.27.0"
 anyhow = "1.0.104"
 itertools = "0.15.0"
 nix = { version = "0.31", default-features = false, features = ["signal"] }
-opentelemetry_sdk = { version = "0.32.1", default-features = false, features = [
+opentelemetry_sdk = { version = "0.33.0", default-features = false, features = [
     "metrics",
     "testing",
 ] }
