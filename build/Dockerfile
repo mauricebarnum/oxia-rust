@@ -32,7 +32,7 @@ RUN rustup toolchain install --profile minimal --allow-downgrade nightly && \
     cargo +nightly miri setup --print-sysroot
 
 # ===== 2. OS Base Stage =====
-FROM ubuntu:24.04 AS os-base
+FROM ubuntu:26.04 AS os-base
 ARG CARGO_HOME
 ARG RUSTUP_HOME
 ARG RUST_VERSION_EXTERNAL_TYPES
