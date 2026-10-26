@@ -24,7 +24,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	grpcprometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
 	"github.com/pkg/errors"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -35,7 +34,9 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/oxia-db/oxia/common/auth"
+	"github.com/oxia-db/oxia/common/constant"
 	"github.com/oxia-db/oxia/common/process"
+	"github.com/oxia-db/oxia/common/rpc/grpcmetrics"
 )
 
 const (
@@ -118,11 +119,17 @@ func newConnectionWithHealthConfig(
 	if tlsConf != nil {
 		transportCredential = credentials.NewTLS(tlsConf)
 	}
+	if !strings.Contains(actualAddress, "://") {
+		// Look the name up on every dial: the gRPC DNS resolver keeps the old
+		// IP of a restarted server for up to 30s
+		actualAddress = "passthrough:///" + actualAddress
+	}
 
 	options := []grpc.DialOption{
 		grpc.WithTransportCredentials(transportCredential),
-		grpc.WithChainStreamInterceptor(grpcprometheus.StreamClientInterceptor),
-		grpc.WithChainUnaryInterceptor(grpcprometheus.UnaryClientInterceptor),
+		grpc.WithChainStreamInterceptor(grpcmetrics.StreamClientInterceptor),
+		grpc.WithChainUnaryInterceptor(grpcmetrics.UnaryClientInterceptor),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(constant.MaxGrpcFrameSize)),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			PermitWithoutStream: defaultGrpcClientPermitWithoutStream,
 			Time:                defaultGrpcClientKeepAliveTime,
@@ -170,6 +177,12 @@ func (c *connection) healthCheckLoop() {
 
 	consecutiveFailures := 0
 	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
 		ctx, cancel := context.WithTimeout(c.ctx, c.healthPingTimeout)
 		response, err := c.healthClient.Check(ctx, &grpc_health_v1.HealthCheckRequest{Service: ""})
 		cancel()
@@ -205,12 +218,6 @@ func (c *connection) healthCheckLoop() {
 		if shouldDisconnect && c.disconnected.CompareAndSwap(false, true) {
 			c.notifyDisconnect()
 			return
-		}
-
-		select {
-		case <-c.ctx.Done():
-			return
-		case <-ticker.C:
 		}
 	}
 }

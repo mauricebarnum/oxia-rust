@@ -17,20 +17,22 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/pkg/errors"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 	pb "google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	"github.com/oxia-db/oxia/oxiad/common/rpc"
 
+	"github.com/oxia-db/oxia/common/failpoint"
 	"github.com/oxia-db/oxia/common/proto"
 	"github.com/oxia-db/oxia/oxiad/common/rpc/auth"
 )
@@ -51,6 +53,11 @@ type maelstromGrpcProvider struct {
 	// instead of resurrecting the stream mid-sequence. Grows by one small
 	// entry per stream ever created, which is fine for a Maelstrom run.
 	deadStreams map[string]bool
+
+	// The health probes are answered with it, so that the coordinator can
+	// tell when the kill nemesis restarted the data server, see
+	// maelstromCoordinatorRpcProvider.probeSucceeded
+	processId int64
 }
 
 func newMaelstromGrpcProvider() *maelstromGrpcProvider {
@@ -58,6 +65,7 @@ func newMaelstromGrpcProvider() *maelstromGrpcProvider {
 		services:         make(map[string]any),
 		replicateStreams: make(map[string]*maelstromReplicateServerStream),
 		deadStreams:      make(map[string]bool),
+		processId:        int64(os.Getpid()),
 	}
 }
 
@@ -117,10 +125,17 @@ func (m *maelstromGrpcProvider) HandleOxiaRequest(msgType MsgType, msg *Message[
 			m.sendResponse(msg, MsgTypeGetStatusResponse, gsr)
 		}
 
+	case MsgTypeDeleteShardRequest:
+		if dsr, err := m.getService(oxiaCoordination).(proto.OxiaCoordinationServer).DeleteShard(context.Background(), message.(*proto.DeleteShardRequest)); err != nil {
+			sendError(msg.Body.MsgId, msg.Src, err)
+		} else {
+			m.sendResponse(msg, MsgTypeDeleteShardResponse, dsr)
+		}
+
 	case MsgTypeHealthCheck:
-		m.sendResponse(msg, MsgTypeHealthCheckOk, &proto.BecomeLeaderResponse{})
+		m.sendResponse(msg, MsgTypeHealthCheckOk, wrapperspb.Int64(m.processId))
 	default:
-		panic(fmt.Sprintf("unknown msgType: %v", msgType))
+		sendError(msg.Body.MsgId, msg.Src, errors.Errorf("unknown request type %s", msgType))
 	}
 }
 
@@ -151,7 +166,7 @@ func (m *maelstromGrpcProvider) HandleOxiaStreamRequest(msgType MsgType, msg *Me
 		}
 		m.Unlock()
 
-		stream.deliver(message.(*proto.Append))
+		stream.deliver(msg.Body.Seq, message.(*proto.Append))
 	default:
 		slog.Info(
 			"HandleOxiaStreamRequest with unsupported message",
@@ -200,7 +215,19 @@ func (m *maelstromGrpcProvider) HandleStreamError(src string, streamId int64) {
 	}
 }
 
-func (m *maelstromGrpcProvider) HandleClientRequest(msgType MsgType, msg any) {
+// HandleClientRequest serves a request of the Maelstrom lin-kv workload in the
+// background, and fails if msgType is not one.
+func (m *maelstromGrpcProvider) HandleClientRequest(msgType MsgType, msg any) error {
+	switch msgType {
+	case MsgTypeWrite, MsgTypeRead, MsgTypeCas:
+		go m.serveClientRequest(msgType, msg)
+		return nil
+	default:
+		return errors.Errorf("unexpected request %s", msgType)
+	}
+}
+
+func (m *maelstromGrpcProvider) serveClientRequest(msgType MsgType, msg any) {
 	switch msgType {
 	case MsgTypeWrite:
 		w := msg.(*Message[Write])
@@ -217,16 +244,16 @@ func (m *maelstromGrpcProvider) HandleClientRequest(msgType MsgType, msg any) {
 			sendError(w.Body.MsgId, w.Src, errors.Errorf("Failed to perform write op: %#v", res.Puts[0].Status))
 		} else {
 			// Ok
-			b, _ := json.Marshal(&Message[BaseMessageBody]{
+			if err := sendResponse(&Message[BaseMessageBody]{
 				Src:  thisNode,
 				Dest: w.Src,
 				Body: BaseMessageBody{
 					Type:      MsgTypeWriteOk,
 					InReplyTo: &w.Body.MsgId,
 				},
-			})
-
-			fmt.Fprintln(os.Stdout, string(b))
+			}); err != nil {
+				sendError(w.Body.MsgId, w.Src, err)
+			}
 		}
 
 	case MsgTypeRead:
@@ -252,8 +279,11 @@ func (m *maelstromGrpcProvider) HandleClientRequest(msgType MsgType, msg any) {
 		default:
 			// Ok
 			var value int64
-			_, _ = fmt.Sscanf(string(res.Gets[0].Value), "%d", &value)
-			b, _ := json.Marshal(&Message[ReadResponse]{
+			if _, err := fmt.Sscanf(string(res.Gets[0].Value), "%d", &value); err != nil {
+				sendError(r.Body.MsgId, r.Src, errors.Wrap(err, "invalid stored value"))
+				return
+			}
+			if err := sendResponse(&Message[ReadResponse]{
 				Src:  thisNode,
 				Dest: r.Src,
 				Body: ReadResponse{
@@ -263,12 +293,13 @@ func (m *maelstromGrpcProvider) HandleClientRequest(msgType MsgType, msg any) {
 					},
 					Value: value,
 				},
-			})
-
-			fmt.Fprintln(os.Stdout, string(b))
+			}); err != nil {
+				sendError(r.Body.MsgId, r.Src, err)
+			}
 		}
 
-	case MsgTypeCas:
+	default:
+		// MsgTypeCas, the last request that HandleClientRequest accepts
 		c := msg.(*Message[Cas])
 		stream := newMaelstromReadServerStream()
 		err := m.getService(oxiaClient).(proto.OxiaClientServer).Read(&proto.ReadRequest{
@@ -293,7 +324,10 @@ func (m *maelstromGrpcProvider) HandleClientRequest(msgType MsgType, msg any) {
 
 		// Check the existing value
 		var existingValue int64
-		_, _ = fmt.Sscanf(string(res.Gets[0].Value), "%d", &existingValue)
+		if _, err := fmt.Sscanf(string(res.Gets[0].Value), "%d", &existingValue); err != nil {
+			sendError(c.Body.MsgId, c.Src, errors.Wrap(err, "invalid stored value"))
+			return
+		}
 		if existingValue != c.Body.From {
 			sendErrorWithCode(c.Body.MsgId, c.Src, 22, "precondition-failed")
 			return
@@ -313,29 +347,27 @@ func (m *maelstromGrpcProvider) HandleClientRequest(msgType MsgType, msg any) {
 			sendError(c.Body.MsgId, c.Src, errors.Errorf("Failed to perform write op: %#v", writeRes.Puts[0].Status))
 		} else {
 			// Ok
-			b, _ := json.Marshal(&Message[BaseMessageBody]{
+			if err := sendResponse(&Message[BaseMessageBody]{
 				Src:  thisNode,
 				Dest: c.Src,
 				Body: BaseMessageBody{
 					Type:      MsgTypeCasOk,
 					InReplyTo: &c.Body.MsgId,
 				},
-			})
-
-			fmt.Fprintln(os.Stdout, string(b))
+			}); err != nil {
+				sendError(c.Body.MsgId, c.Src, err)
+			}
 		}
-
-	default:
-		slog.Error(
-			"Unexpected request",
-			slog.Any("msg-type", msgType),
-		)
-		os.Exit(1)
 	}
 }
 
 func (m *maelstromGrpcProvider) sendResponse(req *Message[OxiaMessage], msgType MsgType, response pb.Message) {
-	b, err := json.Marshal(&Message[OxiaMessage]{
+	oxiaMsg, err := toJSON(response)
+	if err != nil {
+		sendError(req.Body.MsgId, req.Src, err)
+		return
+	}
+	if err := sendResponse(&Message[OxiaMessage]{
 		Src:  thisNode,
 		Dest: req.Src,
 		Body: OxiaMessage{
@@ -344,14 +376,11 @@ func (m *maelstromGrpcProvider) sendResponse(req *Message[OxiaMessage], msgType 
 				MsgId:     msgIdGenerator.Add(1),
 				InReplyTo: &req.Body.MsgId,
 			},
-			OxiaMsg: toJSON(response),
+			OxiaMsg: oxiaMsg,
 		},
-	})
-	if err != nil {
-		panic("failed to serialize json")
+	}); err != nil {
+		sendError(req.Body.MsgId, req.Src, err)
 	}
-
-	fmt.Fprintln(os.Stdout, string(b))
 }
 
 func (m *maelstromGrpcProvider) getService(name string) any {
@@ -405,14 +434,28 @@ func (m *maelstromGrpcServer) Port() int {
 	return 0
 }
 
+// How long an append that arrived ahead of its turn waits for the missing
+// ones before the stream is considered broken, see
+// maelstromReplicateServerStream.deliver. Well above the reordering window of
+// the latencies Maelstrom tests run with (0-20ms for --latency 10
+// --latency-dist uniform).
+var replicateStreamGapTimeout = time.Second
+
 type maelstromReplicateServerStream struct {
 	BaseStream
 
-	requests  chan *proto.Append
-	done      chan struct{}
-	closeOnce sync.Once
-	streamId  int64
-	client    string
+	requests   chan *proto.Append
+	done       chan struct{}
+	closeOnce  sync.Once
+	streamId   int64
+	client     string
+	failpoints *failpoint.Failpoints
+
+	// Appends that arrived ahead of their turn, by sequence number
+	seqMutex sync.Mutex
+	nextSeq  int64
+	early    map[int64]*proto.Append
+	gapTimer *time.Timer
 }
 
 func (m *maelstromReplicateServerStream) SetHeader(metadata.MD) error {
@@ -426,7 +469,11 @@ func (m *maelstromReplicateServerStream) Send(response *proto.Ack) error {
 	default:
 	}
 
-	b, _ := json.Marshal(&Message[OxiaStreamMessage]{
+	oxiaMsg, err := toJSON(response)
+	if err != nil {
+		return err
+	}
+	return sendResponse(&Message[OxiaStreamMessage]{
 		Src:  thisNode,
 		Dest: m.client,
 		Body: OxiaStreamMessage{
@@ -434,13 +481,10 @@ func (m *maelstromReplicateServerStream) Send(response *proto.Ack) error {
 				Type:  MsgTypeAck,
 				MsgId: msgIdGenerator.Add(1),
 			},
-			OxiaMsg:  toJSON(response),
+			OxiaMsg:  oxiaMsg,
 			StreamId: m.streamId,
 		},
 	})
-
-	fmt.Fprintln(os.Stdout, string(b))
-	return nil
 }
 
 func (m *maelstromReplicateServerStream) Recv() (*proto.Append, error) {
@@ -462,16 +506,85 @@ func (m *maelstromReplicateServerStream) Recv() (*proto.Append, error) {
 	}
 }
 
-// deliver hands an entry to the Replicate handler without ever blocking the
-// dispatcher: entries for a dead stream are dropped (best effort here — an
-// entry racing with a concurrent close may still be buffered, but Recv never
-// delivers past the close), and a stream whose handler stopped draining is
-// closed rather than piling up goroutines.
-func (m *maelstromReplicateServerStream) deliver(req *proto.Append) {
+// deliver hands the appends to the Replicate handler in the order the leader
+// sent them, as a gRPC stream does. Maelstrom delivers every message after
+// its own random latency, so appends sent back to back overtake each other:
+// the backlog a leader pushes when a partition heals arrives shuffled, and
+// the follower would reject the first entry out of place, on every retry. An
+// append that arrives early waits for the ones before it. If the gap is still
+// open after replicateStreamGapTimeout, the missing appends were lost (e.g.
+// in a partition) and the stream is reset, like a broken connection, so that
+// the leader re-establishes it.
+func (m *maelstromReplicateServerStream) deliver(seq int64, req *proto.Append) {
+	m.seqMutex.Lock()
+	defer m.seqMutex.Unlock()
+
+	if seq < m.nextSeq {
+		return
+	}
+	m.early[seq] = req
+
+	advanced := false
+	for next, ok := m.early[m.nextSeq]; ok; next, ok = m.early[m.nextSeq] {
+		delete(m.early, m.nextSeq)
+		m.nextSeq++
+		advanced = true
+		m.push(next)
+	}
+
+	if len(m.early) == 0 {
+		m.stopGapTimer()
+		return
+	}
+	if advanced || m.gapTimer == nil {
+		// Give the append at nextSeq, which is missing, its time to arrive
+		m.stopGapTimer()
+		gap := m.nextSeq
+		m.gapTimer = time.AfterFunc(replicateStreamGapTimeout, func() { m.onGapTimeout(gap) })
+	}
+}
+
+func (m *maelstromReplicateServerStream) stopGapTimer() {
+	if m.gapTimer != nil {
+		m.gapTimer.Stop()
+		m.gapTimer = nil
+	}
+}
+
+func (m *maelstromReplicateServerStream) onGapTimeout(gap int64) {
 	select {
 	case <-m.done:
 		return
 	default:
+	}
+
+	m.seqMutex.Lock()
+	lost := m.nextSeq == gap && len(m.early) > 0
+	m.seqMutex.Unlock()
+
+	if lost {
+		slog.Warn(
+			"Replicate stream lost appends, resetting it",
+			slog.Int64("stream-id", m.streamId),
+			slog.Int64("missing-seq", gap),
+		)
+		m.close()
+	}
+}
+
+// push hands an entry to the Replicate handler without ever blocking the
+// dispatcher: entries for a dead stream are dropped (best effort here — an
+// entry racing with a concurrent close may still be buffered, but Recv never
+// delivers past the close), and a stream whose handler stopped draining is
+// closed rather than piling up goroutines.
+func (m *maelstromReplicateServerStream) push(req *proto.Append) {
+	select {
+	case <-m.done:
+		return
+	default:
+	}
+	if err := m.failpoints.Trigger("push.beforeSend"); err != nil {
+		m.close()
 	}
 
 	select {
@@ -504,5 +617,6 @@ func newMaelstromReplicateServerStream(msg *Message[OxiaStreamMessage]) *maelstr
 		streamId: msg.Body.StreamId,
 		requests: make(chan *proto.Append, 1024),
 		done:     make(chan struct{}),
+		early:    make(map[int64]*proto.Append),
 	}
 }

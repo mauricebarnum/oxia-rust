@@ -48,6 +48,22 @@ func TestShardAssignmentsLeader(t *testing.T) {
 			},
 		},
 		{
+			name: "nil first assignment",
+			assignments: &proto.ShardAssignments{
+				Namespaces: map[string]*proto.NamespaceShardsAssignment{
+					constant.DefaultNamespace: {Assignments: []*proto.ShardAssignment{nil}},
+				},
+			},
+		},
+		{
+			name: "first assignment without leader",
+			assignments: &proto.ShardAssignments{
+				Namespaces: map[string]*proto.NamespaceShardsAssignment{
+					constant.DefaultNamespace: {Assignments: []*proto.ShardAssignment{{Shard: 1}}},
+				},
+			},
+		},
+		{
 			name: "valid leader",
 			assignments: &proto.ShardAssignments{
 				Namespaces: map[string]*proto.NamespaceShardsAssignment{
@@ -90,6 +106,7 @@ func TestMaelstromShardAssignmentClientSendSkipsEmptyAssignments(t *testing.T) {
 		provider: provider,
 		node:     "n1",
 		streamId: 1,
+		ctx:      t.Context(),
 	}
 
 	require.NotPanics(t, func() {
@@ -100,13 +117,15 @@ func TestMaelstromShardAssignmentClientSendSkipsEmptyAssignments(t *testing.T) {
 }
 
 func TestDispatcherSkipsEmptyAssignmentLeaderUpdate(t *testing.T) {
+	captureStdout(t)
+
 	d := &dispatcher{currentLeader: "existing"}
 	require.NotPanics(t, func() {
-		d.onOxiaStreamRequestMessage(
+		require.NoError(t, d.onOxiaStreamRequestMessage(
 			MsgTypeShardAssignmentsResponse,
-			nil,
+			&Message[OxiaStreamMessage]{Src: "n1", Body: OxiaStreamMessage{StreamId: 1}},
 			&proto.ShardAssignments{Namespaces: map[string]*proto.NamespaceShardsAssignment{}},
-		)
+		))
 	})
 	require.Equal(t, "existing", d.currentLeader)
 }

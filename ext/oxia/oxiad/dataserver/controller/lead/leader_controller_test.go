@@ -15,28 +15,48 @@
 package lead
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
+	"log/slog"
+	"math"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	"go.uber.org/multierr"
 	"google.golang.org/protobuf/encoding/protojson"
 	pb "google.golang.org/protobuf/proto"
 
+	commonoption "github.com/oxia-db/oxia/oxiad/common/option"
+	"github.com/oxia-db/oxia/oxiad/common/vfs"
 	"github.com/oxia-db/oxia/oxiad/dataserver/option"
 
 	"github.com/oxia-db/oxia/common/rpc"
 	constant2 "github.com/oxia-db/oxia/oxiad/dataserver/constant"
+	"github.com/oxia-db/oxia/oxiad/dataserver/controller/statemachine"
 	"github.com/oxia-db/oxia/oxiad/dataserver/database"
 	"github.com/oxia-db/oxia/oxiad/dataserver/database/kvstore"
 
 	"github.com/oxia-db/oxia/oxiad/dataserver/wal"
+	"github.com/oxia-db/oxia/oxiad/dataserver/wal/codec"
 
 	"github.com/oxia-db/oxia/common/concurrent"
 	"github.com/oxia-db/oxia/common/constant"
+	"github.com/oxia-db/oxia/common/metric"
 	time2 "github.com/oxia-db/oxia/common/time"
+	dataserverrpc "github.com/oxia-db/oxia/oxiad/dataserver/rpc"
 
 	"github.com/oxia-db/oxia/common/proto"
 )
@@ -343,6 +363,312 @@ func TestLeaderController_Freeze(t *testing.T) {
 	assert.NoError(t, err)
 	_, err = lc.Freeze(&proto.FreezeShardRequest{Shard: shard, Term: 2, Frozen: true})
 	assert.ErrorIs(t, err, constant.ErrInvalidStatus)
+
+	assert.NoError(t, lc.Close())
+	assert.NoError(t, kvFactory.Close())
+	assert.NoError(t, walFactory.Close())
+}
+
+// heldSyncWalFactory creates wals that hold back the sync of the entries
+// appended while syncs are held: it blocks the sync goroutine of the wal, like
+// a slow disk.
+type heldSyncWalFactory struct {
+	wal.Factory
+	held atomic.Pointer[chan struct{}]
+}
+
+func (f *heldSyncWalFactory) NewWal(namespace string, shard int64, provider wal.CommitOffsetProvider) (wal.Wal, error) {
+	w, err := f.Factory.NewWal(namespace, shard, provider)
+	if err != nil {
+		return nil, err
+	}
+	return &heldSyncWal{Wal: w, factory: f}, nil
+}
+
+// holdSyncs holds back the sync of the next entries, until release is called.
+func (f *heldSyncWalFactory) holdSyncs() (release func()) {
+	held := make(chan struct{})
+	f.held.Store(&held)
+	return func() { close(held) }
+}
+
+type heldSyncWal struct {
+	wal.Wal
+	factory *heldSyncWalFactory
+}
+
+func (w *heldSyncWal) AppendAndSync(entry *proto.LogEntry, callback func(entryCrc uint32, err error)) {
+	held := w.factory.held.Load()
+	w.Wal.AppendAndSync(entry, func(entryCrc uint32, err error) {
+		if held != nil {
+			<-*held
+		}
+		callback(entryCrc, err)
+	})
+}
+
+// A write that the leader accepted before a freeze is in the wal, but the head
+// offset covers it only once it is synced. The head offset a freeze returns is
+// the final offset the split children must reach: it must cover the write,
+// which the leader acknowledges once it is committed.
+func TestLeaderController_FreezeCoversAcceptedWrites(t *testing.T) {
+	var shard int64 = 1
+
+	kvFactory, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	require.NoError(t, err)
+	walFactory := &heldSyncWalFactory{Factory: wal.NewWalFactory(&wal.FactoryOptions{
+		BaseWalDir:  t.TempDir(),
+		SegmentSize: 128 * 1024,
+		SyncData:    true,
+	})}
+
+	lc, err := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard, rpc.NewMockRpcClient(), walFactory, kvFactory, nil)
+	require.NoError(t, err)
+	_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 1})
+	require.NoError(t, err)
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
+		Shard:             shard,
+		Term:              1,
+		ReplicationFactor: 1,
+	})
+	require.NoError(t, err)
+
+	// The leader accepts a write, which is not synced yet when the freeze comes
+	release := walFactory.holdSyncs()
+	written := make(chan error, 1)
+	lc.Write(context.Background(), &proto.WriteRequest{
+		Shard: &shard,
+		Puts:  []*proto.PutRequest{{Key: "a", Value: []byte("value-a")}},
+	}, concurrent.NewOnce(func(*proto.WriteResponse) { written <- nil }, func(err error) { written <- err }))
+
+	frozen := make(chan *proto.FreezeShardResponse, 1)
+	go func() {
+		fr, err := lc.Freeze(&proto.FreezeShardRequest{Shard: shard, Term: 1, Frozen: true})
+		assert.NoError(t, err)
+		frozen <- fr
+	}()
+	assert.Never(t, func() bool { return len(frozen) > 0 }, 200*time.Millisecond, 10*time.Millisecond,
+		"the freeze returned before the write was synced")
+
+	release()
+	select {
+	case fr := <-frozen:
+		assert.EqualValues(t, 0, fr.GetHeadOffset())
+	case <-time.After(10 * time.Second):
+		require.FailNow(t, "the freeze did not return")
+	}
+	assert.NoError(t, <-written)
+
+	assert.NoError(t, lc.Close())
+	assert.NoError(t, kvFactory.Close())
+	assert.NoError(t, walFactory.Close())
+}
+
+// The head entry that a new term reports is what the coordinator elects the
+// next leader by, and what that leader truncates the followers to. A write
+// appended to the wal before the new term can still wait for its sync: the
+// head must cover it. Otherwise the entry gets synced past the head that the
+// new term found, and the next leadership on this node gives its offset to a
+// new entry, which the wal rejects.
+func TestLeaderController_NewTermWaitsForPendingSyncs(t *testing.T) {
+	var shard int64 = 1
+
+	kvFactory, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	require.NoError(t, err)
+	walFactory := &heldSyncWalFactory{Factory: wal.NewWalFactory(&wal.FactoryOptions{
+		BaseWalDir:  t.TempDir(),
+		SegmentSize: 128 * 1024,
+		SyncData:    true,
+	})}
+
+	lc, err := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard, rpc.NewMockRpcClient(),
+		walFactory, kvFactory, nil)
+	require.NoError(t, err)
+	_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 1})
+	require.NoError(t, err)
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
+		Shard:             shard,
+		Term:              1,
+		ReplicationFactor: 1,
+	})
+	require.NoError(t, err)
+
+	write := func(key string) {
+		lc.Write(context.Background(), &proto.WriteRequest{
+			Shard: &shard,
+			Puts:  []*proto.PutRequest{{Key: key, Value: []byte("value-" + key)}},
+		}, concurrent.NewOnce(func(*proto.WriteResponse) {}, func(error) {}))
+	}
+
+	// The write "a" is synced, and its callback holds the sync goroutine of
+	// the wal: the write "b" is appended, and not synced until the release
+	release := walFactory.holdSyncs()
+	write("a")
+	require.Eventually(t, func() bool {
+		return lc.(*leaderController).wal.LastOffset() == 0
+	}, 10*time.Second, 10*time.Millisecond)
+	write("b")
+
+	newTerm := make(chan *proto.NewTermResponse, 1)
+	go func() {
+		res, err := lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 2})
+		assert.NoError(t, err)
+		newTerm <- res
+	}()
+	assert.Never(t, func() bool { return len(newTerm) > 0 }, 200*time.Millisecond, 10*time.Millisecond,
+		"the new term did not wait for the sync of the write")
+
+	release()
+	select {
+	case res := <-newTerm:
+		AssertProtoEqual(t, &proto.EntryId{Term: 1, Offset: 1}, res.GetHeadEntryId())
+	case <-time.After(10 * time.Second):
+		require.FailNow(t, "the new term did not return")
+	}
+
+	// The next leadership appends after the entries of the old term, and
+	// applies them
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
+		Shard:             shard,
+		Term:              2,
+		ReplicationFactor: 1,
+	})
+	require.NoError(t, err)
+	_, err = lc.WriteBlock(context.Background(), &proto.WriteRequest{
+		Shard: &shard,
+		Puts:  []*proto.PutRequest{{Key: "c", Value: []byte("value-c")}},
+	})
+	require.NoError(t, err)
+	results, err := readAll(context.Background(), lc, &proto.ReadRequest{
+		Shard: &shard,
+		Gets: []*proto.GetRequest{
+			{Key: "a", IncludeValue: true},
+			{Key: "b", IncludeValue: true},
+			{Key: "c", IncludeValue: true},
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 3)
+	for i, key := range []string{"a", "b", "c"} {
+		assert.Equal(t, proto.Status_OK, results[i].Status, "key %s", key)
+		assert.Equal(t, []byte("value-"+key), results[i].Value, "key %s", key)
+	}
+
+	assert.NoError(t, lc.Close())
+	assert.NoError(t, kvFactory.Close())
+	assert.NoError(t, walFactory.Close())
+}
+
+// heldAppendWalFactory creates wals whose appends stall while appends are held,
+// on the goroutine of the caller: like an append waiting for room in a full
+// sync queue.
+type heldAppendWalFactory struct {
+	wal.Factory
+	held atomic.Pointer[chan struct{}]
+	// Gets a value for every append that stalls
+	stalled chan struct{}
+}
+
+func (f *heldAppendWalFactory) NewWal(namespace string, shard int64,
+	provider wal.CommitOffsetProvider) (wal.Wal, error) {
+	w, err := f.Factory.NewWal(namespace, shard, provider)
+	if err != nil {
+		return nil, err
+	}
+	return &heldAppendWal{Wal: w, factory: f}, nil
+}
+
+// holdAppends stalls the next appends, until release is called.
+func (f *heldAppendWalFactory) holdAppends() (release func()) {
+	held := make(chan struct{})
+	f.held.Store(&held)
+	return func() {
+		f.held.Store(nil)
+		close(held)
+	}
+}
+
+type heldAppendWal struct {
+	wal.Wal
+	factory *heldAppendWalFactory
+}
+
+func (w *heldAppendWal) AppendAndSync(entry *proto.LogEntry, callback func(entryCrc uint32, err error)) {
+	if held := w.factory.held.Load(); held != nil {
+		w.factory.stalled <- struct{}{}
+		<-*held
+	}
+	w.Wal.AppendAndSync(entry, callback)
+}
+
+// A write stalled in the wal append, like one waiting for room in a full sync
+// queue, must not stall the reads of the shard. A new term still waits for it,
+// so the write is appended in the term that accepted it.
+func TestLeaderController_ReadDoesNotWaitForStalledAppend(t *testing.T) {
+	var shard int64 = 1
+
+	kvFactory, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	require.NoError(t, err)
+	walFactory := &heldAppendWalFactory{Factory: newTestWalFactory(t), stalled: make(chan struct{}, 1)}
+
+	lc, err := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard, rpc.NewMockRpcClient(),
+		walFactory, kvFactory, nil)
+	require.NoError(t, err)
+	_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 1})
+	require.NoError(t, err)
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
+		Shard:             shard,
+		Term:              1,
+		ReplicationFactor: 1,
+	})
+	require.NoError(t, err)
+	_, err = lc.WriteBlock(context.Background(), &proto.WriteRequest{
+		Shard: &shard,
+		Puts:  []*proto.PutRequest{{Key: "a", Value: []byte("value-a")}},
+	})
+	require.NoError(t, err)
+
+	release := walFactory.holdAppends()
+	go lc.Write(context.Background(), &proto.WriteRequest{
+		Shard: &shard,
+		Puts:  []*proto.PutRequest{{Key: "b", Value: []byte("value-b")}},
+	}, concurrent.NewOnce(func(*proto.WriteResponse) {}, func(error) {}))
+	<-walFactory.stalled
+
+	read := make(chan []*proto.GetResponse, 1)
+	go func() {
+		results, err := readAll(context.Background(), lc, &proto.ReadRequest{
+			Shard: &shard,
+			Gets:  []*proto.GetRequest{{Key: "a", IncludeValue: true}},
+		})
+		assert.NoError(t, err)
+		read <- results
+	}()
+	select {
+	case results := <-read:
+		require.Len(t, results, 1)
+		assert.Equal(t, []byte("value-a"), results[0].Value)
+	case <-time.After(10 * time.Second):
+		release()
+		require.FailNow(t, "the read waited for the stalled write")
+	}
+
+	newTerm := make(chan *proto.NewTermResponse, 1)
+	go func() {
+		res, err := lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 2})
+		assert.NoError(t, err)
+		newTerm <- res
+	}()
+	assert.Never(t, func() bool { return len(newTerm) > 0 }, 200*time.Millisecond, 10*time.Millisecond,
+		"the new term did not wait for the stalled write")
+
+	release()
+	select {
+	case res := <-newTerm:
+		AssertProtoEqual(t, &proto.EntryId{Term: 1, Offset: 1}, res.GetHeadEntryId())
+	case <-time.After(10 * time.Second):
+		require.FailNow(t, "the new term did not return")
+	}
 
 	assert.NoError(t, lc.Close())
 	assert.NoError(t, kvFactory.Close())
@@ -1144,6 +1470,552 @@ func TestLeaderController_EntryVisibilityAfterBecomingLeader(t *testing.T) {
 	assert.NoError(t, walFactory.Close())
 }
 
+// A write request that can't be applied has no effect: the leader answers the
+// client with the error, and applies the entry. A replica that applies the
+// entry when it becomes leader must move past it too.
+func TestLeaderController_RejectedWrite(t *testing.T) {
+	var shard int64 = 1
+
+	kvFactory, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	require.NoError(t, err)
+	walFactory := newTestWalFactory(t)
+
+	sequentialPut := func(deltas ...uint64) *proto.WriteRequest {
+		return &proto.WriteRequest{Shard: &shard, Puts: []*proto.PutRequest{{
+			Key:              "s",
+			Value:            []byte("s"),
+			PartitionKey:     pb.String("s"),
+			SequenceKeyDelta: deltas,
+		}}}
+	}
+
+	// The wal of a follower that has yet to apply any entry
+	walObject, err := walFactory.NewWal(constant.DefaultNamespace, shard, nil)
+	require.NoError(t, err)
+	for offset, request := range []*proto.WriteRequest{
+		sequentialPut(1, 1),
+		// Fewer deltas than the parts of the sequence
+		sequentialPut(1),
+		{Shard: &shard, Puts: []*proto.PutRequest{{Key: "b", Value: []byte("b")}}},
+	} {
+		value, err := pb.Marshal(wrapInLogEntryValue(request))
+		require.NoError(t, err)
+		require.NoError(t, walObject.Append(&proto.LogEntry{Term: 1, Offset: int64(offset), Value: value}))
+	}
+
+	lc, err := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard, rpc.NewMockRpcClient(), walFactory, kvFactory, nil)
+	require.NoError(t, err)
+	_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 2})
+	require.NoError(t, err)
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
+		Shard:             shard,
+		Term:              2,
+		ReplicationFactor: 1,
+	})
+	require.NoError(t, err)
+
+	results, err := readAll(context.Background(), lc, &proto.ReadRequest{
+		Shard: &shard,
+		Gets: []*proto.GetRequest{{Key: "b", IncludeValue: true}, {
+			Key:            "s-",
+			ComparisonType: proto.KeyComparisonType_HIGHER,
+		}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, proto.Status_OK, results[0].Status)
+	assert.Equal(t, []byte("b"), results[0].Value)
+	assert.Equal(t, "s-00000000000000000001-00000000000000000001", results[1].GetKey())
+
+	_, err = lc.WriteBlock(context.Background(), sequentialPut(1))
+	assert.ErrorIs(t, err, database.ErrWriteRejected)
+	assert.ErrorIs(t, err, database.ErrMissingSequenceDeltas)
+	commitOffset, err := lc.(*leaderController).db.ReadCommitOffset()
+	require.NoError(t, err)
+	assert.EqualValues(t, 3, commitOffset)
+	assert.EqualValues(t, 3, lc.CommitOffset())
+
+	assert.NoError(t, lc.Close())
+	assert.NoError(t, kvFactory.Close())
+	assert.NoError(t, walFactory.Close())
+}
+
+// failingReadKVFactory opens real Pebble stores whose write batches fail to
+// read the given key while there are failures left, like a storage error.
+type failingReadKVFactory struct {
+	kvstore.Factory
+	key      string
+	failures *atomic.Int64
+}
+
+func (f failingReadKVFactory) NewKV(namespace string, shardId int64, keySorting proto.KeySortingType) (kvstore.KV, error) {
+	kv, err := f.Factory.NewKV(namespace, shardId, keySorting)
+	if err != nil {
+		return nil, err
+	}
+	return failingReadKV{KV: kv, factory: f}, nil
+}
+
+type failingReadKV struct {
+	kvstore.KV
+	factory failingReadKVFactory
+}
+
+func (kv failingReadKV) NewWriteBatch() kvstore.WriteBatch {
+	return failingReadBatch{WriteBatch: kv.KV.NewWriteBatch(), factory: kv.factory}
+}
+
+type failingReadBatch struct {
+	kvstore.WriteBatch
+	factory failingReadKVFactory
+}
+
+func (b failingReadBatch) Get(key string) ([]byte, io.Closer, error) {
+	if key == b.factory.key && b.factory.failures.Load() > 0 {
+		b.factory.failures.Add(-1)
+		return nil, nil, io.ErrUnexpectedEOF
+	}
+	return b.WriteBatch.Get(key)
+}
+
+// A committed entry that fails to apply on the leader for a reason other than
+// its request, like a storage error, is applied again until it succeeds. The
+// followers apply it: moving on would leave the leader without it for good, as
+// the next entry moves the commit offset of its database past it.
+func TestLeaderController_RetriesFailedApply(t *testing.T) {
+	var shard int64 = 1
+
+	kvFactory, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	require.NoError(t, err)
+	walFactory := newTestWalFactory(t)
+	failures := &atomic.Int64{}
+
+	// The follower applies the entries it receives to its own database
+	followerKVFactory, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	require.NoError(t, err)
+	followerDB, err := database.NewDB(constant.DefaultNamespace, shard, followerKVFactory,
+		proto.KeySortingType_UNKNOWN, time.Hour, time2.SystemClock)
+	require.NoError(t, err)
+	provider := rpc.NewMockRpcClient()
+	stopFollower := make(chan struct{})
+	followerStopped := make(chan struct{})
+	go func() {
+		defer close(followerStopped)
+		for {
+			select {
+			case <-stopFollower:
+				return
+			case req := <-provider.AppendReqs:
+				if req.Entry == nil {
+					continue
+				}
+				_, err := statemachine.ApplyLogEntry(followerDB, req.Entry, WrapperUpdateOperationCallback)
+				assert.NoError(t, err)
+				provider.AckResps <- &proto.Ack{Offset: req.Entry.Offset}
+			}
+		}
+	}()
+
+	lc, err := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard, provider, walFactory,
+		failingReadKVFactory{Factory: kvFactory, key: "b", failures: failures}, nil)
+	require.NoError(t, err)
+	_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 1})
+	require.NoError(t, err)
+	// The checksum of the database covers every entry applied to it
+	features := []proto.Feature{proto.Feature_FEATURE_DB_CHECKSUM}
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
+		Shard:             shard,
+		Term:              1,
+		ReplicationFactor: 2,
+		FollowerMaps:      map[string]*proto.EntryId{"f1": constant2.InvalidEntryId},
+		FeaturesSupported: features,
+	})
+	require.NoError(t, err)
+
+	put := func(key string) error {
+		_, err := lc.WriteBlock(context.Background(), &proto.WriteRequest{
+			Shard: &shard,
+			Puts:  []*proto.PutRequest{{Key: key, Value: []byte(key)}},
+		})
+		return err
+	}
+	require.NoError(t, put("a"))
+	// Applying the put of "b" fails once, to read the key
+	failures.Store(1)
+	assert.NoError(t, put("b"))
+	require.NoError(t, put("c"))
+
+	// The entries are the FeatureEnable, and the puts of "a", "b" and "c"
+	assert.Eventually(t, func() bool {
+		offset, err := followerDB.ReadCommitOffset()
+		return err == nil && offset == 3
+	}, 10*time.Second, 10*time.Millisecond)
+
+	leaderDB := lc.(*leaderController).db
+	assertSameAsFollower := func() {
+		t.Helper()
+		for _, key := range []string{"a", "b", "c"} {
+			expected, err := followerDB.Get(&proto.GetRequest{Key: key, IncludeValue: true})
+			require.NoError(t, err)
+			actual, err := leaderDB.Get(&proto.GetRequest{Key: key, IncludeValue: true})
+			require.NoError(t, err)
+			AssertProtoEqual(t, expected, actual)
+		}
+		assert.Equal(t, followerDB.ReadChecksum(), leaderDB.ReadChecksum())
+	}
+	assertSameAsFollower()
+
+	// Applying the wal again, when leading a new term, doesn't change it
+	_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 2})
+	require.NoError(t, err)
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
+		Shard:             shard,
+		Term:              2,
+		ReplicationFactor: 1,
+		FeaturesSupported: features,
+	})
+	require.NoError(t, err)
+	assertSameAsFollower()
+
+	close(stopFollower)
+	<-followerStopped
+	assert.NoError(t, lc.Close())
+	assert.NoError(t, followerDB.Close())
+	assert.NoError(t, kvFactory.Close())
+	assert.NoError(t, followerKVFactory.Close())
+	assert.NoError(t, walFactory.Close())
+}
+
+// A committed entry that keeps failing to apply holds back the next ones until
+// the end of the term, when their writes fail, even for the entries committed
+// with it. The next leader applies them from the wal.
+func TestLeaderController_FailedApplyUntilNewTerm(t *testing.T) {
+	var shard int64 = 1
+
+	kvFactory, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	require.NoError(t, err)
+	walFactory := newTestWalFactory(t)
+	failures := &atomic.Int64{}
+	provider := rpc.NewMockRpcClient()
+
+	lc, err := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard, provider,
+		walFactory, failingReadKVFactory{Factory: kvFactory, key: "b", failures: failures}, nil)
+	require.NoError(t, err)
+	_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 1})
+	require.NoError(t, err)
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
+		Shard:             shard,
+		Term:              1,
+		ReplicationFactor: 2,
+		FollowerMaps:      map[string]*proto.EntryId{"f1": constant2.InvalidEntryId},
+	})
+	require.NoError(t, err)
+
+	put := func(key string) chan error {
+		res := make(chan error, 1)
+		lc.Write(context.Background(), &proto.WriteRequest{
+			Shard: &shard,
+			Puts:  []*proto.PutRequest{{Key: key, Value: []byte(key)}},
+		}, concurrent.NewOnce(func(*proto.WriteResponse) { res <- nil }, func(err error) { res <- err }))
+		return res
+	}
+	a := put("a")
+	provider.AckResps <- &proto.Ack{Offset: (<-provider.AppendReqs).Entry.Offset}
+	require.NoError(t, <-a)
+
+	// The follower acks b and c at once: they are committed together
+	failures.Store(math.MaxInt64)
+	b := put("b")
+	c := put("c")
+	<-provider.AppendReqs
+	<-provider.AppendReqs
+	tracker := lc.(*leaderController).quorumAckTracker.(*quorumAckTracker)
+	require.Eventually(t, func() bool {
+		tracker.Lock()
+		defer tracker.Unlock()
+		return len(tracker.waitingRequests) == 2
+	}, 10*time.Second, time.Millisecond)
+	provider.AckResps <- &proto.Ack{Offset: 2}
+
+	assert.Never(t, func() bool { return len(b) > 0 || len(c) > 0 }, time.Second, 10*time.Millisecond)
+	commitOffset, err := lc.(*leaderController).db.ReadCommitOffset()
+	require.NoError(t, err)
+	assert.EqualValues(t, 0, commitOffset)
+	// The WAL trimming stops at the last entry applied to the database, not at
+	// the commit offset of the quorum: it keeps the entries to apply
+	assert.EqualValues(t, 2, tracker.CommitOffset())
+	assert.EqualValues(t, 0, lc.CommitOffset())
+
+	_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 2})
+	require.NoError(t, err)
+	err = <-b
+	assert.ErrorIs(t, err, constant.ErrResourceUnavailable)
+	assert.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	assert.ErrorIs(t, <-c, constant.ErrResourceUnavailable)
+
+	failures.Store(0)
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{Shard: shard, Term: 2, ReplicationFactor: 1})
+	require.NoError(t, err)
+	results, err := readAll(context.Background(), lc, &proto.ReadRequest{
+		Shard: &shard,
+		Gets:  []*proto.GetRequest{{Key: "b", IncludeValue: true}, {Key: "c", IncludeValue: true}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []byte("b"), results[0].Value)
+	assert.Equal(t, []byte("c"), results[1].Value)
+	commitOffset, err = lc.(*leaderController).db.ReadCommitOffset()
+	require.NoError(t, err)
+	assert.EqualValues(t, 2, commitOffset)
+	assert.EqualValues(t, 2, lc.CommitOffset())
+
+	// Closing the leader stops the retries too
+	failures.Store(math.MaxInt64)
+	d := put("b")
+	require.Eventually(t, func() bool { return failures.Load() < math.MaxInt64 }, 10*time.Second, time.Millisecond)
+	assert.NoError(t, lc.Close())
+	assert.ErrorIs(t, <-d, constant.ErrResourceUnavailable)
+	assert.NoError(t, kvFactory.Close())
+	assert.NoError(t, walFactory.Close())
+}
+
+// A failed apply can leave the request modified: a sequential put already has
+// the generated key when it fails to read its session. The entry is applied
+// again as it was appended to the wal.
+func TestLeaderController_RetriesFailedApplyFromWal(t *testing.T) {
+	var shard int64 = 1
+
+	kvFactory, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	require.NoError(t, err)
+	walFactory := newTestWalFactory(t)
+	failures := &atomic.Int64{}
+
+	// The session is registered by the first entry
+	lc, err := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard, rpc.NewMockRpcClient(),
+		walFactory, failingReadKVFactory{Factory: kvFactory, key: SessionKey(0), failures: failures}, nil)
+	require.NoError(t, err)
+	_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 1})
+	require.NoError(t, err)
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{Shard: shard, Term: 1, ReplicationFactor: 1})
+	require.NoError(t, err)
+	session, err := lc.CreateSession(&proto.CreateSessionRequest{Shard: shard, SessionTimeoutMs: 5_000})
+	require.NoError(t, err)
+	require.EqualValues(t, 0, session.SessionId)
+
+	failures.Store(1)
+	res, err := lc.WriteBlock(context.Background(), &proto.WriteRequest{Shard: &shard, Puts: []*proto.PutRequest{{
+		Key:              "s",
+		Value:            []byte("s"),
+		PartitionKey:     pb.String("s"),
+		SequenceKeyDelta: []uint64{1},
+		SessionId:        &session.SessionId,
+	}}})
+	require.NoError(t, err)
+	assert.Equal(t, "s-00000000000000000001", res.Puts[0].GetKey())
+
+	assert.NoError(t, lc.Close())
+	assert.NoError(t, kvFactory.Close())
+	assert.NoError(t, walFactory.Close())
+}
+
+// A committed entry that keeps failing to apply stays in the wal past the
+// retention, even with the next entries committed: the leader applies it from
+// the wal once the storage recovers.
+func TestLeaderController_RetriesFailedApplyPastWalRetention(t *testing.T) {
+	var shard int64 = 1
+
+	kvFactory, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	require.NoError(t, err)
+	clock := &time2.MockedClock{}
+	walFactory := wal.NewWalFactory(&wal.FactoryOptions{
+		BaseWalDir:           t.TempDir(),
+		SegmentSize:          128 * 1024,
+		Clock:                clock,
+		TrimmerCheckInterval: 10 * time.Millisecond,
+	})
+	failures := &atomic.Int64{}
+
+	lc, err := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard, rpc.NewMockRpcClient(),
+		walFactory, failingReadKVFactory{Factory: kvFactory, key: "c", failures: failures}, nil)
+	require.NoError(t, err)
+	_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 1})
+	require.NoError(t, err)
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{Shard: shard, Term: 1, ReplicationFactor: 1})
+	require.NoError(t, err)
+
+	put := func(key string) chan error {
+		res := make(chan error, 1)
+		lc.Write(context.Background(), &proto.WriteRequest{
+			Shard: &shard,
+			Puts:  []*proto.PutRequest{{Key: key, Value: []byte(key)}},
+		}, concurrent.NewOnce(func(*proto.WriteResponse) { res <- nil }, func(err error) { res <- err }))
+		return res
+	}
+	require.NoError(t, <-put("a"))
+	require.NoError(t, <-put("b"))
+
+	// The put of c, at offset 2, keeps failing to apply, and holds back the put
+	// of d, committed after it
+	failures.Store(math.MaxInt64)
+	c := put("c")
+	d := put("d")
+	tracker := lc.(*leaderController).quorumAckTracker
+	require.Eventually(t, func() bool { return tracker.CommitOffset() == 3 }, 10*time.Second, time.Millisecond)
+
+	// Hours later, every entry is past the retention: the trimming stops at the
+	// last entry applied, b, and keeps c
+	clock.Set(time.Now().Add(2 * time.Hour).UnixMilli())
+	walObject := lc.(*leaderController).wal
+	require.Eventually(t, func() bool { return walObject.FirstOffset() > 0 }, 10*time.Second, time.Millisecond)
+	assert.EqualValues(t, 1, walObject.FirstOffset())
+
+	// The storage recovers
+	failures.Store(0)
+	require.Eventually(t, func() bool { return len(c) > 0 && len(d) > 0 }, 10*time.Second, 10*time.Millisecond)
+	assert.NoError(t, <-c)
+	assert.NoError(t, <-d)
+	results, err := readAll(context.Background(), lc, &proto.ReadRequest{
+		Shard: &shard,
+		Gets:  []*proto.GetRequest{{Key: "c", IncludeValue: true}, {Key: "d", IncludeValue: true}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []byte("c"), results[0].Value)
+	assert.Equal(t, []byte("d"), results[1].Value)
+
+	// Then the trimming moves on
+	assert.Eventually(t, func() bool { return walObject.FirstOffset() == 3 }, 10*time.Second, time.Millisecond)
+
+	assert.NoError(t, lc.Close())
+	assert.NoError(t, kvFactory.Close())
+	assert.NoError(t, walFactory.Close())
+}
+
+// The leader applies the entries to its database, which runs without the Pebble
+// WAL: they are durable only once the database gets flushed. Past the
+// retention, the trimming deletes the WAL segments of the applied entries: after
+// a crash, the database must still hold them, as the leader can't apply them
+// again.
+func TestLeaderController_CrashAfterWalTrim(t *testing.T) {
+	var shard int64 = 1
+	kvOptions := kvstore.NewFactoryOptionsForTest(t)
+	kvFactory, err := kvstore.NewPebbleKVFactory(kvOptions)
+	require.NoError(t, err)
+	clock := &time2.MockedClock{}
+	walOptions := wal.FactoryOptions{
+		BaseWalDir:           t.TempDir(),
+		SegmentSize:          4 * 1024,
+		Clock:                clock,
+		TrimmerCheckInterval: 10 * time.Millisecond,
+	}
+	walFactory := wal.NewWalFactory(&walOptions)
+
+	lc, err := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard, rpc.NewMockRpcClient(),
+		walFactory, kvFactory, nil)
+	require.NoError(t, err)
+	_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 1})
+	require.NoError(t, err)
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{Shard: shard, Term: 1, ReplicationFactor: 1})
+	require.NoError(t, err)
+
+	// The puts fill a few WAL segments, and a small part of a database memtable
+	value := []byte(strings.Repeat("v", 500))
+	var gets []*proto.GetRequest
+	for i := 0; i < 20; i++ {
+		key := fmt.Sprintf("key-%02d", i)
+		_, err = lc.WriteBlock(context.Background(), &proto.WriteRequest{
+			Shard: &shard,
+			Puts:  []*proto.PutRequest{{Key: key, Value: value}},
+		})
+		require.NoError(t, err)
+		gets = append(gets, &proto.GetRequest{Key: key})
+	}
+
+	// Hours later, the trimming deletes the segments of the first entries
+	clock.Set(time.Now().Add(2 * time.Hour).UnixMilli())
+	leaderWal := lc.(*leaderController).wal
+	require.Eventually(t, func() bool {
+		return leaderWal.FirstOffset() == 19
+	}, 10*time.Second, 10*time.Millisecond)
+
+	// The leader crashes, restarts from what was on disk, and gets elected again
+	crashedKvFactory, crashedWalFactory := crashImage(t, kvOptions.DataDir, walOptions)
+	assert.NoError(t, lc.Close())
+	assert.NoError(t, kvFactory.Close())
+	assert.NoError(t, walFactory.Close())
+
+	lc, err = NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard, rpc.NewMockRpcClient(),
+		crashedWalFactory, crashedKvFactory, nil)
+	require.NoError(t, err)
+	assert.Positive(t, lc.(*leaderController).wal.FirstOffset())
+	_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 2})
+	require.NoError(t, err)
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{Shard: shard, Term: 2, ReplicationFactor: 1})
+	require.NoError(t, err)
+
+	results, err := readAll(context.Background(), lc, &proto.ReadRequest{Shard: &shard, Gets: gets})
+	require.NoError(t, err)
+	for i, res := range results {
+		assert.Equalf(t, proto.Status_OK, res.Status, "key-%02d", i)
+	}
+
+	assert.NoError(t, lc.Close())
+	assert.NoError(t, crashedKvFactory.Close())
+	assert.NoError(t, crashedWalFactory.Close())
+}
+
+// crashImage copies the data directories of a running shard, and returns the
+// factories to open the copies with, using walOptions apart from the directory:
+// the copies hold what a crash of the node would leave on disk. The database
+// runs without the Pebble WAL, so they miss the database writes that are still
+// in the memtable.
+func crashImage(t *testing.T, kvDataDir string, walOptions wal.FactoryOptions) (kvstore.Factory, wal.Factory) {
+	t.Helper()
+
+	kvOptions := kvstore.NewFactoryOptionsForTest(t)
+	copyRunningDir(t, kvDataDir, kvOptions.DataDir)
+	kvFactory, err := kvstore.NewPebbleKVFactory(kvOptions)
+	require.NoError(t, err)
+
+	crashedWalDir := t.TempDir()
+	copyRunningDir(t, walOptions.BaseWalDir, crashedWalDir)
+	walOptions.BaseWalDir = crashedWalDir
+	return kvFactory, wal.NewWalFactory(&walOptions)
+}
+
+// copyRunningDir copies the files in src to dst. Pebble deletes its obsolete
+// files in the background: a file that is gone by the time it is copied is
+// skipped, as a crash right after its deletion would leave it.
+func copyRunningDir(t *testing.T, src string, dst string) {
+	t.Helper()
+
+	require.NoError(t, filepath.WalkDir(src, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		relPath, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return os.MkdirAll(filepath.Join(dst, relPath), 0755)
+		}
+		content, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(dst, relPath), content, 0644)
+	}))
+}
+
+// decodeNotificationBatch decodes a batch the leader sends, as the clients do.
+func decodeNotificationBatch(t *testing.T, encoded *proto.EncodedNotificationBatch) *proto.NotificationBatch {
+	t.Helper()
+	nb := &proto.NotificationBatch{}
+	require.NoError(t, nb.UnmarshalVT(encoded.Data))
+	assert.Equal(t, encoded.Offset, nb.Offset)
+	return nb
+}
+
 func TestLeaderController_Notifications(t *testing.T) {
 	var shard int64 = 1
 
@@ -1161,8 +2033,13 @@ func TestLeaderController_Notifications(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	adaptor := concurrent.NewStreamCallbackAdaptor[*proto.NotificationBatch]()
+	adaptor := concurrent.NewStreamCallbackAdaptor[*proto.EncodedNotificationBatch]()
 	lc.GetNotifications(ctx, &proto.NotificationsRequest{Shard: shard, StartOffsetExclusive: &wal.InvalidOffset}, adaptor)
+
+	// The subscription is confirmed by an empty batch on the requested offset
+	nb0 := decodeNotificationBatch(t, <-adaptor.Ch())
+	assert.EqualValues(t, wal.InvalidOffset, nb0.Offset)
+	assert.Empty(t, nb0.Notifications)
 
 	// WriteBlock entry
 	_, _ = lc.WriteBlock(context.Background(), &proto.WriteRequest{
@@ -1172,7 +2049,7 @@ func TestLeaderController_Notifications(t *testing.T) {
 			Value: []byte("value-a")}},
 	})
 
-	nb1 := <-adaptor.Ch()
+	nb1 := decodeNotificationBatch(t, <-adaptor.Ch())
 	assert.EqualValues(t, 0, nb1.Offset)
 	assert.Equal(t, 1, len(nb1.Notifications))
 	assert.Equal(t, "a", nb1.Notifications[0].GetKey())
@@ -1187,6 +2064,127 @@ func TestLeaderController_Notifications(t *testing.T) {
 	// Cancelling the stream context should close the `GetNotification()` handler
 	cancel()
 
+	assert.Eventually(t, func() bool {
+		return adaptor.IsCompleted()
+	}, 10*time.Second, 100*time.Millisecond)
+
+	assert.NoError(t, lc.Close())
+	assert.NoError(t, kvFactory.Close())
+	assert.NoError(t, walFactory.Close())
+}
+
+func TestLeaderController_NotificationsResumeEchoesRequestedOffset(t *testing.T) {
+	var shard int64 = 1
+
+	kvFactory, _ := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	walFactory := newTestWalFactory(t)
+
+	lc, _ := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard, rpc.NewMockRpcClient(), walFactory, kvFactory, nil)
+	_, _ = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 1})
+	_, _ = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
+		Shard:             shard,
+		Term:              1,
+		ReplicationFactor: 1,
+		FollowerMaps:      nil,
+	})
+
+	for _, key := range []string{"a", "b", "c"} {
+		_, err := lc.WriteBlock(context.Background(), &proto.WriteRequest{
+			Shard: &shard,
+			Puts:  []*proto.PutRequest{{Key: key, Value: []byte("value-" + key)}},
+		})
+		assert.NoError(t, err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Resume from an offset that is neither the invalid offset nor the commit
+	// offset, so the confirmation batch can only match by echoing the request
+	startOffsetExclusive := int64(1)
+	adaptor := concurrent.NewStreamCallbackAdaptor[*proto.EncodedNotificationBatch]()
+	lc.GetNotifications(ctx, &proto.NotificationsRequest{
+		Shard:                shard,
+		StartOffsetExclusive: &startOffsetExclusive,
+	}, adaptor)
+
+	nb0 := decodeNotificationBatch(t, <-adaptor.Ch())
+	assert.EqualValues(t, startOffsetExclusive, nb0.Offset)
+	assert.Empty(t, nb0.Notifications)
+
+	// Dispatch then resumes right after the requested offset
+	nb1 := decodeNotificationBatch(t, <-adaptor.Ch())
+	assert.EqualValues(t, 2, nb1.Offset)
+	assert.Equal(t, 1, len(nb1.Notifications))
+	assert.Equal(t, "c", nb1.Notifications[0].GetKey())
+
+	cancel()
+	assert.Eventually(t, func() bool {
+		return adaptor.IsCompleted()
+	}, 10*time.Second, 100*time.Millisecond)
+
+	assert.NoError(t, lc.Close())
+	assert.NoError(t, kvFactory.Close())
+	assert.NoError(t, walFactory.Close())
+}
+
+// TestLeaderController_NotificationsResumeAfterTrimmed checks that a
+// subscription that resumes from an offset after which the retention deleted
+// batches is confirmed after them: that's how the subscriber learns that it
+// missed them.
+func TestLeaderController_NotificationsResumeAfterTrimmed(t *testing.T) {
+	var shard int64 = 1
+
+	kvFactory, _ := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	walFactory := newTestWalFactory(t)
+	storageOptions := &option.StorageOptions{}
+	storageOptions.Notification.Retention = commonoption.Duration(300 * time.Millisecond)
+
+	lc, err := NewLeaderController(storageOptions, constant.DefaultNamespace, shard, rpc.NewMockRpcClient(), walFactory,
+		kvFactory, nil)
+	require.NoError(t, err)
+	_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 1})
+	require.NoError(t, err)
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
+		Shard:             shard,
+		Term:              1,
+		ReplicationFactor: 1,
+	})
+	require.NoError(t, err)
+
+	for _, key := range []string{"a", "b", "c"} {
+		_, err := lc.WriteBlock(context.Background(), &proto.WriteRequest{
+			Shard: &shard,
+			Puts:  []*proto.PutRequest{{Key: key, Value: []byte("value-" + key)}},
+		})
+		require.NoError(t, err)
+	}
+	require.Eventually(t, func() bool {
+		return lc.(*leaderController).db.TrimmedNotificationsOffset() == 2
+	}, 10*time.Second, 10*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	startOffsetExclusive := int64(0)
+	adaptor := concurrent.NewStreamCallbackAdaptor[*proto.EncodedNotificationBatch]()
+	lc.GetNotifications(ctx, &proto.NotificationsRequest{
+		Shard:                shard,
+		StartOffsetExclusive: &startOffsetExclusive,
+	}, adaptor)
+
+	nb0 := decodeNotificationBatch(t, <-adaptor.Ch())
+	assert.EqualValues(t, 2, nb0.Offset)
+	assert.Empty(t, nb0.Notifications)
+
+	// Dispatch then resumes after the deleted batches
+	_, err = lc.WriteBlock(context.Background(), &proto.WriteRequest{
+		Shard: &shard,
+		Puts:  []*proto.PutRequest{{Key: "d", Value: []byte("value-d")}},
+	})
+	require.NoError(t, err)
+	nb1 := decodeNotificationBatch(t, <-adaptor.Ch())
+	assert.EqualValues(t, 3, nb1.Offset)
+	assert.Equal(t, "d", nb1.Notifications[0].GetKey())
+
+	cancel()
 	assert.Eventually(t, func() bool {
 		return adaptor.IsCompleted()
 	}, 10*time.Second, 100*time.Millisecond)
@@ -1212,7 +2210,7 @@ func TestLeaderController_NotificationsCloseLeader(t *testing.T) {
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
-	adaptor := concurrent.NewStreamCallbackAdaptor[*proto.NotificationBatch]()
+	adaptor := concurrent.NewStreamCallbackAdaptor[*proto.EncodedNotificationBatch]()
 	lc.GetNotifications(ctx, &proto.NotificationsRequest{Shard: shard, StartOffsetExclusive: &wal.InvalidOffset}, adaptor)
 
 	// The handler is still running waiting for more notifications
@@ -1233,6 +2231,49 @@ func TestLeaderController_NotificationsCloseLeader(t *testing.T) {
 	assert.NoError(t, walFactory.Close())
 }
 
+// NewTerm sets whether the db has notifications enabled while the dispatch of
+// an active subscription, which doesn't hold the leader lock, reads it. The
+// test fails under -race if the two accesses aren't synchronized.
+func TestLeaderController_NotificationsNewTerm(t *testing.T) {
+	var shard int64 = 1
+
+	kvFactory, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	require.NoError(t, err)
+	walFactory := newTestWalFactory(t)
+
+	lc, err := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard, rpc.NewMockRpcClient(),
+		walFactory, kvFactory, nil)
+	require.NoError(t, err)
+	_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 1})
+	require.NoError(t, err)
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
+		Shard:             shard,
+		Term:              1,
+		ReplicationFactor: 1,
+	})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	adaptor := concurrent.NewStreamCallbackAdaptor[*proto.EncodedNotificationBatch]()
+	lc.GetNotifications(ctx, &proto.NotificationsRequest{Shard: shard, StartOffsetExclusive: &wal.InvalidOffset}, adaptor)
+
+	// The dispatch reads the next notifications right after confirming the
+	// subscription
+	<-adaptor.Ch()
+	_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 2})
+	require.NoError(t, err)
+	assert.False(t, adaptor.IsCompleted())
+
+	cancel()
+	assert.Eventually(t, func() bool {
+		return adaptor.IsCompleted()
+	}, 10*time.Second, 100*time.Millisecond)
+
+	assert.NoError(t, lc.Close())
+	assert.NoError(t, kvFactory.Close())
+	assert.NoError(t, walFactory.Close())
+}
+
 func TestLeaderController_NotificationsWhenNotReady(t *testing.T) {
 	var shard int64 = 1
 
@@ -1245,7 +2286,7 @@ func TestLeaderController_NotificationsWhenNotReady(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	adaptor := concurrent.NewStreamCallbackAdaptor[*proto.NotificationBatch]()
+	adaptor := concurrent.NewStreamCallbackAdaptor[*proto.EncodedNotificationBatch]()
 	lc.GetNotifications(ctx, &proto.NotificationsRequest{Shard: shard, StartOffsetExclusive: &wal.InvalidOffset}, adaptor)
 	assert.ErrorIs(t, adaptor.Error(), constant.ErrNodeIsNotLeader)
 
@@ -1470,6 +2511,47 @@ func TestLeaderController_GetStatus(t *testing.T) {
 	assert.NoError(t, walFactory.Close())
 }
 
+// The leader reports the features pinned by its term, so that a coordinator
+// that didn't negotiate them, e.g. after a restart, can tell whether the
+// ensemble supports more.
+func TestLeaderController_GetStatusReportsTermFeatures(t *testing.T) {
+	var shard int64 = 1
+
+	kvFactory, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	assert.NoError(t, err)
+	walFactory := newTestWalFactory(t)
+
+	lc, err := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard, rpc.NewMockRpcClient(), walFactory, kvFactory, nil)
+	assert.NoError(t, err)
+
+	// Term 1 pins no feature
+	_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 1, Options: &proto.NewTermOptions{EnableNotifications: true}})
+	assert.NoError(t, err)
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{Shard: shard, Term: 1, ReplicationFactor: 1})
+	assert.NoError(t, err)
+
+	res, err := lc.GetStatus(&proto.GetStatusRequest{Shard: shard})
+	assert.NoError(t, err)
+	assert.NotNil(t, res.TermFeatures)
+	assert.Empty(t, res.TermFeatures.GetFeatures())
+
+	// Term 2 pins the checksum feature
+	checksum := []proto.Feature{proto.Feature_FEATURE_DB_CHECKSUM}
+	_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 2, Options: &proto.NewTermOptions{EnableNotifications: true, Features: checksum}})
+	assert.NoError(t, err)
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{Shard: shard, Term: 2, ReplicationFactor: 1, FeaturesSupported: checksum})
+	assert.NoError(t, err)
+
+	res, err = lc.GetStatus(&proto.GetStatusRequest{Shard: shard})
+	assert.NoError(t, err)
+	assert.EqualValues(t, 2, res.Term)
+	assert.Equal(t, checksum, res.TermFeatures.GetFeatures())
+
+	assert.NoError(t, lc.Close())
+	assert.NoError(t, kvFactory.Close())
+	assert.NoError(t, walFactory.Close())
+}
+
 func TestLeaderController_Write(t *testing.T) {
 	var shard int64 = 1
 
@@ -1573,7 +2655,7 @@ func TestLeaderController_NotificationsDisabled(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	adaptor := concurrent.NewStreamCallbackAdaptor[*proto.NotificationBatch]()
+	adaptor := concurrent.NewStreamCallbackAdaptor[*proto.EncodedNotificationBatch]()
 	lc.GetNotifications(ctx, &proto.NotificationsRequest{Shard: shard, StartOffsetExclusive: &wal.InvalidOffset}, adaptor)
 	assert.ErrorIs(t, adaptor.Error(), constant.ErrNotificationsNotEnabled)
 
@@ -1732,7 +2814,7 @@ func TestLeaderController_ConcurrentWrite(t *testing.T) {
 		FollowerMaps:      nil,
 	})
 
-	errors := make(chan error, 10)
+	errs := make(chan error, 10)
 
 	for i := 0; i < 10; i++ {
 		finalIndex := i
@@ -1743,12 +2825,12 @@ func TestLeaderController_ConcurrentWrite(t *testing.T) {
 					{Key: fmt.Sprintf("%d", finalIndex), Value: []byte{0}},
 				},
 			})
-			errors <- err
+			errs <- err
 		}()
 	}
 
 	for i := 0; i < 10; i++ {
-		assert.NoError(t, <-errors)
+		assert.NoError(t, <-errs)
 	}
 }
 
@@ -1899,4 +2981,1962 @@ func TestLeaderController_CloseWaitsForInflightRead(t *testing.T) {
 
 	assert.NoError(t, kvFactory.Close())
 	assert.NoError(t, walFactory.Close())
+}
+
+func TestLeaderController_NewTermRejectsUnsupportedFeature(t *testing.T) {
+	var shard int64 = 1
+
+	kvFactory, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	assert.NoError(t, err)
+	walFactory := newTestWalFactory(t)
+
+	lc, err := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard, rpc.NewMockRpcClient(), walFactory, kvFactory, nil)
+	assert.NoError(t, err)
+
+	// A term pinning a feature this binary does not implement must be refused
+	_, err = lc.NewTerm(&proto.NewTermRequest{
+		Shard: shard,
+		Term:  1,
+		Options: &proto.NewTermOptions{
+			EnableNotifications: true,
+			Features:            []proto.Feature{proto.Feature(999)},
+		},
+	})
+	assert.ErrorIs(t, err, constant.ErrUnsupportedFeatures)
+	assert.Equal(t, proto.ServingStatus_NOT_MEMBER, lc.Status())
+
+	// The controller is still usable for a term with supported features
+	res, err := lc.NewTerm(&proto.NewTermRequest{
+		Shard: shard,
+		Term:  1,
+		Options: &proto.NewTermOptions{
+			EnableNotifications: true,
+			Features:            []proto.Feature{proto.Feature_FEATURE_DB_CHECKSUM},
+		},
+	})
+	assert.NoError(t, err)
+	assert.Empty(t, res.FeaturesEnabled)
+	assert.Equal(t, proto.ServingStatus_FENCED, lc.Status())
+
+	assert.NoError(t, lc.Close())
+	assert.NoError(t, kvFactory.Close())
+	assert.NoError(t, walFactory.Close())
+}
+
+func TestLeaderController_BecomeLeaderRejectsMissingEnabledFeature(t *testing.T) {
+	var shard int64 = 1
+
+	kvFactory, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	assert.NoError(t, err)
+	walFactory := newTestWalFactory(t)
+
+	lc, err := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard, rpc.NewMockRpcClient(), walFactory, kvFactory, nil)
+	assert.NoError(t, err)
+
+	// Term 1 negotiates and enables the checksum feature
+	_, err = lc.NewTerm(&proto.NewTermRequest{
+		Shard: shard,
+		Term:  1,
+		Options: &proto.NewTermOptions{
+			EnableNotifications: true,
+			Features:            []proto.Feature{proto.Feature_FEATURE_DB_CHECKSUM},
+		},
+	})
+	assert.NoError(t, err)
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
+		Shard:             shard,
+		Term:              1,
+		ReplicationFactor: 1,
+		FeaturesSupported: []proto.Feature{proto.Feature_FEATURE_DB_CHECKSUM},
+	})
+	assert.NoError(t, err)
+	assert.Eventually(t, func() bool {
+		return lc.IsFeatureEnabled(proto.Feature_FEATURE_DB_CHECKSUM)
+	}, 5*time.Second, 50*time.Millisecond)
+
+	// Term 2's negotiated set misses the enabled feature (e.g. a node that
+	// does not support it joined the ensemble): the fenced node reports the
+	// enabled feature, and refuses to lead with the incompatible ensemble.
+	res, err := lc.NewTerm(&proto.NewTermRequest{
+		Shard:   shard,
+		Term:    2,
+		Options: &proto.NewTermOptions{EnableNotifications: true},
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, []proto.Feature{proto.Feature_FEATURE_DB_CHECKSUM}, res.FeaturesEnabled)
+
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
+		Shard:             shard,
+		Term:              2,
+		ReplicationFactor: 1,
+		FeaturesSupported: nil,
+	})
+	assert.ErrorIs(t, err, constant.ErrUnsupportedFeatures)
+
+	// A new term whose set covers the enabled feature recovers the shard
+	_, err = lc.NewTerm(&proto.NewTermRequest{
+		Shard: shard,
+		Term:  3,
+		Options: &proto.NewTermOptions{
+			EnableNotifications: true,
+			Features:            []proto.Feature{proto.Feature_FEATURE_DB_CHECKSUM},
+		},
+	})
+	assert.NoError(t, err)
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
+		Shard:             shard,
+		Term:              3,
+		ReplicationFactor: 1,
+		FeaturesSupported: []proto.Feature{proto.Feature_FEATURE_DB_CHECKSUM},
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, proto.ServingStatus_LEADER, lc.Status())
+
+	assert.NoError(t, lc.Close())
+	assert.NoError(t, kvFactory.Close())
+	assert.NoError(t, walFactory.Close())
+}
+
+func TestLeaderController_AddFollowerRejectsUnsupportedFeatures(t *testing.T) {
+	var shard int64 = 1
+
+	kvFactory, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	assert.NoError(t, err)
+	walFactory := newTestWalFactory(t)
+
+	lc, err := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard, rpc.NewMockRpcClient(), walFactory, kvFactory, nil)
+	assert.NoError(t, err)
+
+	_, err = lc.NewTerm(&proto.NewTermRequest{
+		Shard: shard,
+		Term:  5,
+		Options: &proto.NewTermOptions{
+			EnableNotifications: true,
+			Features:            []proto.Feature{proto.Feature_FEATURE_DB_CHECKSUM},
+		},
+	})
+	assert.NoError(t, err)
+
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
+		Shard:             shard,
+		Term:              5,
+		ReplicationFactor: 4,
+		FollowerMaps: map[string]*proto.EntryId{
+			"f1": constant2.InvalidEntryId,
+		},
+		FeaturesSupported: []proto.Feature{proto.Feature_FEATURE_DB_CHECKSUM},
+	})
+	assert.NoError(t, err)
+
+	// A joiner that does not support the term's pinned features is refused
+	_, err = lc.AddFollower(&proto.AddFollowerRequest{
+		Shard:               shard,
+		Term:                5,
+		FollowerName:        "f2",
+		FollowerHeadEntryId: constant2.InvalidEntryId,
+		FollowerFeatures:    &proto.FollowerFeatures{},
+	})
+	assert.ErrorIs(t, err, constant.ErrUnsupportedFeatures)
+
+	// Without the follower features (a coordinator that predates the
+	// validation), the join is accepted as before
+	_, err = lc.AddFollower(&proto.AddFollowerRequest{
+		Shard:               shard,
+		Term:                5,
+		FollowerName:        "f2",
+		FollowerHeadEntryId: constant2.InvalidEntryId,
+	})
+	assert.NoError(t, err)
+
+	// A joiner that covers the pinned features is accepted
+	_, err = lc.AddFollower(&proto.AddFollowerRequest{
+		Shard:               shard,
+		Term:                5,
+		FollowerName:        "f3",
+		FollowerHeadEntryId: constant2.InvalidEntryId,
+		FollowerFeatures:    &proto.FollowerFeatures{Supported: []proto.Feature{proto.Feature_FEATURE_DB_CHECKSUM}},
+	})
+	assert.NoError(t, err)
+
+	assert.NoError(t, lc.Close())
+	assert.NoError(t, kvFactory.Close())
+	assert.NoError(t, walFactory.Close())
+}
+
+func readWalLogEntries(t *testing.T, w wal.Wal) []*proto.LogEntry {
+	t.Helper()
+
+	reader, err := w.NewReader(wal.InvalidOffset)
+	assert.NoError(t, err)
+	defer reader.Close()
+
+	var entries []*proto.LogEntry
+	for reader.HasNext() {
+		entry, _, _, err := reader.ReadNext()
+		assert.NoError(t, err)
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+func decodeLogEntry(t *testing.T, entry *proto.LogEntry) *proto.LogEntryValue {
+	t.Helper()
+
+	v := &proto.LogEntryValue{}
+	assert.NoError(t, v.UnmarshalVT(entry.Value))
+	return v
+}
+
+// The term's feature set is pinned at election time: the FeatureEnable entry
+// must be the first entry of the term that changes the set, before any write,
+// and a failover with the same negotiated set must not produce a new one.
+func TestLeaderController_FeatureEnableIsFirstEntryOfTerm(t *testing.T) {
+	var shard int64 = 1
+
+	kvFactory, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	assert.NoError(t, err)
+	walFactory := newTestWalFactory(t)
+
+	lc, err := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard, rpc.NewMockRpcClient(), walFactory, kvFactory, nil)
+	assert.NoError(t, err)
+
+	write := func(key string) {
+		_, err := lc.WriteBlock(context.Background(), &proto.WriteRequest{
+			Shard: &shard,
+			Puts:  []*proto.PutRequest{{Key: key, Value: []byte(key)}},
+		})
+		assert.NoError(t, err)
+	}
+
+	// Term 1: no features negotiated
+	_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 1, Options: &proto.NewTermOptions{EnableNotifications: true}})
+	assert.NoError(t, err)
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{Shard: shard, Term: 1, ReplicationFactor: 1})
+	assert.NoError(t, err)
+	write("k1")
+
+	// Term 2: the checksum feature enters the negotiated set
+	checksum := []proto.Feature{proto.Feature_FEATURE_DB_CHECKSUM}
+	_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 2, Options: &proto.NewTermOptions{EnableNotifications: true, Features: checksum}})
+	assert.NoError(t, err)
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{Shard: shard, Term: 2, ReplicationFactor: 1, FeaturesSupported: checksum})
+	assert.NoError(t, err)
+	write("k2")
+
+	// Term 3: failover with the same feature set
+	res, err := lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 3, Options: &proto.NewTermOptions{EnableNotifications: true, Features: checksum}})
+	assert.NoError(t, err)
+	assert.Equal(t, checksum, res.FeaturesEnabled)
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{Shard: shard, Term: 3, ReplicationFactor: 1, FeaturesSupported: checksum})
+	assert.NoError(t, err)
+	write("k3")
+
+	entries := readWalLogEntries(t, lc.(*leaderController).wal)
+	assert.Len(t, entries, 4)
+
+	// Term 1: only the write
+	assert.EqualValues(t, 1, entries[0].Term)
+	assert.NotNil(t, decodeLogEntry(t, entries[0]).GetRequests())
+
+	// Term 2: the FeatureEnable entry precedes the first write of the term
+	assert.EqualValues(t, 2, entries[1].Term)
+	featureEnable := decodeLogEntry(t, entries[1]).GetControlRequest().GetFeatureEnable()
+	assert.NotNil(t, featureEnable)
+	assert.Equal(t, checksum, featureEnable.Features)
+	assert.EqualValues(t, 2, entries[2].Term)
+	assert.NotNil(t, decodeLogEntry(t, entries[2]).GetRequests())
+
+	// Term 3: the set did not change, so no new FeatureEnable entry
+	assert.EqualValues(t, 3, entries[3].Term)
+	assert.NotNil(t, decodeLogEntry(t, entries[3]).GetRequests())
+
+	assert.NoError(t, lc.Close())
+	assert.NoError(t, kvFactory.Close())
+	assert.NoError(t, walFactory.Close())
+}
+
+// failingTermKVFactory opens real Pebble stores whose term read fails, so that
+// NewLeaderController fails after having opened both the WAL and the database.
+type failingTermKVFactory struct {
+	kvstore.Factory
+}
+
+func (f failingTermKVFactory) NewKV(namespace string, shardId int64, keySorting proto.KeySortingType) (kvstore.KV, error) {
+	kv, err := f.Factory.NewKV(namespace, shardId, keySorting)
+	if err != nil {
+		return nil, err
+	}
+	return failingTermKV{kv}, nil
+}
+
+type failingTermKV struct {
+	kvstore.KV
+}
+
+func (kv failingTermKV) Get(key string, comparisonType kvstore.ComparisonType, opts kvstore.IteratorOpts) (string, []byte, io.Closer, error) {
+	if key == constant.InternalKeyPrefix+"term" {
+		return "", nil, nil, io.ErrUnexpectedEOF
+	}
+	return kv.KV.Get(key, comparisonType, opts)
+}
+
+func TestLeaderController_ClosesDatabaseOnReadTermFailure(t *testing.T) {
+	var shard int64 = 1
+
+	kvFactory, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	assert.NoError(t, err)
+	walFactory := newTestWalFactory(t)
+
+	lc, err := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard, rpc.NewMockRpcClient(), walFactory, failingTermKVFactory{kvFactory}, nil)
+	assert.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	assert.Nil(t, lc)
+
+	// A leaked database would still hold the Pebble lock and fail the re-open
+	lc, err = NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard, rpc.NewMockRpcClient(), walFactory, kvFactory, nil)
+	require.NoError(t, err)
+
+	assert.NoError(t, lc.Close())
+	assert.NoError(t, kvFactory.Close())
+	assert.NoError(t, walFactory.Close())
+}
+
+// corruptWalEntry flips a payload byte of the entry at the given offset, in the
+// first segment of the shard WAL, so that the entry fails its CRC check.
+func corruptWalEntry(t *testing.T, walDir string, shard int64, offset int64) {
+	t.Helper()
+
+	segment := filepath.Join(walDir, constant.DefaultNamespace, fmt.Sprint("shard-", shard), "0")
+	c, exists, err := codec.GetOrCreate(vfs.OSFS{}, segment)
+	require.NoError(t, err)
+	require.True(t, exists)
+
+	txnPath := segment + c.GetTxnExtension()
+	buf, err := os.ReadFile(txnPath)
+	require.NoError(t, err)
+
+	var fileOffset uint32
+	for range offset {
+		payloadSize, _, _, err := c.ReadHeaderWithValidation(buf, fileOffset)
+		require.NoError(t, err)
+		fileOffset += c.GetHeaderSize() + payloadSize
+	}
+	buf[fileOffset+c.GetHeaderSize()] ^= 0xff
+	require.NoError(t, os.WriteFile(txnPath, buf, 0644))
+}
+
+// The WAL recovery discards a corrupted entry, and the ones after it, only when
+// it is above the database commit offset, as never committed. A corrupted entry
+// already applied to the database must fail the recovery instead: the leader
+// would otherwise start from a WAL head behind the database, and reuse the
+// offsets of committed entries.
+func TestLeaderController_WalRecoveryWithCorruptedEntry(t *testing.T) {
+	var shard int64 = 1
+
+	kvFactory, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	require.NoError(t, err)
+	walDir := t.TempDir()
+	walFactory := wal.NewWalFactory(&wal.FactoryOptions{BaseWalDir: walDir, SegmentSize: 128 * 1024})
+
+	lc, err := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard, rpc.NewMockRpcClient(), walFactory, kvFactory, nil)
+	require.NoError(t, err)
+	_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 1})
+	require.NoError(t, err)
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{Shard: shard, Term: 1, ReplicationFactor: 1})
+	require.NoError(t, err)
+
+	// The entries 0 to 2 get committed and applied to the database
+	for i := range 3 {
+		_, err = lc.WriteBlock(context.Background(), &proto.WriteRequest{
+			Shard: &shard,
+			Puts:  []*proto.PutRequest{{Key: fmt.Sprintf("key-%d", i), Value: []byte("value")}},
+		})
+		require.NoError(t, err)
+	}
+	// The entry 3 only reaches the WAL, above the database commit offset
+	require.NoError(t, lc.(*leaderController).wal.Append(&proto.LogEntry{Term: 1, Offset: 3, Value: []byte("value")}))
+	require.NoError(t, lc.Close())
+
+	// A corrupted entry above the database commit offset is discarded
+	corruptWalEntry(t, walDir, shard, 3)
+	lc, err = NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard, rpc.NewMockRpcClient(), walFactory, kvFactory, nil)
+	require.NoError(t, err)
+	res, err := lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 2})
+	require.NoError(t, err)
+	AssertProtoEqual(t, &proto.EntryId{Term: 1, Offset: 2}, res.HeadEntryId)
+	require.NoError(t, lc.Close())
+
+	// A corrupted entry that the database already applied fails the recovery
+	corruptWalEntry(t, walDir, shard, 1)
+	lc, err = NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard, rpc.NewMockRpcClient(), walFactory, kvFactory, nil)
+	assert.ErrorIs(t, err, codec.ErrDataCorrupted)
+	assert.Nil(t, lc)
+
+	// A leaked database would still hold the Pebble lock and fail the re-open
+	kv, err := kvFactory.NewKV(constant.DefaultNamespace, shard, proto.KeySortingType_UNKNOWN)
+	require.NoError(t, err)
+	assert.NoError(t, kv.Close())
+
+	assert.NoError(t, kvFactory.Close())
+	assert.NoError(t, walFactory.Close())
+}
+
+// A node seeded from a snapshot, like the first leader of a split child, has an
+// empty WAL while its database is at the snapshot's commit offset. Fenced with a
+// new term, it must report the entries of its database, so that an election
+// doesn't take it for a node without any data. As leader, it must continue the
+// offsets after that one instead of reusing the offsets of the entries already
+// in the database.
+func TestLeaderController_BecomeLeaderWithEmptyWalAfterSnapshot(t *testing.T) {
+	var shard int64 = 1
+
+	kvFactory, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	require.NoError(t, err)
+	walFactory := newTestWalFactory(t)
+
+	lc, err := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard, rpc.NewMockRpcClient(), walFactory, kvFactory, nil)
+	require.NoError(t, err)
+	_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 1})
+	require.NoError(t, err)
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{Shard: shard, Term: 1, ReplicationFactor: 1})
+	require.NoError(t, err)
+
+	// The entries 0 to 2 get committed and applied to the database
+	for i := range 3 {
+		_, err = lc.WriteBlock(context.Background(), &proto.WriteRequest{
+			Shard: &shard,
+			Puts:  []*proto.PutRequest{{Key: fmt.Sprintf("key-%d", i), Value: []byte("value")}},
+		})
+		require.NoError(t, err)
+	}
+	require.NoError(t, lc.Close())
+
+	// Installing a snapshot leaves the WAL empty
+	walObject, err := walFactory.NewWal(constant.DefaultNamespace, shard, nil)
+	require.NoError(t, err)
+	require.NoError(t, walObject.Clear())
+	require.NoError(t, walObject.Close())
+
+	lc, err = NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard, rpc.NewMockRpcClient(), walFactory, kvFactory, nil)
+	require.NoError(t, err)
+	res, err := lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 2})
+	require.NoError(t, err)
+	AssertProtoEqual(t, &proto.EntryId{Term: wal.InvalidTerm, Offset: 2}, res.HeadEntryId)
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{Shard: shard, Term: 2, ReplicationFactor: 1})
+	require.NoError(t, err)
+
+	// A session id is the offset of the entry that registers the session
+	session, err := lc.CreateSession(&proto.CreateSessionRequest{Shard: shard, SessionTimeoutMs: 5_000})
+	require.NoError(t, err)
+	assert.EqualValues(t, 3, session.SessionId)
+
+	commitOffset, err := lc.(*leaderController).db.ReadCommitOffset()
+	require.NoError(t, err)
+	assert.EqualValues(t, 3, commitOffset)
+
+	assert.NoError(t, lc.Close())
+	assert.NoError(t, kvFactory.Close())
+	assert.NoError(t, walFactory.Close())
+}
+
+// A follower seeded from a snapshot reports the commit offset of the snapshot as
+// its head, with an invalid term, and its database holds the entries up to that
+// offset. There is nothing to truncate in its empty wal. If the wal of the leader
+// has the entries after that offset, the follower gets them from there: a
+// snapshot would wipe its data until it is installed, e.g. when the split of a
+// shard elects a child that all of its members observed, or when a leader
+// election follows a snapshot. Otherwise it gets a snapshot of the leader.
+func TestLeaderController_BecomeLeaderWithFollowerSeededFromSnapshot(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		// The first entry in the wal of the leader, or -1 for an empty wal. The
+		// leader's database holds the entries 0 to 9.
+		walFirstOffset int64
+		followerOffset int64
+		// The first entry sent to the follower after the snapshot of its
+		// database, or -1 for a snapshot of the leader
+		firstAppend int64
+	}{
+		{name: "wal with the next entries", walFirstOffset: 0, followerOffset: 5, firstAppend: 6},
+		{name: "wal starting at the next entry", walFirstOffset: 6, followerOffset: 5, firstAppend: 6},
+		{name: "wal starting after the next entry", walFirstOffset: 8, followerOffset: 5,
+			firstAppend: wal.InvalidOffset},
+		{name: "empty wal at the follower's offset", walFirstOffset: wal.InvalidOffset, followerOffset: 9,
+			firstAppend: 10},
+		{name: "empty wal past the follower's offset", walFirstOffset: wal.InvalidOffset, followerOffset: 5,
+			firstAppend: wal.InvalidOffset},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var shard int64 = 1
+
+			kvFactory, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+			require.NoError(t, err)
+			walFactory := newTestWalFactory(t)
+
+			walObject, err := walFactory.NewWal(constant.DefaultNamespace, shard, nil)
+			require.NoError(t, err)
+			db, err := database.NewDB(constant.DefaultNamespace, shard, kvFactory, proto.KeySortingType_HIERARCHICAL,
+				1*time.Hour, time2.SystemClock)
+			require.NoError(t, err)
+			previousCrc := uint32(1)
+			for i := int64(0); i < 10; i++ {
+				wr := &proto.WriteRequest{Puts: []*proto.PutRequest{{Key: "my-key", Value: []byte("")}}}
+				value, err := pb.Marshal(wrapInLogEntryValue(wr))
+				require.NoError(t, err)
+				if test.walFirstOffset != wal.InvalidOffset && i >= test.walFirstOffset {
+					_, err = walObject.AppendAsyncWithPreviousCrc(
+						&proto.LogEntry{Term: 1, Offset: i, Value: value}, &previousCrc)
+					require.NoError(t, err)
+				}
+				_, err = db.ProcessWrite(wr, i, 0, database.NoOpCallback)
+				require.NoError(t, err)
+			}
+			require.NoError(t, walObject.Sync(context.Background()))
+			require.NoError(t, db.UpdateTerm(1, database.TermOptions{}))
+			require.NoError(t, db.Close())
+			require.NoError(t, walObject.Close())
+
+			rpcClient := rpc.NewMockRpcClient()
+			// A truncation would block the leader until it gets a response
+			rpcClient.TruncateResps <- rpc.TruncateResps{Response: &proto.TruncateResponse{
+				HeadEntryId: &proto.EntryId{Term: 2, Offset: wal.InvalidOffset},
+			}}
+			lc, err := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard, rpcClient,
+				walFactory, kvFactory, nil)
+			require.NoError(t, err)
+			_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 2})
+			require.NoError(t, err)
+			_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
+				Shard:             shard,
+				Term:              2,
+				ReplicationFactor: 3,
+				FollowerMaps: map[string]*proto.EntryId{
+					"f1": {Term: wal.InvalidTerm, Offset: test.followerOffset},
+				},
+			})
+			require.NoError(t, err)
+			// The next entry of the leader, at offset 10
+			lc.Write(context.Background(), &proto.WriteRequest{
+				Shard: &shard,
+				Puts:  []*proto.PutRequest{{Key: "other-key", Value: []byte("")}},
+			}, concurrent.NewOnce(func(*proto.WriteResponse) {}, func(error) {}))
+
+			assert.Empty(t, rpcClient.TruncateReqs, "the empty wal of the follower got truncated")
+			if test.firstAppend == wal.InvalidOffset {
+				assert.Eventually(t, func() bool { return len(rpcClient.SendSnapshotStream.Requests) > 0 },
+					10*time.Second, 10*time.Millisecond, "the follower got no snapshot")
+			} else {
+				select {
+				case req := <-rpcClient.AppendReqs:
+					assert.EqualValues(t, test.firstAppend, req.Entry.Offset)
+				case <-time.After(10 * time.Second):
+					assert.Fail(t, "the leader sent no entry to the follower")
+				}
+				assert.Empty(t, rpcClient.SendSnapshotStream.Requests, "the follower got a snapshot")
+			}
+
+			// Complete a snapshot in progress: the leader waits for it to close
+			rpcClient.SendSnapshotStream.Response <- &proto.SnapshotResponse{AckOffset: 9}
+			assert.NoError(t, lc.Close())
+			assert.NoError(t, kvFactory.Close())
+			assert.NoError(t, walFactory.Close())
+		})
+	}
+}
+
+func TestLeaderControllerCheckpointHoldsTheCommitOffsetAndTerm(t *testing.T) {
+	var shard int64 = 1
+	kvFactory, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	require.NoError(t, err)
+	walFactory := newTestWalFactory(t)
+	lc, err := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard, rpc.NewMockRpcClient(),
+		walFactory, kvFactory, nil)
+	require.NoError(t, err)
+	_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 2})
+	require.NoError(t, err)
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{Shard: shard, Term: 2, ReplicationFactor: 1})
+	require.NoError(t, err)
+	for range 3 {
+		_, err = lc.WriteBlock(context.Background(), &proto.WriteRequest{
+			Shard: &shard,
+			Puts:  []*proto.PutRequest{{Key: "k", Value: []byte("v")}},
+		})
+		require.NoError(t, err)
+	}
+
+	checkpoint, err := lc.Checkpoint()
+	require.NoError(t, err)
+	commitOffset, term, err := database.ReadCheckpoint(checkpoint.BasePath())
+	require.NoError(t, err)
+	assert.EqualValues(t, 2, commitOffset)
+	assert.EqualValues(t, 2, term)
+	assert.NoError(t, checkpoint.Close())
+
+	// The database is still the one of the checkpoint
+	require.NoError(t, lc.WithDatabase(checkpoint.Generation, func(dir string) error {
+		assert.Equal(t, kvFactory.DatabaseDir(constant.DefaultNamespace, shard), dir)
+		return nil
+	}))
+	assert.ErrorIs(t, lc.WithDatabase(checkpoint.Generation+1, func(string) error { return nil }),
+		database.ErrDatabaseReplaced, "a checkpoint of a database since replaced")
+
+	require.NoError(t, lc.Close())
+	_, err = lc.Checkpoint()
+	assert.ErrorIs(t, err, constant.ErrResourceUnavailable)
+	assert.ErrorIs(t, lc.WithDatabase(checkpoint.Generation, func(string) error { return nil }),
+		constant.ErrResourceUnavailable)
+}
+
+func TestLeaderControllerCheckpointReturnsSnapshotError(t *testing.T) {
+	snapshotErr := errors.New("snapshot failed")
+	lc := newHookedLeaderController(t, rpc.NewMockRpcClient(), &hookKVFactory{
+		snapshot: func(kvstore.KV) (kvstore.Snapshot, error) { return nil, snapshotErr },
+	}, &hookWalFactory{})
+
+	checkpoint, err := lc.Checkpoint()
+	assert.ErrorIs(t, err, snapshotErr)
+	assert.Nil(t, checkpoint)
+}
+
+func TestLeaderControllerReportsOffsetGaugesWhileLeading(t *testing.T) {
+	previous := metric.GetMeter()
+	reader := sdkmetric.NewManualReader()
+	metric.SetMeter(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test"))
+	defer metric.SetMeter(previous)
+
+	var shard int64 = 1
+	kvFactory, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	require.NoError(t, err)
+	lc, err := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard,
+		rpc.NewMockRpcClient(), newTestWalFactory(t), kvFactory, nil)
+	require.NoError(t, err)
+	walLastOffset := lc.(*leaderController).wal.LastOffset
+
+	becomeLeader := func(term int64) {
+		_, err := lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: term})
+		require.NoError(t, err)
+		_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
+			Shard: shard, Term: term, ReplicationFactor: 1})
+		require.NoError(t, err)
+	}
+
+	assertReportsWalLastOffset := func() {
+		assert.Eventually(t, func() bool {
+			head, okHead := collectInt64Gauge(t, reader, "oxia_server_leader_head_offset")
+			commit, okCommit := collectInt64Gauge(t, reader, "oxia_server_leader_commit_offset")
+			return okHead && okCommit && head == walLastOffset() && commit == head
+		}, 10*time.Second, 10*time.Millisecond)
+	}
+
+	becomeLeader(1)
+	_, err = lc.WriteBlock(context.Background(), &proto.WriteRequest{
+		Shard: &shard,
+		Puts:  []*proto.PutRequest{{Key: "a", Value: []byte("a")}, {Key: "b", Value: []byte("b")}},
+	})
+	require.NoError(t, err)
+	assertReportsWalLastOffset()
+
+	// A fenced node does not lead the shard: it doesn't report the offsets
+	_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 2})
+	require.NoError(t, err)
+	_, ok := collectInt64Gauge(t, reader, "oxia_server_leader_head_offset")
+	assert.False(t, ok)
+	_, ok = collectInt64Gauge(t, reader, "oxia_server_leader_commit_offset")
+	assert.False(t, ok)
+
+	becomeLeader(3)
+	assertReportsWalLastOffset()
+
+	require.NoError(t, lc.Close())
+	_, ok = collectInt64Gauge(t, reader, "oxia_server_leader_head_offset")
+	assert.False(t, ok)
+	_, ok = collectInt64Gauge(t, reader, "oxia_server_leader_commit_offset")
+	assert.False(t, ok)
+}
+
+// collectInt64Gauge returns the value of the int64 gauge with the given name,
+// and whether the reader collected it.
+func collectInt64Gauge(t *testing.T, reader sdkmetric.Reader, name string) (int64, bool) {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != name {
+				continue
+			}
+			gauge, ok := m.Data.(metricdata.Gauge[int64])
+			if !ok || len(gauge.DataPoints) == 0 {
+				return 0, false
+			}
+			return gauge.DataPoints[0].Value, true
+		}
+	}
+	return 0, false
+}
+
+func TestNewLeaderControllerFailsWhenTheDatabaseFailsToOpen(t *testing.T) {
+	kvFactory, walFactory := newHookFactories(t)
+	kvFactory.newKV = func() error { return errInjected }
+
+	lc, err := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, 1, rpc.NewMockRpcClient(),
+		walFactory, kvFactory, nil)
+	assert.ErrorIs(t, err, errInjected)
+	assert.Nil(t, lc)
+}
+
+func TestNewLeaderControllerFailsWhenTheCommitOffsetCantBeRead(t *testing.T) {
+	kvFactory, walFactory := newHookFactories(t)
+	failReads := &atomic.Bool{}
+	failReads.Store(true)
+	kvFactory.get = failKey(testCommitOffsetKey, failReads)
+
+	lc, err := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, 1, rpc.NewMockRpcClient(),
+		walFactory, kvFactory, nil)
+	assert.ErrorIs(t, err, errInjected)
+	assert.Nil(t, lc)
+
+	// The database got closed: another controller can open it
+	failReads.Store(false)
+	lc, err = NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, 1, rpc.NewMockRpcClient(),
+		walFactory, kvFactory, nil)
+	require.NoError(t, err)
+	assert.NoError(t, lc.Close())
+}
+
+func TestLeaderControllerIsFeatureEnabledAfterClose(t *testing.T) {
+	lc := newHookedLeaderController(t, rpc.NewMockRpcClient(), &hookKVFactory{}, &hookWalFactory{})
+	becomeTestLeader(t, lc, 1, 1, nil, proto.Feature_FEATURE_DB_CHECKSUM)
+	require.Eventually(t, func() bool {
+		return lc.IsFeatureEnabled(proto.Feature_FEATURE_DB_CHECKSUM)
+	}, 10*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, lc.Close())
+	assert.False(t, lc.IsFeatureEnabled(proto.Feature_FEATURE_DB_CHECKSUM))
+}
+
+func TestLeaderControllerNewTermRejectsTheTermItLeads(t *testing.T) {
+	lc := newHookedLeaderController(t, rpc.NewMockRpcClient(), &hookKVFactory{}, &hookWalFactory{})
+	becomeTestLeader(t, lc, 1, 1, nil)
+
+	_, err := lc.NewTerm(&proto.NewTermRequest{Shard: 1, Term: 1})
+	assert.ErrorIs(t, err, constant.ErrInvalidStatus)
+	assert.Equal(t, proto.ServingStatus_LEADER, lc.Status())
+}
+
+func TestLeaderControllerNewTermFailsWhenTheTermCantBeStored(t *testing.T) {
+	failCommits := &atomic.Bool{}
+	kvFactory := &hookKVFactory{commit: func() error {
+		if failCommits.Load() {
+			return errInjected
+		}
+		return nil
+	}}
+	lc := newHookedLeaderController(t, rpc.NewMockRpcClient(), kvFactory, &hookWalFactory{})
+	becomeTestLeader(t, lc, 1, 1, nil)
+
+	failCommits.Store(true)
+	_, err := lc.NewTerm(&proto.NewTermRequest{Shard: 1, Term: 2})
+	assert.ErrorIs(t, err, errInjected)
+	assert.EqualValues(t, 1, lc.Term())
+}
+
+func TestLeaderControllerNewTermFailsWhenTheWalSyncFails(t *testing.T) {
+	failSyncs := &atomic.Bool{}
+	walFactory := &hookWalFactory{sync: func(ctx context.Context, w wal.Wal) error {
+		if failSyncs.Load() {
+			return errInjected
+		}
+		return w.Sync(ctx)
+	}}
+	lc := newHookedLeaderController(t, rpc.NewMockRpcClient(), &hookKVFactory{}, walFactory)
+	becomeTestLeader(t, lc, 1, 1, nil)
+
+	failSyncs.Store(true)
+	_, err := lc.NewTerm(&proto.NewTermRequest{Shard: 1, Term: 2})
+	assert.ErrorIs(t, err, errInjected)
+}
+
+// The head entry that a node reports on a new term is read from the end of
+// its wal: the node can't report one it failed to read.
+func TestLeaderControllerNewTermFailsWhenTheHeadEntryCantBeRead(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		newReverseReader func(w wal.Wal) (wal.Reader, error)
+	}{
+		{"open", func(wal.Wal) (wal.Reader, error) { return nil, errInjected }},
+		{"read", func(w wal.Wal) (wal.Reader, error) { return newFailingReader(w.NewReverseReader()) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			failReads := &atomic.Bool{}
+			walFactory := &hookWalFactory{newReverseReader: func(w wal.Wal) (wal.Reader, error) {
+				if failReads.Load() {
+					return test.newReverseReader(w)
+				}
+				return w.NewReverseReader()
+			}}
+			lc := newHookedLeaderController(t, rpc.NewMockRpcClient(), &hookKVFactory{}, walFactory)
+			becomeTestLeader(t, lc, 1, 1, nil)
+			writeTestKeys(t, lc, "a")
+
+			failReads.Store(true)
+			_, err := lc.NewTerm(&proto.NewTermRequest{Shard: 1, Term: 2})
+			assert.ErrorIs(t, err, errInjected)
+		})
+	}
+}
+
+// A node whose wal is empty reports the commit offset of its database as its
+// head: it can't report one when it fails to read it.
+func TestHeadEntryIdFailsWhenTheCommitOffsetCantBeRead(t *testing.T) {
+	kvFactory, walFactory := newHookFactories(t)
+	failReads := &atomic.Bool{}
+	kvFactory.get = failKey(testCommitOffsetKey, failReads)
+	db, err := database.NewDB(constant.DefaultNamespace, 1, kvFactory, proto.KeySortingType_HIERARCHICAL, time.Hour,
+		time2.SystemClock)
+	require.NoError(t, err)
+	defer db.Close()
+	walObject, err := walFactory.NewWal(constant.DefaultNamespace, 1, nil)
+	require.NoError(t, err)
+	defer walObject.Close()
+
+	failReads.Store(true)
+	headEntryId, err := HeadEntryId(walObject, db)
+	assert.ErrorIs(t, err, errInjected)
+	assert.Nil(t, headEntryId)
+}
+
+func TestLeaderControllerBecomeLeaderFailsWhenTheWalOrTheDatabaseCantBeRead(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		// The read of the commit offset of the database that fails, from 1
+		failingCommitOffsetRead int64
+		failReverseReader       bool
+		failListing             bool
+	}{
+		{name: "head entry", failReverseReader: true},
+		{name: "commit offset", failingCommitOffsetRead: 1},
+		{name: "commit offset to apply from", failingCommitOffsetRead: 2},
+		{name: "sessions", failListing: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			armed := &atomic.Bool{}
+			commitOffsetReads := &atomic.Int64{}
+			kvFactory := &hookKVFactory{
+				get: func(key string) error {
+					if armed.Load() && key == testCommitOffsetKey &&
+						commitOffsetReads.Add(1) == test.failingCommitOffsetRead {
+						return errInjected
+					}
+					return nil
+				},
+				keyRangeScan: func(kv kvstore.KV, lowerBound, upperBound string,
+					opts kvstore.IteratorOpts) (kvstore.KeyIterator, error) {
+					if armed.Load() && test.failListing {
+						return nil, errInjected
+					}
+					return kv.KeyRangeScan(lowerBound, upperBound, opts)
+				},
+			}
+			walFactory := &hookWalFactory{newReverseReader: func(w wal.Wal) (wal.Reader, error) {
+				if armed.Load() && test.failReverseReader {
+					return nil, errInjected
+				}
+				return w.NewReverseReader()
+			}}
+			lc := newHookedLeaderController(t, rpc.NewMockRpcClient(), kvFactory, walFactory)
+			_, err := lc.NewTerm(&proto.NewTermRequest{Shard: 1, Term: 1})
+			require.NoError(t, err)
+
+			armed.Store(true)
+			_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
+				Shard:             1,
+				Term:              1,
+				ReplicationFactor: 1,
+			})
+			assert.ErrorIs(t, err, errInjected)
+			assert.NotEqual(t, proto.ServingStatus_LEADER, lc.Status())
+		})
+	}
+}
+
+// The leader applies the entries of its wal that its database doesn't have
+// yet before leading the term: it can't lead it when it fails to.
+func TestLeaderControllerBecomeLeaderFailsWhenTheWalEntriesCantBeApplied(t *testing.T) {
+	validEntry := marshalTestWrite(t, "a")
+	for _, test := range []struct {
+		name      string
+		value     []byte
+		newReader func(w wal.Wal, after int64) (wal.Reader, error)
+		expected  error
+	}{
+		{"open", validEntry, func(wal.Wal, int64) (wal.Reader, error) { return nil, errInjected }, errInjected},
+		{"read", validEntry, func(w wal.Wal, after int64) (wal.Reader, error) {
+			return newFailingReader(w.NewReader(after))
+		}, errInjected},
+		// Not a valid LogEntryValue
+		{"apply", []byte{0xff}, nil, nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			kvFactory, walFactory := newHookFactories(t)
+			appendTestEntry(t, walFactory, test.value)
+			walFactory.newReader = test.newReader
+
+			lc := newHookedLeaderController(t, rpc.NewMockRpcClient(), kvFactory, walFactory)
+			_, err := lc.NewTerm(&proto.NewTermRequest{Shard: 1, Term: 2})
+			require.NoError(t, err)
+			_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
+				Shard:             1,
+				Term:              2,
+				ReplicationFactor: 1,
+			})
+			if test.expected != nil {
+				assert.ErrorIs(t, err, test.expected)
+			} else {
+				assert.ErrorContains(t, err, "failed to applies wal entries to db")
+			}
+			assert.NotEqual(t, proto.ServingStatus_LEADER, lc.Status())
+		})
+	}
+}
+
+// The leader waits for the entries of its wal to be committed before leading
+// the term, until the request gets canceled.
+func TestLeaderControllerBecomeLeaderFailsWhenCanceledBeforeTheWalIsCommitted(t *testing.T) {
+	kvFactory, walFactory := newHookFactories(t)
+	appendTestEntry(t, walFactory, marshalTestWrite(t, "a"))
+	lc := newHookedLeaderController(t, rpc.NewMockRpcClient(), kvFactory, walFactory)
+	_, err := lc.NewTerm(&proto.NewTermRequest{Shard: 1, Term: 2})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = lc.BecomeLeader(ctx, &proto.BecomeLeaderRequest{
+		Shard:             1,
+		Term:              2,
+		ReplicationFactor: 2,
+		FollowerMaps:      map[string]*proto.EntryId{"f1": constant2.InvalidEntryId},
+	})
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.NotEqual(t, proto.ServingStatus_LEADER, lc.Status())
+}
+
+func TestLeaderControllerBecomeLeaderRejectsAFollowerOfAHigherTerm(t *testing.T) {
+	lc := newHookedLeaderController(t, rpc.NewMockRpcClient(), &hookKVFactory{}, &hookWalFactory{})
+	_, err := lc.NewTerm(&proto.NewTermRequest{Shard: 1, Term: 1})
+	require.NoError(t, err)
+
+	// The wal of the leader is empty, while the follower has an entry
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
+		Shard:             1,
+		Term:              1,
+		ReplicationFactor: 2,
+		FollowerMaps:      map[string]*proto.EntryId{"f1": {Term: 0, Offset: 0}},
+	})
+	assert.ErrorIs(t, err, constant.ErrInvalidTerm)
+}
+
+// A new leader that fails to propose the features it enables leaves the
+// controller fenced.
+func TestLeaderControllerBecomeLeaderFailsWhenTheFeatureEnableFailsToMarshal(t *testing.T) {
+	lc := newHookedLeaderController(t, rpc.NewMockRpcClient(), &hookKVFactory{}, &hookWalFactory{})
+	_, err := lc.NewTerm(&proto.NewTermRequest{Shard: 1, Term: 1})
+	require.NoError(t, err)
+	failing := &atomic.Bool{}
+	failing.Store(true)
+	failMarshals(lc.(*leaderController), failing)
+
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
+		Shard:             1,
+		Term:              1,
+		ReplicationFactor: 1,
+		FeaturesSupported: []proto.Feature{proto.Feature_FEATURE_DB_CHECKSUM},
+	})
+	assert.ErrorIs(t, err, errInjected)
+	assert.Equal(t, proto.ServingStatus_FENCED, lc.Status())
+	assert.False(t, lc.IsFeatureEnabled(proto.Feature_FEATURE_DB_CHECKSUM))
+}
+
+// A failed BecomeLeader leaves the controller fenced, as NewTerm does: it
+// doesn't keep the tracker, the follower cursors or the session manager of
+// the term it failed to lead.
+func TestLeaderControllerBecomeLeaderReleasesTheTermItFailsToLead(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		canceled bool
+		expected error
+	}{
+		{name: "wait for commit", canceled: true, expected: context.Canceled},
+		{name: "feature enable", expected: errInjected},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			kvFactory, walFactory := newHookFactories(t)
+			if test.canceled {
+				appendTestEntry(t, walFactory, marshalTestWrite(t, "a"))
+			}
+			lc := newHookedLeaderController(t, rpc.NewMockRpcClient(), kvFactory, walFactory).(*leaderController)
+			_, err := lc.NewTerm(&proto.NewTermRequest{Shard: 1, Term: 2})
+			require.NoError(t, err)
+			failing := &atomic.Bool{}
+			failing.Store(true)
+			failMarshals(lc, failing)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			if test.canceled {
+				cancel()
+			}
+			defer cancel()
+			_, err = lc.BecomeLeader(ctx, &proto.BecomeLeaderRequest{
+				Shard:             1,
+				Term:              2,
+				ReplicationFactor: 2,
+				FollowerMaps:      map[string]*proto.EntryId{"f1": constant2.InvalidEntryId},
+				FeaturesSupported: []proto.Feature{proto.Feature_FEATURE_DB_CHECKSUM},
+			})
+			assert.ErrorIs(t, err, test.expected)
+
+			lc.RLock()
+			defer lc.RUnlock()
+			assert.Equal(t, proto.ServingStatus_FENCED, lc.status)
+			assert.Nil(t, lc.quorumAckTracker)
+			assert.Empty(t, lc.followers)
+			assert.Empty(t, lc.observers)
+			assert.Error(t, lc.termCtx.Err())
+			assert.Error(t, lc.sessionManager.(*sessionManager).ctx.Err())
+		})
+	}
+}
+
+func TestLeaderControllerBecomeLeaderRejectsMoreFollowersThanTheReplicationFactor(t *testing.T) {
+	lc := newHookedLeaderController(t, rpc.NewMockRpcClient(), &hookKVFactory{}, &hookWalFactory{})
+	_, err := lc.NewTerm(&proto.NewTermRequest{Shard: 1, Term: 1})
+	require.NoError(t, err)
+
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
+		Shard:             1,
+		Term:              1,
+		ReplicationFactor: 2,
+		FollowerMaps: map[string]*proto.EntryId{
+			"f1": constant2.InvalidEntryId,
+			"f2": constant2.InvalidEntryId,
+		},
+	})
+	assert.ErrorIs(t, err, ErrTooManyCursors)
+}
+
+// A new leader deletes the ephemeral records of the sessions that are gone,
+// as a cleanup: a failure doesn't fail the election, and the next leader
+// deletes them.
+func TestLeaderControllerBecomeLeaderKeepsTheOrphanedEphemeralsWhenTheirDeleteFails(t *testing.T) {
+	for _, failure := range []string{"append", "marshal"} {
+		t.Run(failure, func(t *testing.T) {
+			failing := &atomic.Bool{}
+			kvFactory, walFactory := newHookFactories(t)
+			walFactory.appendAndSync = func(w wal.Wal, entry *proto.LogEntry, callback func(entryCrc uint32, err error)) {
+				if failure == "append" && failing.Load() {
+					callback(0, errInjected)
+					return
+				}
+				w.AppendAndSync(entry, callback)
+			}
+			options := &proto.NewTermOptions{KeySorting: proto.KeySortingType_NATURAL, EnableNotifications: true}
+			lc, err := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, 1, rpc.NewMockRpcClient(),
+				walFactory, kvFactory, options)
+			require.NoError(t, err)
+			t.Cleanup(func() { assert.NoError(t, lc.Close()) })
+			if failure == "marshal" {
+				failMarshals(lc.(*leaderController), failing)
+			}
+			becomeLeader := func(term int64) {
+				t.Helper()
+				_, err := lc.NewTerm(&proto.NewTermRequest{Shard: 1, Term: term, Options: options})
+				require.NoError(t, err)
+				_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
+					Shard:             1,
+					Term:              term,
+					ReplicationFactor: 1,
+				})
+				require.NoError(t, err)
+			}
+			becomeLeader(1)
+
+			// The session end leaves the record behind on a natural-sorted shard
+			session, err := lc.CreateSession(&proto.CreateSessionRequest{Shard: 1, SessionTimeoutMs: 60_000})
+			require.NoError(t, err)
+			var shard int64 = 1
+			_, err = lc.WriteBlock(context.Background(), &proto.WriteRequest{Shard: &shard, Puts: []*proto.PutRequest{{
+				Key:       "a",
+				Value:     []byte("a"),
+				SessionId: &session.SessionId,
+			}}})
+			require.NoError(t, err)
+			_, err = lc.CloseSession(&proto.CloseSessionRequest{Shard: 1, SessionId: session.SessionId})
+			require.NoError(t, err)
+			require.True(t, keyExists(t, lc.(*leaderController), "a"))
+
+			failing.Store(true)
+			becomeLeader(2)
+			assert.Equal(t, proto.ServingStatus_LEADER, lc.Status())
+			assert.True(t, keyExists(t, lc.(*leaderController), "a"))
+
+			failing.Store(false)
+			becomeLeader(3)
+			assert.Eventually(t, func() bool {
+				return !keyExists(t, lc.(*leaderController), "a")
+			}, 10*time.Second, 10*time.Millisecond)
+		})
+	}
+}
+
+func TestLeaderControllerAddFollowerRejectsWhenNotLeader(t *testing.T) {
+	lc := newHookedLeaderController(t, rpc.NewMockRpcClient(), &hookKVFactory{}, &hookWalFactory{})
+	_, err := lc.NewTerm(&proto.NewTermRequest{Shard: 1, Term: 1})
+	require.NoError(t, err)
+
+	_, err = lc.AddFollower(&proto.AddFollowerRequest{
+		Shard:               1,
+		Term:                1,
+		FollowerName:        "f1",
+		FollowerHeadEntryId: constant2.InvalidEntryId,
+	})
+	assert.ErrorIs(t, err, constant.ErrNodeIsNotLeader)
+}
+
+// A follower whose entries of an earlier term are all in the wal of the
+// leader gets the next entries without being truncated.
+func TestLeaderControllerAddFollowerOfAnEarlierTermWithoutTruncation(t *testing.T) {
+	provider := rpc.NewMockRpcClient()
+	lc := newLeaderWithTermHistory(t, provider, &hookWalFactory{})
+
+	_, err := lc.AddFollower(&proto.AddFollowerRequest{
+		Shard:               1,
+		Term:                3,
+		FollowerName:        "f1",
+		FollowerHeadEntryId: &proto.EntryId{Term: 1, Offset: 1},
+	})
+	require.NoError(t, err)
+
+	select {
+	case req := <-provider.AppendReqs:
+		assert.EqualValues(t, 2, req.Entry.Offset)
+	case <-time.After(10 * time.Second):
+		assert.Fail(t, "the follower got no entry")
+	}
+	assert.Empty(t, provider.TruncateReqs)
+}
+
+// A follower whose entries are all of a term earlier than every entry of the
+// leader gets truncated to an empty wal: the leader adds it once truncated.
+func TestLeaderControllerAddFollowerFailsWhenTheTruncationFails(t *testing.T) {
+	for _, observer := range []bool{false, true} {
+		t.Run(fmt.Sprintf("observer=%v", observer), func(t *testing.T) {
+			provider := rpc.NewMockRpcClient()
+			lc := newLeaderWithTermHistory(t, provider, &hookWalFactory{})
+			provider.TruncateResps <- rpc.TruncateResps{Error: errInjected}
+
+			_, err := lc.AddFollower(&proto.AddFollowerRequest{
+				Shard:               1,
+				Term:                3,
+				FollowerName:        "f1",
+				FollowerHeadEntryId: &proto.EntryId{Term: 0, Offset: 0},
+				Observer:            observer,
+			})
+			assert.ErrorIs(t, err, errInjected)
+			req := <-provider.TruncateReqs
+			AssertProtoEqual(t, constant2.InvalidEntryId, req.HeadEntryId)
+		})
+	}
+}
+
+// The leader finds the entry to truncate a follower to in its wal: it can't
+// add the follower when it fails to read it.
+func TestLeaderControllerAddFollowerFailsWhenTheWalCantBeRead(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		newReverseReader func(w wal.Wal) (wal.Reader, error)
+	}{
+		{"open", func(wal.Wal) (wal.Reader, error) { return nil, errInjected }},
+		{"read", func(w wal.Wal) (wal.Reader, error) { return newFailingReader(w.NewReverseReader()) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			failReads := &atomic.Bool{}
+			walFactory := &hookWalFactory{newReverseReader: func(w wal.Wal) (wal.Reader, error) {
+				if failReads.Load() {
+					return test.newReverseReader(w)
+				}
+				return w.NewReverseReader()
+			}}
+			provider := rpc.NewMockRpcClient()
+			lc := newLeaderWithTermHistory(t, provider, walFactory)
+
+			failReads.Store(true)
+			_, err := lc.AddFollower(&proto.AddFollowerRequest{
+				Shard:               1,
+				Term:                3,
+				FollowerName:        "f1",
+				FollowerHeadEntryId: &proto.EntryId{Term: 1, Offset: 1},
+			})
+			assert.ErrorIs(t, err, errInjected)
+			assert.Empty(t, provider.TruncateReqs)
+		})
+	}
+}
+
+func TestLeaderControllerFreezeFailsWhenClosed(t *testing.T) {
+	lc := newHookedLeaderController(t, rpc.NewMockRpcClient(), &hookKVFactory{}, &hookWalFactory{})
+	becomeTestLeader(t, lc, 1, 1, nil)
+	require.NoError(t, lc.Close())
+
+	_, err := lc.Freeze(&proto.FreezeShardRequest{Shard: 1, Term: 1, Frozen: true})
+	assert.ErrorIs(t, err, constant.ErrResourceUnavailable)
+}
+
+// A freeze returns the head offset once the writes accepted before it are
+// synced: it fails when the sync fails.
+func TestLeaderControllerFreezeFailsWhenTheWalSyncFails(t *testing.T) {
+	failSyncs := &atomic.Bool{}
+	walFactory := &hookWalFactory{sync: func(ctx context.Context, w wal.Wal) error {
+		if failSyncs.Load() {
+			return errInjected
+		}
+		return w.Sync(ctx)
+	}}
+	lc := newHookedLeaderController(t, rpc.NewMockRpcClient(), &hookKVFactory{}, walFactory)
+	becomeTestLeader(t, lc, 1, 1, nil)
+
+	failSyncs.Store(true)
+	_, err := lc.Freeze(&proto.FreezeShardRequest{Shard: 1, Term: 1, Frozen: true})
+	assert.ErrorIs(t, err, errInjected)
+}
+
+func TestLeaderControllerRejectsReadsWhenNotLeader(t *testing.T) {
+	lc := newHookedLeaderController(t, rpc.NewMockRpcClient(), &hookKVFactory{}, &hookWalFactory{})
+	_, err := lc.NewTerm(&proto.NewTermRequest{Shard: 1, Term: 1})
+	require.NoError(t, err)
+	var shard int64 = 1
+
+	_, err = lc.GetSequenceUpdates(context.Background(), &proto.GetSequenceUpdatesRequest{Shard: 1, Key: "a"})
+	assert.ErrorIs(t, err, constant.ErrNodeIsNotLeader)
+	err = lc.List(context.Background(), &proto.ListRequest{Shard: &shard}, func(string) error { return nil })
+	assert.ErrorIs(t, err, constant.ErrNodeIsNotLeader)
+	_, err = scanAll(context.Background(), lc, &proto.RangeScanRequest{Shard: &shard})
+	assert.ErrorIs(t, err, constant.ErrNodeIsNotLeader)
+}
+
+func TestLeaderControllerReadStopsOnError(t *testing.T) {
+	failReads := &atomic.Bool{}
+	kvFactory := &hookKVFactory{get: failKey("a", failReads)}
+	lc := newHookedLeaderController(t, rpc.NewMockRpcClient(), kvFactory, &hookWalFactory{})
+	becomeTestLeader(t, lc, 1, 1, nil)
+	writeTestKeys(t, lc, "a", "b")
+	var shard int64 = 1
+	request := &proto.ReadRequest{Shard: &shard, Gets: []*proto.GetRequest{{Key: "a"}, {Key: "b"}}}
+
+	t.Run("read", func(t *testing.T) {
+		failReads.Store(true)
+		defer failReads.Store(false)
+		_, err := readAll(context.Background(), lc, request)
+		assert.ErrorIs(t, err, errInjected)
+	})
+	t.Run("next", func(t *testing.T) {
+		var keys int
+		err := lc.Read(context.Background(), request, func(*proto.GetResponse) error {
+			keys++
+			return errInjected
+		})
+		assert.ErrorIs(t, err, errInjected)
+		assert.Equal(t, 1, keys)
+	})
+	t.Run("canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		responses, err := readAll(ctx, lc, request)
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.Len(t, responses, 1)
+	})
+}
+
+func TestLeaderControllerListStopsOnError(t *testing.T) {
+	failScans := &atomic.Bool{}
+	kvFactory := &hookKVFactory{keyRangeScan: func(kv kvstore.KV, lowerBound, upperBound string,
+		opts kvstore.IteratorOpts) (kvstore.KeyIterator, error) {
+		if failScans.Load() {
+			return nil, errInjected
+		}
+		return kv.KeyRangeScan(lowerBound, upperBound, opts)
+	}}
+	lc := newHookedLeaderController(t, rpc.NewMockRpcClient(), kvFactory, &hookWalFactory{})
+	becomeTestLeader(t, lc, 1, 1, nil)
+	writeTestKeys(t, lc, "a", "b")
+	var shard int64 = 1
+	request := &proto.ListRequest{Shard: &shard, StartInclusive: "a", EndExclusive: "c"}
+
+	t.Run("scan", func(t *testing.T) {
+		failScans.Store(true)
+		defer failScans.Store(false)
+		err := lc.List(context.Background(), request, func(string) error { return nil })
+		assert.ErrorIs(t, err, errInjected)
+	})
+	t.Run("next", func(t *testing.T) {
+		var keys []string
+		err := lc.List(context.Background(), request, func(key string) error {
+			keys = append(keys, key)
+			return errInjected
+		})
+		assert.ErrorIs(t, err, errInjected)
+		assert.Equal(t, []string{"a"}, keys)
+	})
+	t.Run("canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		var keys []string
+		err := lc.List(ctx, request, func(key string) error {
+			keys = append(keys, key)
+			return nil
+		})
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.Equal(t, []string{"a"}, keys)
+	})
+}
+
+func TestLeaderControllerRangeScanStopsOnError(t *testing.T) {
+	scanHook := &atomic.Pointer[func(kvstore.KeyValueIterator) (kvstore.KeyValueIterator, error)]{}
+	kvFactory := &hookKVFactory{rangeScan: func(kv kvstore.KV, lowerBound, upperBound string,
+		opts kvstore.IteratorOpts) (kvstore.KeyValueIterator, error) {
+		it, err := kv.RangeScan(lowerBound, upperBound, opts)
+		if hook := scanHook.Load(); hook != nil && err == nil {
+			return (*hook)(it)
+		}
+		return it, err
+	}}
+	lc := newHookedLeaderController(t, rpc.NewMockRpcClient(), kvFactory, &hookWalFactory{})
+	becomeTestLeader(t, lc, 1, 1, nil)
+	writeTestKeys(t, lc, "a", "b")
+	var shard int64 = 1
+	request := &proto.RangeScanRequest{Shard: &shard, StartInclusive: "a", EndExclusive: "c"}
+
+	t.Run("scan", func(t *testing.T) {
+		hook := func(it kvstore.KeyValueIterator) (kvstore.KeyValueIterator, error) {
+			return nil, multierr.Append(errInjected, it.Close())
+		}
+		scanHook.Store(&hook)
+		defer scanHook.Store(nil)
+		_, err := scanAll(context.Background(), lc, request)
+		assert.ErrorIs(t, err, errInjected)
+	})
+	t.Run("value", func(t *testing.T) {
+		hook := func(it kvstore.KeyValueIterator) (kvstore.KeyValueIterator, error) {
+			return failingValueIterator{it}, nil
+		}
+		scanHook.Store(&hook)
+		defer scanHook.Store(nil)
+		responses, err := scanAll(context.Background(), lc, request)
+		assert.ErrorIs(t, err, errInjected)
+		assert.Empty(t, responses)
+	})
+	t.Run("next", func(t *testing.T) {
+		var keys int
+		err := lc.RangeScan(context.Background(), request, func(*proto.GetResponse) error {
+			keys++
+			return errInjected
+		})
+		assert.ErrorIs(t, err, errInjected)
+		assert.Equal(t, 1, keys)
+	})
+	t.Run("canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		responses, err := scanAll(ctx, lc, request)
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.Len(t, responses, 1)
+	})
+}
+
+func TestLeaderControllerWriteFailsWhenTheWalAppendFails(t *testing.T) {
+	walFactory := &hookWalFactory{appendAndSync: func(_ wal.Wal, _ *proto.LogEntry,
+		callback func(entryCrc uint32, err error)) {
+		callback(0, errInjected)
+	}}
+	lc := newHookedLeaderController(t, rpc.NewMockRpcClient(), &hookKVFactory{}, walFactory)
+	becomeTestLeader(t, lc, 1, 1, nil)
+	var shard int64 = 1
+
+	_, err := lc.WriteBlock(context.Background(), &proto.WriteRequest{
+		Shard: &shard,
+		Puts:  []*proto.PutRequest{{Key: "a", Value: []byte("a")}},
+	})
+	assert.ErrorIs(t, err, errInjected)
+	assert.ErrorContains(t, err, "failed to append to wal")
+}
+
+// A committed entry that failed to apply is applied again as read from the
+// wal: the retries go on when it fails to be read as well.
+func TestLeaderControllerRetriesFailedApplyWhenTheWalCantBeRead(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		newReader func(w wal.Wal, after int64) (wal.Reader, error)
+	}{
+		{"open", func(wal.Wal, int64) (wal.Reader, error) { return nil, errInjected }},
+		{"missing", func(w wal.Wal, after int64) (wal.Reader, error) { return w.NewReader(after + 1) }},
+		{"read", func(w wal.Wal, after int64) (wal.Reader, error) { return newFailingReader(w.NewReader(after)) }},
+		{"invalid", func(w wal.Wal, after int64) (wal.Reader, error) {
+			r, err := w.NewReader(after)
+			return &hookReader{Reader: r, readNext: func(r wal.Reader) (*proto.LogEntry, uint32, uint32, error) {
+				entry, previousCrc, entryCrc, err := r.ReadNext()
+				if err == nil {
+					entry = &proto.LogEntry{Term: entry.Term, Offset: entry.Offset, Value: []byte{0xff}}
+				}
+				return entry, previousCrc, entryCrc, err
+			}}, err
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			failures := &atomic.Int64{}
+			kvFactory, walFactory := newHookFactories(t)
+			kvFactory.Factory = failingReadKVFactory{Factory: kvFactory.Factory, key: "a", failures: failures}
+			armed := &atomic.Bool{}
+			walFactory.newReader = func(w wal.Wal, after int64) (wal.Reader, error) {
+				if armed.CompareAndSwap(true, false) {
+					return test.newReader(w, after)
+				}
+				return w.NewReader(after)
+			}
+			lc := newHookedLeaderController(t, rpc.NewMockRpcClient(), kvFactory, walFactory)
+			becomeTestLeader(t, lc, 1, 1, nil)
+
+			failures.Store(1)
+			armed.Store(true)
+			writeTestKeys(t, lc, "a")
+			assert.False(t, armed.Load(), "the entry was not read from the wal")
+			var shard int64 = 1
+			results, err := readAll(context.Background(), lc, &proto.ReadRequest{
+				Shard: &shard,
+				Gets:  []*proto.GetRequest{{Key: "a", IncludeValue: true}},
+			})
+			require.NoError(t, err)
+			assert.Equal(t, []byte("a"), results[0].Value)
+		})
+	}
+}
+
+func TestLeaderControllerGetNotificationsCompletes(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		// onNext handles the batches after the confirmation of the subscription
+		onNext   func(lc LeaderController, cancel context.CancelFunc) error
+		expected error
+	}{
+		{"canceled", func(_ LeaderController, cancel context.CancelFunc) error {
+			cancel()
+			return nil
+		}, nil},
+		{"closed", func(lc LeaderController, _ context.CancelFunc) error {
+			// Close waits for the subscription
+			go func() { _ = lc.Close() }()
+			<-lc.Context().Done()
+			return nil
+		}, constant.ErrResourceUnavailable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			lc := newHookedLeaderController(t, rpc.NewMockRpcClient(), &hookKVFactory{}, &hookWalFactory{})
+			becomeTestLeader(t, lc, 1, 1, nil)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			confirmed := make(chan struct{})
+			cb := newHookStreamCallback(func(batch *proto.EncodedNotificationBatch) error {
+				if batch.Offset == wal.InvalidOffset {
+					close(confirmed)
+					return nil
+				}
+				return test.onNext(lc, cancel)
+			})
+			lc.GetNotifications(ctx, &proto.NotificationsRequest{Shard: 1, StartOffsetExclusive: &wal.InvalidOffset},
+				cb)
+			<-confirmed
+			writeTestKeys(t, lc, "a")
+
+			select {
+			case err := <-cb.completed:
+				assert.Equal(t, test.expected, err)
+			case <-time.After(10 * time.Second):
+				assert.Fail(t, "the subscription did not complete")
+			}
+		})
+	}
+}
+
+func TestLeaderControllerGetNotificationsFailsWhenTheConfirmationFails(t *testing.T) {
+	lc := newHookedLeaderController(t, rpc.NewMockRpcClient(), &hookKVFactory{}, &hookWalFactory{})
+	becomeTestLeader(t, lc, 1, 1, nil)
+
+	cb := newHookStreamCallback(func(*proto.EncodedNotificationBatch) error { return errInjected })
+	lc.GetNotifications(context.Background(), &proto.NotificationsRequest{Shard: 1}, cb)
+	select {
+	case err := <-cb.completed:
+		assert.ErrorIs(t, err, errInjected)
+	case <-time.After(10 * time.Second):
+		assert.Fail(t, "the subscription did not complete")
+	}
+}
+
+func TestLeaderControllerDeleteShardFailsWhenClosed(t *testing.T) {
+	lc := newHookedLeaderController(t, rpc.NewMockRpcClient(), &hookKVFactory{}, &hookWalFactory{})
+	becomeTestLeader(t, lc, 1, 1, nil)
+	require.NoError(t, lc.Close())
+
+	_, err := lc.DeleteShard(&proto.DeleteShardRequest{Shard: 1, Term: 1})
+	assert.ErrorIs(t, err, constant.ErrResourceUnavailable)
+}
+
+func TestLeaderControllerDeleteShardFailsWhenTheWalFails(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		close  func(w wal.Wal) error
+		delete func(w wal.Wal) error
+	}{
+		{name: "close", close: func(w wal.Wal) error { return multierr.Append(w.Close(), errInjected) }},
+		{name: "delete", delete: func(w wal.Wal) error { return multierr.Append(w.Delete(), errInjected) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			walFactory := &hookWalFactory{close: test.close, delete: test.delete}
+			lc := newHookedLeaderController(t, rpc.NewMockRpcClient(), &hookKVFactory{}, walFactory)
+			becomeTestLeader(t, lc, 1, 1, nil)
+
+			_, err := lc.DeleteShard(&proto.DeleteShardRequest{Shard: 1, Term: 1})
+			assert.ErrorIs(t, err, errInjected)
+			assert.Equal(t, proto.ServingStatus_NOT_MEMBER, lc.Status())
+		})
+	}
+}
+
+func TestLeaderControllerLogsRequestsAtDebugLevel(t *testing.T) {
+	logs := captureDebugLogs(t)
+	lc := newHookedLeaderController(t, rpc.NewMockRpcClient(), &hookKVFactory{}, &hookWalFactory{})
+	becomeTestLeader(t, lc, 1, 1, nil)
+	var shard int64 = 1
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	notified := make(chan struct{})
+	lc.GetNotifications(ctx, &proto.NotificationsRequest{Shard: 1, StartOffsetExclusive: &wal.InvalidOffset},
+		newHookStreamCallback(func(batch *proto.EncodedNotificationBatch) error {
+			if batch.Offset != wal.InvalidOffset {
+				close(notified)
+			}
+			return nil
+		}))
+	writeTestKeys(t, lc, "a")
+	<-notified
+	_, err := readAll(context.Background(), lc, &proto.ReadRequest{
+		Shard: &shard,
+		Gets:  []*proto.GetRequest{{Key: "a"}},
+	})
+	require.NoError(t, err)
+	err = lc.List(context.Background(), &proto.ListRequest{Shard: &shard}, func(string) error { return nil })
+	require.NoError(t, err)
+	_, err = scanAll(context.Background(), lc, &proto.RangeScanRequest{Shard: &shard})
+	require.NoError(t, err)
+
+	for _, message := range []string{
+		"Appending proposal to WAL",
+		"Got a new list of notification batches",
+		"Received read request",
+		"Received list request",
+		"Received range-scan request",
+	} {
+		assert.Contains(t, logs(), message)
+	}
+}
+
+func TestLeaderControllerReportsTheObserverAckOffsetGauge(t *testing.T) {
+	reader := useManualMetricReader(t)
+	lc := newHookedLeaderController(t, rpc.NewMockRpcClient(), &hookKVFactory{}, &hookWalFactory{})
+
+	becomeTestLeader(t, lc, 1, 1, nil)
+	_, err := lc.AddFollower(&proto.AddFollowerRequest{
+		Shard:               1,
+		Term:                1,
+		FollowerName:        "f1",
+		FollowerHeadEntryId: constant2.InvalidEntryId,
+		Observer:            true,
+	})
+	require.NoError(t, err)
+	ackOffset, ok := collectInt64Gauge(t, reader, "oxia_server_observer_ack_offset")
+	require.True(t, ok)
+	assert.EqualValues(t, wal.InvalidOffset, ackOffset)
+}
+
+var errInjected = errors.New("injected failure")
+
+const testCommitOffsetKey = constant.InternalKeyPrefix + "commit-offset"
+
+// newHookFactories returns the factories of Pebble stores and wals that the
+// hooks can override, which get closed at the end of the test.
+func newHookFactories(t *testing.T) (*hookKVFactory, *hookWalFactory) {
+	t.Helper()
+
+	pebbleFactory, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	require.NoError(t, err)
+	kvFactory := &hookKVFactory{Factory: pebbleFactory}
+	walFactory := &hookWalFactory{Factory: newTestWalFactory(t)}
+	t.Cleanup(func() {
+		assert.NoError(t, pebbleFactory.Close())
+		assert.NoError(t, walFactory.Close())
+	})
+	return kvFactory, walFactory
+}
+
+// failMarshals makes the leader fail to serialize the log entries of its
+// proposals while failing is set.
+func failMarshals(lc *leaderController, failing *atomic.Bool) {
+	marshal := lc.marshalLogEntryValue
+	lc.marshalLogEntryValue = func(buf []byte, value *proto.LogEntryValue) ([]byte, []byte, error) {
+		if failing.Load() {
+			return buf, nil, errInjected
+		}
+		return marshal(buf, value)
+	}
+}
+
+// newHookedLeaderController creates a leader controller of shard 1 on the
+// factories, which it opens if they don't have their stores yet, and closes
+// it all at the end of the test.
+func newHookedLeaderController(t *testing.T, provider dataserverrpc.ReplicationRpcProvider, kvFactory *hookKVFactory,
+	walFactory *hookWalFactory) LeaderController {
+	t.Helper()
+
+	if kvFactory.Factory == nil || walFactory.Factory == nil {
+		kvStores, wals := newHookFactories(t)
+		if kvFactory.Factory == nil {
+			kvFactory.Factory = kvStores.Factory
+		}
+		if walFactory.Factory == nil {
+			walFactory.Factory = wals.Factory
+		}
+	}
+	lc, err := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, 1, provider, walFactory,
+		kvFactory, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, lc.Close()) })
+	return lc
+}
+
+func becomeTestLeader(t *testing.T, lc LeaderController, term int64, replicationFactor uint32,
+	followers map[string]*proto.EntryId, features ...proto.Feature) {
+	t.Helper()
+
+	_, err := lc.NewTerm(&proto.NewTermRequest{Shard: 1, Term: term})
+	require.NoError(t, err)
+	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
+		Shard:             1,
+		Term:              term,
+		ReplicationFactor: replicationFactor,
+		FollowerMaps:      followers,
+		FeaturesSupported: features,
+	})
+	require.NoError(t, err)
+}
+
+func writeTestKeys(t *testing.T, lc LeaderController, keys ...string) {
+	t.Helper()
+
+	var shard int64 = 1
+	for _, key := range keys {
+		_, err := lc.WriteBlock(context.Background(), &proto.WriteRequest{
+			Shard: &shard,
+			Puts:  []*proto.PutRequest{{Key: key, Value: []byte(key)}},
+		})
+		require.NoError(t, err)
+	}
+}
+
+// newLeaderWithTermHistory returns the leader of term 3, of replication factor
+// 2 and without followers, whose wal holds the entries 0 and 1 of term 1 and
+// the entry 2 of term 2, all committed.
+func newLeaderWithTermHistory(t *testing.T, provider dataserverrpc.ReplicationRpcProvider,
+	walFactory *hookWalFactory) LeaderController {
+	t.Helper()
+
+	lc := newHookedLeaderController(t, provider, &hookKVFactory{}, walFactory)
+	becomeTestLeader(t, lc, 1, 1, nil)
+	writeTestKeys(t, lc, "a", "b")
+	becomeTestLeader(t, lc, 2, 1, nil)
+	writeTestKeys(t, lc, "c")
+	becomeTestLeader(t, lc, 3, 2, nil)
+	return lc
+}
+
+// appendTestEntry appends the entry 0 of term 1 to the wal of shard 1 before
+// any leader opens it.
+func appendTestEntry(t *testing.T, walFactory *hookWalFactory, value []byte) {
+	t.Helper()
+
+	walObject, err := walFactory.Factory.NewWal(constant.DefaultNamespace, 1, nil)
+	require.NoError(t, err)
+	require.NoError(t, walObject.Append(&proto.LogEntry{Term: 1, Offset: 0, Value: value}))
+	require.NoError(t, walObject.Close())
+}
+
+func marshalTestWrite(t *testing.T, key string) []byte {
+	t.Helper()
+
+	var shard int64 = 1
+	value, err := wrapInLogEntryValue(&proto.WriteRequest{
+		Shard: &shard,
+		Puts:  []*proto.PutRequest{{Key: key, Value: []byte(key)}},
+	}).MarshalVT()
+	require.NoError(t, err)
+	return value
+}
+
+// captureDebugLogs logs at the debug level, for the loggers created until the
+// end of the test, and returns what they logged so far.
+func captureDebugLogs(t *testing.T) func() string {
+	t.Helper()
+
+	logs := &lockedBuffer{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return logs.String
+}
+
+type lockedBuffer struct {
+	sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.Lock()
+	defer b.Unlock()
+	return b.buffer.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.Lock()
+	defer b.Unlock()
+	return b.buffer.String()
+}
+
+// useManualMetricReader records the metrics created until the end of the
+// test in the returned reader.
+func useManualMetricReader(t *testing.T) *sdkmetric.ManualReader {
+	t.Helper()
+
+	previous := metric.GetMeter()
+	reader := sdkmetric.NewManualReader()
+	metric.SetMeter(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test"))
+	t.Cleanup(func() { metric.SetMeter(previous) })
+	return reader
+}
+
+// failKey returns a get hook that fails the reads of key while fail is set.
+func failKey(key string, fail *atomic.Bool) func(string) error {
+	return func(readKey string) error {
+		if readKey == key && fail.Load() {
+			return errInjected
+		}
+		return nil
+	}
+}
+
+// hookKVFactory opens the stores of its factory, and overrides their calls
+// with the hooks it has: a nil hook calls the store.
+type hookKVFactory struct {
+	kvstore.Factory
+	newKV func() error
+	// get fails the read of the key when it returns an error
+	get          func(key string) error
+	keyRangeScan func(kv kvstore.KV, lowerBound, upperBound string,
+		opts kvstore.IteratorOpts) (kvstore.KeyIterator, error)
+	rangeScan func(kv kvstore.KV, lowerBound, upperBound string,
+		opts kvstore.IteratorOpts) (kvstore.KeyValueIterator, error)
+	snapshot func(kv kvstore.KV) (kvstore.Snapshot, error)
+	// commit fails the commit of a write batch when it returns an error
+	commit func() error
+}
+
+func (f *hookKVFactory) NewKV(namespace string, shardId int64, keySorting proto.KeySortingType) (kvstore.KV, error) {
+	if f.newKV != nil {
+		if err := f.newKV(); err != nil {
+			return nil, err
+		}
+	}
+	kv, err := f.Factory.NewKV(namespace, shardId, keySorting)
+	if err != nil {
+		return nil, err
+	}
+	return &hookKV{KV: kv, factory: f}, nil
+}
+
+type hookKV struct {
+	kvstore.KV
+	factory *hookKVFactory
+}
+
+func (kv *hookKV) Get(key string, comparisonType kvstore.ComparisonType,
+	opts kvstore.IteratorOpts) (string, []byte, io.Closer, error) {
+	if kv.factory.get != nil {
+		if err := kv.factory.get(key); err != nil {
+			return "", nil, nil, err
+		}
+	}
+	return kv.KV.Get(key, comparisonType, opts)
+}
+
+func (kv *hookKV) KeyRangeScan(lowerBound, upperBound string, opts kvstore.IteratorOpts) (kvstore.KeyIterator, error) {
+	if kv.factory.keyRangeScan != nil {
+		return kv.factory.keyRangeScan(kv.KV, lowerBound, upperBound, opts)
+	}
+	return kv.KV.KeyRangeScan(lowerBound, upperBound, opts)
+}
+
+func (kv *hookKV) RangeScan(lowerBound, upperBound string,
+	opts kvstore.IteratorOpts) (kvstore.KeyValueIterator, error) {
+	if kv.factory.rangeScan != nil {
+		return kv.factory.rangeScan(kv.KV, lowerBound, upperBound, opts)
+	}
+	return kv.KV.RangeScan(lowerBound, upperBound, opts)
+}
+
+func (kv *hookKV) Snapshot() (kvstore.Snapshot, error) {
+	if kv.factory.snapshot != nil {
+		return kv.factory.snapshot(kv.KV)
+	}
+	return kv.KV.Snapshot()
+}
+
+func (kv *hookKV) NewWriteBatch() kvstore.WriteBatch {
+	return &hookWriteBatch{WriteBatch: kv.KV.NewWriteBatch(), factory: kv.factory}
+}
+
+type hookWriteBatch struct {
+	kvstore.WriteBatch
+	factory *hookKVFactory
+}
+
+func (b *hookWriteBatch) Commit() error {
+	if b.factory.commit != nil {
+		if err := b.factory.commit(); err != nil {
+			return err
+		}
+	}
+	return b.WriteBatch.Commit()
+}
+
+// failingValueIterator fails to read the values.
+type failingValueIterator struct {
+	kvstore.KeyValueIterator
+}
+
+func (failingValueIterator) Value() ([]byte, error) {
+	return nil, errInjected
+}
+
+// hookWalFactory opens the wals of its factory, and overrides their calls with
+// the hooks it has: a nil hook calls the wal.
+type hookWalFactory struct {
+	wal.Factory
+	newReader        func(w wal.Wal, after int64) (wal.Reader, error)
+	newReverseReader func(w wal.Wal) (wal.Reader, error)
+	sync             func(ctx context.Context, w wal.Wal) error
+	appendAndSync    func(w wal.Wal, entry *proto.LogEntry, callback func(entryCrc uint32, err error))
+	close            func(w wal.Wal) error
+	delete           func(w wal.Wal) error
+}
+
+func (f *hookWalFactory) NewWal(namespace string, shard int64, provider wal.CommitOffsetProvider) (wal.Wal, error) {
+	w, err := f.Factory.NewWal(namespace, shard, provider)
+	if err != nil {
+		return nil, err
+	}
+	return &hookWal{Wal: w, factory: f}, nil
+}
+
+type hookWal struct {
+	wal.Wal
+	factory *hookWalFactory
+}
+
+func (w *hookWal) NewReader(after int64) (wal.Reader, error) {
+	if w.factory.newReader != nil {
+		return w.factory.newReader(w.Wal, after)
+	}
+	return w.Wal.NewReader(after)
+}
+
+func (w *hookWal) NewReverseReader() (wal.Reader, error) {
+	if w.factory.newReverseReader != nil {
+		return w.factory.newReverseReader(w.Wal)
+	}
+	return w.Wal.NewReverseReader()
+}
+
+func (w *hookWal) Sync(ctx context.Context) error {
+	if w.factory.sync != nil {
+		return w.factory.sync(ctx, w.Wal)
+	}
+	return w.Wal.Sync(ctx)
+}
+
+func (w *hookWal) AppendAndSync(entry *proto.LogEntry, callback func(entryCrc uint32, err error)) {
+	if w.factory.appendAndSync != nil {
+		w.factory.appendAndSync(w.Wal, entry, callback)
+		return
+	}
+	w.Wal.AppendAndSync(entry, callback)
+}
+
+func (w *hookWal) Close() error {
+	if w.factory.close != nil {
+		return w.factory.close(w.Wal)
+	}
+	return w.Wal.Close()
+}
+
+func (w *hookWal) Delete() error {
+	if w.factory.delete != nil {
+		return w.factory.delete(w.Wal)
+	}
+	return w.Wal.Delete()
+}
+
+// hookReader reads its reader, and overrides ReadNext with the hook.
+type hookReader struct {
+	wal.Reader
+	readNext func(r wal.Reader) (entry *proto.LogEntry, previousCrc uint32, entryCrc uint32, err error)
+}
+
+func (r *hookReader) ReadNext() (entry *proto.LogEntry, previousCrc uint32, entryCrc uint32, err error) {
+	return r.readNext(r.Reader)
+}
+
+// newFailingReader returns a reader that fails to read the entries of the
+// reader it gets.
+func newFailingReader(r wal.Reader, err error) (wal.Reader, error) {
+	if err != nil {
+		return nil, err
+	}
+	return &hookReader{Reader: r, readNext: func(wal.Reader) (*proto.LogEntry, uint32, uint32, error) {
+		return nil, 0, 0, errInjected
+	}}, nil
+}
+
+// hookStreamCallback passes the items to the hook, and the completion to the
+// completed channel.
+type hookStreamCallback struct {
+	onNext    func(*proto.EncodedNotificationBatch) error
+	completed chan error
+}
+
+func newHookStreamCallback(onNext func(*proto.EncodedNotificationBatch) error) *hookStreamCallback {
+	return &hookStreamCallback{onNext: onNext, completed: make(chan error, 1)}
+}
+
+func (cb *hookStreamCallback) OnNext(batch *proto.EncodedNotificationBatch) error {
+	return cb.onNext(batch)
+}
+
+func (cb *hookStreamCallback) OnComplete(err error) {
+	cb.completed <- err
 }

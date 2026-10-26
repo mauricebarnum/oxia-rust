@@ -14,7 +14,13 @@
 
 package oxia
 
-import "github.com/pkg/errors"
+import (
+	"strings"
+
+	"github.com/pkg/errors"
+
+	"github.com/oxia-db/oxia/oxia/internal/model"
+)
 
 type putOptions struct {
 	baseOptions
@@ -22,6 +28,7 @@ type putOptions struct {
 	ephemeral          bool
 	sequenceKeysDeltas []uint64
 	secondaryIndexes   []*secondaryIdxOption
+	callContext        *model.CallContext
 }
 
 // PutOption represents an option for the [SyncClient.Put] operation.
@@ -33,6 +40,13 @@ func newPutOptions(opts []PutOption) (*putOptions, error) {
 	putOpts := &putOptions{}
 	for _, opt := range opts {
 		opt.applyPut(putOpts)
+	}
+
+	for _, secondaryIndex := range putOpts.secondaryIndexes {
+		if strings.IndexByte(secondaryIndex.indexName, '/') >= 0 {
+			return nil, errors.Wrapf(ErrInvalidOptions,
+				"secondary index name %q must not contain '/'", secondaryIndex.indexName)
+		}
 	}
 
 	if len(putOpts.sequenceKeysDeltas) > 0 {
@@ -90,7 +104,8 @@ func (s *sequenceKeysDeltas) applyPut(opts *putOptions) {
 // assigned by the server, based on the prefix record key and
 // appending one or more sequences.
 // The sequence numbers will be atomically added based on the deltas.
-// Deltas must be >= 0 and the first one strictly > 0.
+// Deltas must be >= 0 and the first one strictly > 0. If the sequence already
+// has more numbers than deltas, the missing deltas are 0.
 // SequenceKeysDeltas also requires that a [PartitionKey] option is
 // provided.
 func SequenceKeysDeltas(delta ...uint64) PutOption {
@@ -106,9 +121,8 @@ func (s *secondaryIdxOption) applyPut(opts *putOptions) {
 	opts.secondaryIndexes = append(opts.secondaryIndexes, s)
 }
 
-// SecondaryIndex let the users specify additional keys to index the record
-// Index names are arbitrary strings and can be used in `List` and
-// `RangeScan` requests.
+// SecondaryIndex lets users specify additional keys to index the record.
+// Index names must not contain '/' and can be used in [UseIndex] options.
 // Secondary keys are not required to be unique.
 // Multiple secondary indexes can be passed on the same record, even
 // reusing multiple times the same indexName.

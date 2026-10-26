@@ -23,8 +23,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"go.uber.org/multierr"
-
 	"github.com/oxia-db/oxia/common/channel"
 	"github.com/oxia-db/oxia/common/constant"
 	"github.com/oxia-db/oxia/common/metric"
@@ -76,6 +74,11 @@ type LogSynchronizer struct {
 	reAckMutex   sync.Mutex
 	reAckOffsets []int64
 
+	// The entries appended to the wal, which the state applier applies
+	// without reading them back. Only while the stream is open: once closed,
+	// the wal entries can get truncated, or replaced by a snapshot.
+	appended *appendedEntries
+
 	writeLatencyHisto metric.LatencyHistogram
 }
 
@@ -84,22 +87,26 @@ func (ls *LogSynchronizer) Sync() error {
 }
 
 func (ls *LogSynchronizer) SyncAndClose() error {
-	return multierr.Combine(ls.Sync(), ls.Close())
+	err := ls.Sync()
+	ls.Close()
+	return err
 }
 
 func (ls *LogSynchronizer) IsValid() bool {
 	return ls != nil && !ls.closed.Load()
 }
 
-func (ls *LogSynchronizer) Close() error {
+func (ls *LogSynchronizer) Close() {
 	if !ls.closed.CompareAndSwap(false, true) {
-		return nil
+		return
 	}
 	ls.cancel()
 	channel.PushNoBlock(ls.finish, context.Canceled)
 
 	ls.waitGroup.Wait()
-	return nil
+	// Free the entries the state applier didn't take: it reads them from the
+	// wal once the stream is closed
+	ls.appended.clear()
 }
 
 func (ls *LogSynchronizer) bgAppender(stream proto.OxiaLogReplication_ReplicateServer, syncCond chan struct{}, onAppend func()) error {
@@ -200,9 +207,13 @@ func (ls *LogSynchronizer) append0(syncCond chan struct{}, onAppend func(), req 
 	// Append the entry asynchronously, passing the previous CRC from the leader.
 	// When the WAL is empty (e.g. after snapshot install), the CRC seeds the chain
 	// so that the follower's CRC matches the leader's.
-	if err := ls.wal.AppendAsyncWithPreviousCrc(req.GetEntry(), req.PreviousEntryCrc); err != nil {
+	entryCrc, err := ls.wal.AppendAsyncWithPreviousCrc(req.GetEntry(), req.PreviousEntryCrc)
+	if err != nil {
 		return err
 	}
+	// The entry is the stream's own: the gRPC codec decodes every message
+	// into new buffers
+	ls.appended.add(req.Entry, entryCrc)
 
 	ls.advertisedCommitOffset.Store(req.CommitOffset)
 	ls.lastAppendedOffset.Store(req.Entry.Offset)
@@ -291,6 +302,7 @@ func NewLogSynchronizer(params LogSynchronizerParams) *LogSynchronizer {
 		wal:                    params.Wal,
 		advertisedCommitOffset: params.AdvertisedCommitOffset,
 		lastAppendedOffset:     params.LastAppendedOffset,
+		appended:               newAppendedEntries(),
 		writeLatencyHisto:      params.WriteLatencyHisto,
 		finish:                 make(chan error, 1),
 	}

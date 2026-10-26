@@ -51,6 +51,7 @@ const (
 	SplitPhaseBootstrap = SplitPhase_Bootstrap
 	SplitPhaseCatchUp   = SplitPhase_CatchUp
 	SplitPhaseCutover   = SplitPhase_Cutover
+	SplitPhaseFinalize  = SplitPhase_Finalize
 )
 
 func (ds *DataServerIdentity) GetNameOrDefault() string {
@@ -102,6 +103,8 @@ func ParseSplitPhase(value SplitPhase) SplitPhase {
 		return SplitPhaseCatchUp
 	case SplitPhaseCutover:
 		return SplitPhaseCutover
+	case SplitPhaseFinalize:
+		return SplitPhaseFinalize
 	default:
 		return SplitPhaseBootstrap
 	}
@@ -148,6 +151,16 @@ func ParseKeySortingType(value string) (KeySortingType, error) {
 	}
 }
 
+// ToKeySorting returns the order of the keys in the shards of a namespace with
+// this key sorting, as the clients are told. The data servers keep the keys in
+// hierarchical order when the key sorting is not set.
+func (t KeySortingType) ToKeySorting() KeySorting {
+	if t == KeySortingType_NATURAL {
+		return KeySorting_KEY_SORTING_NATURAL
+	}
+	return KeySorting_KEY_SORTING_HIERARCHICAL
+}
+
 func ParseAntiAffinityMode(value string) string {
 	switch strings.ToLower(value) {
 	case AntiAffinityModeStrict:
@@ -179,31 +192,43 @@ func (cc *ClusterConfiguration) GetDataServer(id string) (*DataServer, bool) {
 	}
 
 	for _, server := range cc.GetServers() {
-		if server.GetNameOrDefault() != id {
-			continue
+		if server.GetNameOrDefault() == id {
+			return cc.dataServer(server), true
 		}
-
-		identity := server
-		if server.GetName() == "" {
-			name := server.GetNameOrDefault()
-			identity = &DataServerIdentity{
-				Name:     &name,
-				Public:   server.GetPublic(),
-				Internal: server.GetInternal(),
-			}
-		}
-
-		dataServer := &DataServer{
-			Identity: identity,
-			Metadata: &DataServerMetadata{},
-		}
-		if metadata, found := cc.GetServerMetadata()[id]; found {
-			dataServer.Metadata = metadata
-		}
-		return dataServer, true
 	}
 
 	return nil, false
+}
+
+// ListDataServers returns the data servers of the configuration, with their
+// metadata, in the order of its servers.
+func (cc *ClusterConfiguration) ListDataServers() []*DataServer {
+	dataServers := make([]*DataServer, 0, len(cc.GetServers()))
+	for _, server := range cc.GetServers() {
+		dataServers = append(dataServers, cc.dataServer(server))
+	}
+	return dataServers
+}
+
+func (cc *ClusterConfiguration) dataServer(server *DataServerIdentity) *DataServer {
+	name := server.GetNameOrDefault()
+	identity := server
+	if server.GetName() == "" {
+		identity = &DataServerIdentity{
+			Name:     &name,
+			Public:   server.GetPublic(),
+			Internal: server.GetInternal(),
+		}
+	}
+
+	dataServer := &DataServer{
+		Identity: identity,
+		Metadata: &DataServerMetadata{},
+	}
+	if metadata, found := cc.GetServerMetadata()[name]; found {
+		dataServer.Metadata = metadata
+	}
+	return dataServer
 }
 
 func (cc *ClusterConfiguration) GetCoordinator(name string) (*Coordinator, bool) {

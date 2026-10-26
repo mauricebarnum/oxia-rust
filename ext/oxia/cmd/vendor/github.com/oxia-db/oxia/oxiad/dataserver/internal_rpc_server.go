@@ -34,6 +34,7 @@ import (
 
 	"github.com/oxia-db/oxia/oxiad/dataserver/assignment"
 	"github.com/oxia-db/oxia/oxiad/dataserver/controller"
+	"github.com/oxia-db/oxia/oxiad/dataserver/controller/follow"
 	manifestpkg "github.com/oxia-db/oxia/oxiad/dataserver/manifest"
 
 	"github.com/oxia-db/oxia/oxiad/common/rpc/auth"
@@ -121,43 +122,35 @@ func (s *internalRpcServer) Handshake(c context.Context, req *proto.HandshakeReq
 		return nil, status.Error(codes.InvalidArgument, "instance id must not be empty")
 	}
 
-	currentInstanceID := s.manifest.GetInstanceID()
-	switch currentInstanceID {
-	case "":
-		if err := s.manifest.SetInstanceID(req.InstanceId); err != nil {
-			if errors.Is(err, manifestpkg.ErrInstanceIDMismatch) {
-				return &proto.HandshakeResponse{
-					Status:            proto.HandshakeStatus_HANDSHAKE_STATUS_MISMATCH,
-					FeaturesSupported: feature.SupportedFeatures(),
-				}, nil
-			}
-			log.Warn("Failed to bind instance id", slog.Any("error", err))
-			return nil, err
-		}
-		return &proto.HandshakeResponse{
-			Status:            proto.HandshakeStatus_HANDSHAKE_STATUS_BOUND,
-			FeaturesSupported: feature.SupportedFeatures(),
-		}, nil
-	case req.InstanceId:
-		return &proto.HandshakeResponse{
-			Status:            proto.HandshakeStatus_HANDSHAKE_STATUS_ALREADY_BOUND,
-			FeaturesSupported: feature.SupportedFeatures(),
-		}, nil
+	bound, err := s.manifest.SetInstanceID(req.InstanceId)
+	var handshakeStatus proto.HandshakeStatus
+	switch {
+	case errors.Is(err, manifestpkg.ErrInstanceIDMismatch):
+		handshakeStatus = proto.HandshakeStatus_HANDSHAKE_STATUS_MISMATCH
+	case err != nil:
+		log.Warn("Failed to bind instance id", slog.Any("error", err))
+		return nil, err
+	case bound:
+		handshakeStatus = proto.HandshakeStatus_HANDSHAKE_STATUS_BOUND
 	default:
-		return &proto.HandshakeResponse{
-			Status:            proto.HandshakeStatus_HANDSHAKE_STATUS_MISMATCH,
-			FeaturesSupported: feature.SupportedFeatures(),
-		}, nil
+		handshakeStatus = proto.HandshakeStatus_HANDSHAKE_STATUS_ALREADY_BOUND
 	}
+	return &proto.HandshakeResponse{
+		Status:            handshakeStatus,
+		FeaturesSupported: feature.SupportedFeatures(),
+	}, nil
 }
 
 func (s *internalRpcServer) NewTerm(c context.Context, req *proto.NewTermRequest) (*proto.NewTermResponse, error) {
 	log := s.log.With(
-		slog.Any("req", req),
+		slog.String("namespace", req.Namespace),
+		slog.Int64("shard", req.Shard),
+		slog.Int64("term", req.Term),
 		slog.String("peer", rpc.GetPeer(c)),
 	)
 
 	log.Info("Received NewTerm request")
+	log.Debug("NewTerm request", slog.Any("req", req))
 
 	// NewTerm applies to both followers and leaders
 	// First check if we have already a follower controller running
@@ -208,9 +201,10 @@ func (s *internalRpcServer) NewTerm(c context.Context, req *proto.NewTermRequest
 	} else {
 		log.Info(
 			"New term processing completed",
-			slog.Any("response", res),
+			slog.Any("head-entry", res.HeadEntryId),
 			slog.Int64("leaderTerm", leader.Term()),
 		)
+		log.Debug("NewTerm response", slog.Any("response", res))
 	}
 	return res, constant.IntoGrpcStatusError(err2)
 }
@@ -407,12 +401,8 @@ func (s *internalRpcServer) Replicate(srv proto.OxiaLogReplication_ReplicateServ
 	}
 
 	// Activate split filtering if hash range metadata is present
-	hashRange, ok, err := readSplitHashRange(md)
-	if err != nil {
+	if err := setSplitHashRange(follower, md, term); err != nil {
 		return err
-	}
-	if ok {
-		follower.SetSplitHashRange(hashRange)
 	}
 
 	err = follower.AppendEntries(srv)
@@ -472,12 +462,8 @@ func (s *internalRpcServer) SendSnapshot(srv proto.OxiaLogReplication_SendSnapsh
 	// Activate split filtering if hash range metadata is present.
 	// The child follower will filter its snapshot and WAL entries to
 	// only keep keys whose hash falls within this range.
-	hashRange, ok, err := readSplitHashRange(md)
-	if err != nil {
+	if err := setSplitHashRange(follower, md, term); err != nil {
 		return err
-	}
-	if ok {
-		follower.SetSplitHashRange(hashRange)
 	}
 
 	err = follower.InstallSnapshot(srv)
@@ -562,22 +548,53 @@ func readTerm(md metadata.MD) (v int64, err error) {
 // Returns the hash range and true if present, nil and false if absent,
 // or an error if the metadata is present but malformed.
 func readSplitHashRange(md metadata.MD) (*proto.HashRange, bool, error) {
-	minArr := md.Get(constant.MetadataSplitHashRangeMin)
-	maxArr := md.Get(constant.MetadataSplitHashRangeMax)
+	return readHashRange(md, "split hash range", constant.MetadataSplitHashRangeMin, constant.MetadataSplitHashRangeMax)
+}
+
+// readSplitParentHashRange reads the optional hash range of the parent of a
+// split child from gRPC metadata, like readSplitHashRange. A coordinator that
+// predates it doesn't send it.
+func readSplitParentHashRange(md metadata.MD) (*proto.HashRange, error) {
+	hashRange, _, err := readHashRange(md, "split parent hash range",
+		constant.MetadataSplitParentHashRangeMin, constant.MetadataSplitParentHashRangeMax)
+	return hashRange, err
+}
+
+func readHashRange(md metadata.MD, name string, minKey string, maxKey string) (*proto.HashRange, bool, error) {
+	minArr := md.Get(minKey)
+	maxArr := md.Get(maxKey)
 	if len(minArr) == 0 || len(maxArr) == 0 {
 		return nil, false, nil
 	}
 
 	var minVal, maxVal uint32
 	if _, err := fmt.Sscan(minArr[0], &minVal); err != nil {
-		return nil, false, fmt.Errorf("invalid split hash range min %q: %w", minArr[0], err)
+		return nil, false, fmt.Errorf("invalid %s min %q: %w", name, minArr[0], err)
 	}
 	if _, err := fmt.Sscan(maxArr[0], &maxVal); err != nil {
-		return nil, false, fmt.Errorf("invalid split hash range max %q: %w", maxArr[0], err)
+		return nil, false, fmt.Errorf("invalid %s max %q: %w", name, maxArr[0], err)
+	}
+	if minVal > maxVal {
+		return nil, false, fmt.Errorf("invalid %s: min %d is greater than max %d", name, minVal, maxVal)
 	}
 
 	return &proto.HashRange{
 		Min: minVal,
 		Max: maxVal,
 	}, true, nil
+}
+
+// setSplitHashRange marks the follower as a split child if the split hash
+// range metadata is present.
+func setSplitHashRange(follower follow.FollowerController, md metadata.MD, term int64) error {
+	hashRange, ok, err := readSplitHashRange(md)
+	if err != nil || !ok {
+		return err
+	}
+	parentHashRange, err := readSplitParentHashRange(md)
+	if err != nil {
+		return err
+	}
+	follower.SetSplitHashRange(hashRange, parentHashRange, term)
+	return nil
 }

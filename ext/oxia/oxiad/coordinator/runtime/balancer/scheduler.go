@@ -69,7 +69,6 @@ func (r *nodeBasedBalancer) Action() <-chan action.Action {
 }
 
 func (r *nodeBasedBalancer) Close() error {
-	close(r.triggerCh)
 	r.ctxCancel()
 	r.wg.Wait()
 	return nil
@@ -115,8 +114,16 @@ func (r *nodeBasedBalancer) rebalanceEnsemble() bool {
 	r.checkQuarantineNodes()
 
 	swapGroup := &sync.WaitGroup{}
-	currentStatus := r.metadata.ListNamespaceStatus()
-	dataServers := r.metadata.ListDataServer()
+	currentStatus, err := r.metadata.ListNamespaceStatus()
+	if err != nil {
+		r.logger.Warn("Failed to rebalance the shard ensembles", slog.Any("error", err))
+		return false
+	}
+	dataServers, err := r.metadata.ListDataServer()
+	if err != nil {
+		r.logger.Warn("Failed to rebalance the shard ensembles", slog.Any("error", err))
+		return false
+	}
 	candidates, metadata := dataServersToCandidatesAndMetadata(dataServers)
 	groupedStatus, historyNodes := state.GroupingShardsNodeByStatus(candidates, currentStatus)
 	loadRatios := r.loadRatioAlgorithm(&model.RatioParams{NodeShardsInfos: groupedStatus, HistoryNodes: historyNodes})
@@ -240,7 +247,10 @@ func (r *nodeBasedBalancer) swapShard(
 	var err error
 
 	var borrowedNamespace commonobject.Borrowed[*commonproto.Namespace]
-	if borrowedNamespace, exist = r.metadata.GetNamespace(candidateShard.Namespace); !exist {
+	if borrowedNamespace, exist, err = r.metadata.GetNamespace(candidateShard.Namespace); err != nil {
+		return false, err
+	}
+	if !exist {
 		return false, nil
 	}
 	nsc = borrowedNamespace.UnsafeBorrow()
@@ -281,7 +291,10 @@ func (r *nodeBasedBalancer) swapShard(
 	}
 	var targetNode *commonproto.DataServerIdentity
 	var borrowedTargetNode commonobject.Borrowed[*commonproto.DataServer]
-	if borrowedTargetNode, exist = r.metadata.GetDataServer(targetNodeID); !exist {
+	if borrowedTargetNode, exist, err = r.metadata.GetDataServer(targetNodeID); err != nil {
+		return false, err
+	}
+	if !exist {
 		return false, errors.New("target node does not exist")
 	}
 	targetNode = borrowedTargetNode.UnsafeBorrow().GetIdentity()
@@ -336,18 +349,25 @@ func (r *nodeBasedBalancer) IsNodeQuarantined(highestLoadRatioNode *model.NodeLo
 }
 
 func (r *nodeBasedBalancer) IsBalanced() bool {
-	configNamespaces := r.metadata.ListNamespace()
-	if len(configNamespaces) != len(r.metadata.ListNamespaceStatus()) {
+	configNamespaces, err := r.metadata.ListNamespace()
+	if err != nil {
+		return false
+	}
+	status, err := r.metadata.ListNamespaceStatus()
+	if err != nil || len(configNamespaces) != len(status) {
 		return false
 	}
 	for namespace := range configNamespaces {
-		if _, exists := r.metadata.GetNamespaceStatus(namespace); !exists {
+		if _, exists, err := r.metadata.GetNamespaceStatus(namespace); err != nil || !exists {
 			return false
 		}
 	}
 
-	status := r.metadata.ListNamespaceStatus()
-	candidates, _ := dataServersToCandidatesAndMetadata(r.metadata.ListDataServer())
+	dataServers, err := r.metadata.ListDataServer()
+	if err != nil {
+		return false
+	}
+	candidates, _ := dataServersToCandidatesAndMetadata(dataServers)
 	groupedStatus, historyNodes := state.GroupingShardsNodeByStatus(candidates, status)
 	shardsBalanced := r.loadRatioAlgorithm(
 		&model.RatioParams{
@@ -460,10 +480,7 @@ func (r *nodeBasedBalancer) startBackgroundScheduler() {
 			defer timer.Stop()
 			for {
 				select {
-				case _, more := <-timer.C:
-					if !more {
-						return
-					}
+				case <-timer.C:
 					channel.PushNoBlock(r.triggerCh, nil)
 				case <-r.ctx.Done():
 					return
@@ -480,10 +497,7 @@ func (r *nodeBasedBalancer) startBackgroundNotifier() {
 		}, func() {
 			for {
 				select {
-				case _, more := <-r.triggerCh:
-					if !more {
-						return
-					}
+				case <-r.triggerCh:
 					if r.rebalanceEnsemble() { // if shard is balanced
 						r.rebalanceLeader()
 					}
@@ -498,8 +512,17 @@ func (r *nodeBasedBalancer) startBackgroundNotifier() {
 func (r *nodeBasedBalancer) rebalanceLeader() {
 	r.checkQuarantineShards()
 
-	status := r.metadata.ListNamespaceStatus()
-	candidates, _ := dataServersToCandidatesAndMetadata(r.metadata.ListDataServer())
+	status, err := r.metadata.ListNamespaceStatus()
+	if err != nil {
+		r.logger.Warn("Failed to rebalance the shard leaders", slog.Any("error", err))
+		return
+	}
+	dataServers, err := r.metadata.ListDataServer()
+	if err != nil {
+		r.logger.Warn("Failed to rebalance the shard leaders", slog.Any("error", err))
+		return
+	}
+	candidates, _ := dataServersToCandidatesAndMetadata(dataServers)
 	totalShards, electedShards, nodeLeaders := state.NodeShardLeaders(candidates, status)
 
 	electedRate := float64(electedShards) / float64(totalShards)
@@ -528,18 +551,18 @@ func (r *nodeBasedBalancer) rebalanceLeader() {
 		oldLeader = shardStatus.Leader.GetNameOrDefault()
 	}
 
-	latch := &sync.WaitGroup{}
-	latch.Add(1)
-	ac := &action.ElectionAction{
-		Shard:  shard,
-		Waiter: latch,
-	}
+	ac := action.NewElectionAction(shard)
 	r.actionCh <- ac
-	latch.Wait()
-	leader := ac.NewLeader
-	r.logger.Info("triggered new election", slog.Int64("shard", shard), slog.Any("old-leader", oldLeader), slog.Any("new-leader", leader))
+	leader, err := ac.Wait()
+	if err != nil {
+		r.logger.Warn("quarantine the shard due to failed election", slog.String("namespace", move.Namespace), slog.Int64("shard", shard),
+			slog.Any("old-leader", oldLeader), slog.Any("error", err))
+		r.shardQuarantineShardMap.Store(shard, time.Now())
+		return
+	}
+	r.logger.Info("triggered new election", slog.String("namespace", move.Namespace), slog.Int64("shard", shard), slog.Any("old-leader", oldLeader), slog.Any("new-leader", leader))
 	if leader == oldLeader { // no changes
-		r.logger.Info("quarantine the shard due to no leader changed", slog.Int64("shard", shard), slog.Any("old-leader", oldLeader), slog.Any("new-leader", leader))
+		r.logger.Info("quarantine the shard due to no leader changed", slog.String("namespace", move.Namespace), slog.Int64("shard", shard), slog.Any("old-leader", oldLeader), slog.Any("new-leader", leader))
 		r.shardQuarantineShardMap.Store(shard, time.Now())
 	}
 }
@@ -559,7 +582,7 @@ func NewLoadBalancer(options Options) LoadBalancer {
 		ctx:                     ctx,
 		ctxCancel:               cancelFunc,
 		wg:                      sync.WaitGroup{},
-		loadBalancerConf:        options.Metadata.GetLoadBalancer().UnsafeBorrow(),
+		loadBalancerConf:        options.LoadBalancerConfig,
 		actionCh:                make(chan action.Action, 1000),
 		nodeAvailableJudger:     options.NodeAvailableJudger,
 		metadata:                options.Metadata,

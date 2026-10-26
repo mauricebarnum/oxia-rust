@@ -72,6 +72,7 @@ func (m *NamespaceShardsAssignment) CloneVT() *NamespaceShardsAssignment {
 	}
 	r := new(NamespaceShardsAssignment)
 	r.ShardKeyRouter = m.ShardKeyRouter
+	r.KeySorting = m.KeySorting
 	if rhs := m.Assignments; rhs != nil {
 		tmpContainer := make([]*ShardAssignment, len(rhs))
 		for k, v := range rhs {
@@ -292,6 +293,7 @@ func (m *PutRequest) CloneVT() *PutRequest {
 	}
 	r := new(PutRequest)
 	r.Key = m.Key
+	r.OpIndex = m.OpIndex
 	if rhs := m.Value; rhs != nil {
 		tmpBytes := make([]byte, len(rhs))
 		copy(tmpBytes, rhs)
@@ -372,9 +374,14 @@ func (m *DeleteRequest) CloneVT() *DeleteRequest {
 	}
 	r := new(DeleteRequest)
 	r.Key = m.Key
+	r.OpIndex = m.OpIndex
 	if rhs := m.ExpectedVersionId; rhs != nil {
 		tmpVal := *rhs
 		r.ExpectedVersionId = &tmpVal
+	}
+	if rhs := m.PartitionKey; rhs != nil {
+		tmpVal := *rhs
+		r.PartitionKey = &tmpVal
 	}
 	if len(m.unknownFields) > 0 {
 		r.unknownFields = make([]byte, len(m.unknownFields))
@@ -465,6 +472,7 @@ func (m *DeleteRangeRequest) CloneVT() *DeleteRangeRequest {
 	r := new(DeleteRangeRequest)
 	r.StartInclusive = m.StartInclusive
 	r.EndExclusive = m.EndExclusive
+	r.OpIndex = m.OpIndex
 	if len(m.unknownFields) > 0 {
 		r.unknownFields = make([]byte, len(m.unknownFields))
 		copy(r.unknownFields, m.unknownFields)
@@ -501,6 +509,7 @@ func (m *ListRequest) CloneVT() *ListRequest {
 	r.StartInclusive = m.StartInclusive
 	r.EndExclusive = m.EndExclusive
 	r.IncludeInternalKeys = m.IncludeInternalKeys
+	r.EndInclusive = m.EndInclusive
 	if rhs := m.Shard; rhs != nil {
 		tmpVal := *rhs
 		r.Shard = &tmpVal
@@ -525,6 +534,7 @@ func (m *ListResponse) CloneVT() *ListResponse {
 		return (*ListResponse)(nil)
 	}
 	r := new(ListResponse)
+	r.EndInclusive = m.EndInclusive
 	if rhs := m.Keys; rhs != nil {
 		tmpContainer := make([]string, len(rhs))
 		copy(tmpContainer, rhs)
@@ -549,6 +559,7 @@ func (m *RangeScanRequest) CloneVT() *RangeScanRequest {
 	r.StartInclusive = m.StartInclusive
 	r.EndExclusive = m.EndExclusive
 	r.IncludeInternalKeys = m.IncludeInternalKeys
+	r.EndInclusive = m.EndInclusive
 	if rhs := m.Shard; rhs != nil {
 		tmpVal := *rhs
 		r.Shard = &tmpVal
@@ -573,6 +584,7 @@ func (m *RangeScanResponse) CloneVT() *RangeScanResponse {
 		return (*RangeScanResponse)(nil)
 	}
 	r := new(RangeScanResponse)
+	r.EndInclusive = m.EndInclusive
 	if rhs := m.Records; rhs != nil {
 		tmpContainer := make([]*GetResponse, len(rhs))
 		for k, v := range rhs {
@@ -939,6 +951,9 @@ func (this *NamespaceShardsAssignment) EqualVT(that *NamespaceShardsAssignment) 
 		}
 	}
 	if this.ShardKeyRouter != that.ShardKeyRouter {
+		return false
+	}
+	if this.KeySorting != that.KeySorting {
 		return false
 	}
 	return string(this.unknownFields) == string(that.unknownFields)
@@ -1316,6 +1331,9 @@ func (this *PutRequest) EqualVT(that *PutRequest) bool {
 	if p, q := this.OverrideModificationsCount, that.OverrideModificationsCount; (p == nil && q != nil) || (p != nil && (q == nil || *p != *q)) {
 		return false
 	}
+	if this.OpIndex != that.OpIndex {
+		return false
+	}
 	return string(this.unknownFields) == string(that.unknownFields)
 }
 
@@ -1361,6 +1379,12 @@ func (this *DeleteRequest) EqualVT(that *DeleteRequest) bool {
 		return false
 	}
 	if p, q := this.ExpectedVersionId, that.ExpectedVersionId; (p == nil && q != nil) || (p != nil && (q == nil || *p != *q)) {
+		return false
+	}
+	if p, q := this.PartitionKey, that.PartitionKey; (p == nil && q != nil) || (p != nil && (q == nil || *p != *q)) {
+		return false
+	}
+	if this.OpIndex != that.OpIndex {
 		return false
 	}
 	return string(this.unknownFields) == string(that.unknownFields)
@@ -1463,6 +1487,9 @@ func (this *DeleteRangeRequest) EqualVT(that *DeleteRangeRequest) bool {
 	if this.EndExclusive != that.EndExclusive {
 		return false
 	}
+	if this.OpIndex != that.OpIndex {
+		return false
+	}
 	return string(this.unknownFields) == string(that.unknownFields)
 }
 
@@ -1513,6 +1540,9 @@ func (this *ListRequest) EqualVT(that *ListRequest) bool {
 	if this.IncludeInternalKeys != that.IncludeInternalKeys {
 		return false
 	}
+	if this.EndInclusive != that.EndInclusive {
+		return false
+	}
 	return string(this.unknownFields) == string(that.unknownFields)
 }
 
@@ -1537,6 +1567,9 @@ func (this *ListResponse) EqualVT(that *ListResponse) bool {
 		if vx != vy {
 			return false
 		}
+	}
+	if this.EndInclusive != that.EndInclusive {
+		return false
 	}
 	return string(this.unknownFields) == string(that.unknownFields)
 }
@@ -1567,6 +1600,9 @@ func (this *RangeScanRequest) EqualVT(that *RangeScanRequest) bool {
 		return false
 	}
 	if this.IncludeInternalKeys != that.IncludeInternalKeys {
+		return false
+	}
+	if this.EndInclusive != that.EndInclusive {
 		return false
 	}
 	return string(this.unknownFields) == string(that.unknownFields)
@@ -1601,6 +1637,9 @@ func (this *RangeScanResponse) EqualVT(that *RangeScanResponse) bool {
 				return false
 			}
 		}
+	}
+	if this.EndInclusive != that.EndInclusive {
+		return false
 	}
 	return string(this.unknownFields) == string(that.unknownFields)
 }
@@ -2051,6 +2090,11 @@ func (m *NamespaceShardsAssignment) MarshalToSizedBufferVT(dAtA []byte) (int, er
 	if m.unknownFields != nil {
 		i -= len(m.unknownFields)
 		copy(dAtA[i:], m.unknownFields)
+	}
+	if m.KeySorting != 0 {
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(m.KeySorting))
+		i--
+		dAtA[i] = 0x18
 	}
 	if m.ShardKeyRouter != 0 {
 		i = protohelpers.EncodeVarint(dAtA, i, uint64(m.ShardKeyRouter))
@@ -2505,6 +2549,11 @@ func (m *PutRequest) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
 		i -= len(m.unknownFields)
 		copy(dAtA[i:], m.unknownFields)
 	}
+	if m.OpIndex != 0 {
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(m.OpIndex))
+		i--
+		dAtA[i] = 0x58
+	}
 	if m.OverrideModificationsCount != nil {
 		i = protohelpers.EncodeVarint(dAtA, i, uint64(*m.OverrideModificationsCount))
 		i--
@@ -2672,6 +2721,18 @@ func (m *DeleteRequest) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
 	if m.unknownFields != nil {
 		i -= len(m.unknownFields)
 		copy(dAtA[i:], m.unknownFields)
+	}
+	if m.OpIndex != 0 {
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(m.OpIndex))
+		i--
+		dAtA[i] = 0x20
+	}
+	if m.PartitionKey != nil {
+		i -= len(*m.PartitionKey)
+		copy(dAtA[i:], *m.PartitionKey)
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(len(*m.PartitionKey)))
+		i--
+		dAtA[i] = 0x1a
 	}
 	if m.ExpectedVersionId != nil {
 		i = protohelpers.EncodeVarint(dAtA, i, uint64(*m.ExpectedVersionId))
@@ -2887,6 +2948,11 @@ func (m *DeleteRangeRequest) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
 		i -= len(m.unknownFields)
 		copy(dAtA[i:], m.unknownFields)
 	}
+	if m.OpIndex != 0 {
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(m.OpIndex))
+		i--
+		dAtA[i] = 0x18
+	}
 	if len(m.EndExclusive) > 0 {
 		i -= len(m.EndExclusive)
 		copy(dAtA[i:], m.EndExclusive)
@@ -2972,6 +3038,16 @@ func (m *ListRequest) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
 		i -= len(m.unknownFields)
 		copy(dAtA[i:], m.unknownFields)
 	}
+	if m.EndInclusive {
+		i--
+		if m.EndInclusive {
+			dAtA[i] = 1
+		} else {
+			dAtA[i] = 0
+		}
+		i--
+		dAtA[i] = 0x30
+	}
 	if m.IncludeInternalKeys {
 		i--
 		if m.IncludeInternalKeys {
@@ -3041,6 +3117,16 @@ func (m *ListResponse) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
 		i -= len(m.unknownFields)
 		copy(dAtA[i:], m.unknownFields)
 	}
+	if m.EndInclusive {
+		i--
+		if m.EndInclusive {
+			dAtA[i] = 1
+		} else {
+			dAtA[i] = 0
+		}
+		i--
+		dAtA[i] = 0x10
+	}
 	if len(m.Keys) > 0 {
 		for iNdEx := len(m.Keys) - 1; iNdEx >= 0; iNdEx-- {
 			i -= len(m.Keys[iNdEx])
@@ -3082,6 +3168,16 @@ func (m *RangeScanRequest) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
 	if m.unknownFields != nil {
 		i -= len(m.unknownFields)
 		copy(dAtA[i:], m.unknownFields)
+	}
+	if m.EndInclusive {
+		i--
+		if m.EndInclusive {
+			dAtA[i] = 1
+		} else {
+			dAtA[i] = 0
+		}
+		i--
+		dAtA[i] = 0x30
 	}
 	if m.IncludeInternalKeys {
 		i--
@@ -3151,6 +3247,16 @@ func (m *RangeScanResponse) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
 	if m.unknownFields != nil {
 		i -= len(m.unknownFields)
 		copy(dAtA[i:], m.unknownFields)
+	}
+	if m.EndInclusive {
+		i--
+		if m.EndInclusive {
+			dAtA[i] = 1
+		} else {
+			dAtA[i] = 0
+		}
+		i--
+		dAtA[i] = 0x10
 	}
 	if len(m.Records) > 0 {
 		for iNdEx := len(m.Records) - 1; iNdEx >= 0; iNdEx-- {
@@ -3821,6 +3927,9 @@ func (m *NamespaceShardsAssignment) SizeVT() (n int) {
 	if m.ShardKeyRouter != 0 {
 		n += 1 + protohelpers.SizeOfVarint(uint64(m.ShardKeyRouter))
 	}
+	if m.KeySorting != 0 {
+		n += 1 + protohelpers.SizeOfVarint(uint64(m.KeySorting))
+	}
 	n += len(m.unknownFields)
 	return n
 }
@@ -4032,6 +4141,9 @@ func (m *PutRequest) SizeVT() (n int) {
 	if m.OverrideModificationsCount != nil {
 		n += 1 + protohelpers.SizeOfVarint(uint64(*m.OverrideModificationsCount))
 	}
+	if m.OpIndex != 0 {
+		n += 1 + protohelpers.SizeOfVarint(uint64(m.OpIndex))
+	}
 	n += len(m.unknownFields)
 	return n
 }
@@ -4069,6 +4181,13 @@ func (m *DeleteRequest) SizeVT() (n int) {
 	}
 	if m.ExpectedVersionId != nil {
 		n += 1 + protohelpers.SizeOfVarint(uint64(*m.ExpectedVersionId))
+	}
+	if m.PartitionKey != nil {
+		l = len(*m.PartitionKey)
+		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+	}
+	if m.OpIndex != 0 {
+		n += 1 + protohelpers.SizeOfVarint(uint64(m.OpIndex))
 	}
 	n += len(m.unknownFields)
 	return n
@@ -4154,6 +4273,9 @@ func (m *DeleteRangeRequest) SizeVT() (n int) {
 	if l > 0 {
 		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
 	}
+	if m.OpIndex != 0 {
+		n += 1 + protohelpers.SizeOfVarint(uint64(m.OpIndex))
+	}
 	n += len(m.unknownFields)
 	return n
 }
@@ -4195,6 +4317,9 @@ func (m *ListRequest) SizeVT() (n int) {
 	if m.IncludeInternalKeys {
 		n += 2
 	}
+	if m.EndInclusive {
+		n += 2
+	}
 	n += len(m.unknownFields)
 	return n
 }
@@ -4210,6 +4335,9 @@ func (m *ListResponse) SizeVT() (n int) {
 			l = len(s)
 			n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
 		}
+	}
+	if m.EndInclusive {
+		n += 2
 	}
 	n += len(m.unknownFields)
 	return n
@@ -4239,6 +4367,9 @@ func (m *RangeScanRequest) SizeVT() (n int) {
 	if m.IncludeInternalKeys {
 		n += 2
 	}
+	if m.EndInclusive {
+		n += 2
+	}
 	n += len(m.unknownFields)
 	return n
 }
@@ -4254,6 +4385,9 @@ func (m *RangeScanResponse) SizeVT() (n int) {
 			l = e.SizeVT()
 			n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
 		}
+	}
+	if m.EndInclusive {
+		n += 2
 	}
 	n += len(m.unknownFields)
 	return n
@@ -4856,6 +4990,25 @@ func (m *NamespaceShardsAssignment) UnmarshalVT(dAtA []byte) error {
 				b := dAtA[iNdEx]
 				iNdEx++
 				m.ShardKeyRouter |= ShardKeyRouter(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 3:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field KeySorting", wireType)
+			}
+			m.KeySorting = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.KeySorting |= KeySorting(b&0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -6078,6 +6231,25 @@ func (m *PutRequest) UnmarshalVT(dAtA []byte) error {
 				}
 			}
 			m.OverrideModificationsCount = &v
+		case 11:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field OpIndex", wireType)
+			}
+			m.OpIndex = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.OpIndex |= uint32(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
 		default:
 			iNdEx = preIndex
 			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
@@ -6320,6 +6492,58 @@ func (m *DeleteRequest) UnmarshalVT(dAtA []byte) error {
 				}
 			}
 			m.ExpectedVersionId = &v
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field PartitionKey", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			s := string(dAtA[iNdEx:postIndex])
+			m.PartitionKey = &s
+			iNdEx = postIndex
+		case 4:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field OpIndex", wireType)
+			}
+			m.OpIndex = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.OpIndex |= uint32(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
 		default:
 			iNdEx = preIndex
 			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
@@ -6866,6 +7090,25 @@ func (m *DeleteRangeRequest) UnmarshalVT(dAtA []byte) error {
 			}
 			m.EndExclusive = string(dAtA[iNdEx:postIndex])
 			iNdEx = postIndex
+		case 3:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field OpIndex", wireType)
+			}
+			m.OpIndex = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.OpIndex |= uint32(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
 		default:
 			iNdEx = preIndex
 			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
@@ -7124,6 +7367,26 @@ func (m *ListRequest) UnmarshalVT(dAtA []byte) error {
 				}
 			}
 			m.IncludeInternalKeys = bool(v != 0)
+		case 6:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field EndInclusive", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.EndInclusive = bool(v != 0)
 		default:
 			iNdEx = preIndex
 			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
@@ -7207,6 +7470,26 @@ func (m *ListResponse) UnmarshalVT(dAtA []byte) error {
 			}
 			m.Keys = append(m.Keys, string(dAtA[iNdEx:postIndex]))
 			iNdEx = postIndex
+		case 2:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field EndInclusive", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.EndInclusive = bool(v != 0)
 		default:
 			iNdEx = preIndex
 			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
@@ -7395,6 +7678,26 @@ func (m *RangeScanRequest) UnmarshalVT(dAtA []byte) error {
 				}
 			}
 			m.IncludeInternalKeys = bool(v != 0)
+		case 6:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field EndInclusive", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.EndInclusive = bool(v != 0)
 		default:
 			iNdEx = preIndex
 			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
@@ -7480,6 +7783,26 @@ func (m *RangeScanResponse) UnmarshalVT(dAtA []byte) error {
 				return err
 			}
 			iNdEx = postIndex
+		case 2:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field EndInclusive", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.EndInclusive = bool(v != 0)
 		default:
 			iNdEx = preIndex
 			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
@@ -9175,6 +9498,25 @@ func (m *NamespaceShardsAssignment) UnmarshalVTUnsafe(dAtA []byte) error {
 					break
 				}
 			}
+		case 3:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field KeySorting", wireType)
+			}
+			m.KeySorting = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.KeySorting |= KeySorting(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
 		default:
 			iNdEx = preIndex
 			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
@@ -10414,6 +10756,25 @@ func (m *PutRequest) UnmarshalVTUnsafe(dAtA []byte) error {
 				}
 			}
 			m.OverrideModificationsCount = &v
+		case 11:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field OpIndex", wireType)
+			}
+			m.OpIndex = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.OpIndex |= uint32(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
 		default:
 			iNdEx = preIndex
 			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
@@ -10664,6 +11025,62 @@ func (m *DeleteRequest) UnmarshalVTUnsafe(dAtA []byte) error {
 				}
 			}
 			m.ExpectedVersionId = &v
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field PartitionKey", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			var stringValue string
+			if intStringLen > 0 {
+				stringValue = unsafe.String(&dAtA[iNdEx], intStringLen)
+			}
+			s := stringValue
+			m.PartitionKey = &s
+			iNdEx = postIndex
+		case 4:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field OpIndex", wireType)
+			}
+			m.OpIndex = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.OpIndex |= uint32(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
 		default:
 			iNdEx = preIndex
 			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
@@ -11231,6 +11648,25 @@ func (m *DeleteRangeRequest) UnmarshalVTUnsafe(dAtA []byte) error {
 			}
 			m.EndExclusive = stringValue
 			iNdEx = postIndex
+		case 3:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field OpIndex", wireType)
+			}
+			m.OpIndex = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.OpIndex |= uint32(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
 		default:
 			iNdEx = preIndex
 			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
@@ -11501,6 +11937,26 @@ func (m *ListRequest) UnmarshalVTUnsafe(dAtA []byte) error {
 				}
 			}
 			m.IncludeInternalKeys = bool(v != 0)
+		case 6:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field EndInclusive", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.EndInclusive = bool(v != 0)
 		default:
 			iNdEx = preIndex
 			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
@@ -11588,6 +12044,26 @@ func (m *ListResponse) UnmarshalVTUnsafe(dAtA []byte) error {
 			}
 			m.Keys = append(m.Keys, stringValue)
 			iNdEx = postIndex
+		case 2:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field EndInclusive", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.EndInclusive = bool(v != 0)
 		default:
 			iNdEx = preIndex
 			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
@@ -11788,6 +12264,26 @@ func (m *RangeScanRequest) UnmarshalVTUnsafe(dAtA []byte) error {
 				}
 			}
 			m.IncludeInternalKeys = bool(v != 0)
+		case 6:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field EndInclusive", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.EndInclusive = bool(v != 0)
 		default:
 			iNdEx = preIndex
 			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
@@ -11873,6 +12369,26 @@ func (m *RangeScanResponse) UnmarshalVTUnsafe(dAtA []byte) error {
 				return err
 			}
 			iNdEx = postIndex
+		case 2:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field EndInclusive", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.EndInclusive = bool(v != 0)
 		default:
 			iNdEx = preIndex
 			skippy, err := protohelpers.Skip(dAtA[iNdEx:])

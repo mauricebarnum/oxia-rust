@@ -22,8 +22,16 @@ import (
 	"github.com/cenkalti/backoff/v4"
 )
 
+const (
+	// DefaultInitialInterval is the first interval of NewBackOff.
+	DefaultInitialInterval = 100 * time.Millisecond
+	// SlowInitialInterval is a first interval for retrying a remote server
+	// that is likely down, e.g. a data server that failed its health checks.
+	SlowInitialInterval = 10 * time.Second
+)
+
 func NewBackOff(ctx context.Context) backoff.BackOff {
-	return NewBackOffWithInitialInterval(ctx, 100*time.Millisecond)
+	return NewBackOffWithInitialInterval(ctx, DefaultInitialInterval)
 }
 
 func NewBackOffWithInitialInterval(ctx context.Context, initialInterval time.Duration) backoff.BackOff {
@@ -45,8 +53,22 @@ type ConcurrentBackOff struct {
 	bo backoff.BackOff
 }
 
+var _ backoff.BackOffContext = (*ConcurrentBackOff)(nil)
+
 func NewConcurrentBackOff(bo backoff.BackOff) *ConcurrentBackOff {
 	return &ConcurrentBackOff{bo: bo}
+}
+
+// Context exposes the context of the wrapped backoff. backoff.RetryNotify
+// only interrupts its wait between retries through a backoff.BackOffContext,
+// so without it a cancelled context would not stop the wait.
+func (c *ConcurrentBackOff) Context() context.Context {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if bc, ok := c.bo.(backoff.BackOffContext); ok {
+		return bc.Context()
+	}
+	return context.Background()
 }
 
 func (c *ConcurrentBackOff) NextBackOff() time.Duration {

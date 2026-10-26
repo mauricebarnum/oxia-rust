@@ -22,10 +22,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/pkg/errors"
+	promclient "github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/prometheus"
@@ -36,73 +36,26 @@ import (
 	"github.com/oxia-db/oxia/common/process"
 )
 
-var latencyBucketsMillis = []float64{
-	0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1_000, 2_000, 5_000, 10_000, 20_000, 50_000,
-}
-
-var sizeBucketsBytes = []float64{
-	0x10, 0x20, 0x40, 0x80,
-	0x100, 0x200, 0x400, 0x800,
-	0x1000, 0x2000, 0x4000, 0x8000,
-	0x10000, 0x20000, 0x40000, 0x80000,
-	0x100000, 0x200000, 0x400000, 0x800000,
-}
-
-var sizeBucketsCount = []float64{1, 5, 10, 20, 50, 100, 200, 500, 1000, 10_000, 20_000, 50_000, 100_000, 1_000_000}
-
 func init() {
-	exporter, err := prometheus.New()
+	otel.SetMeterProvider(mustNewMeterProvider(promclient.DefaultRegisterer))
+}
+
+// mustNewMeterProvider creates the provider that exports the metrics to the
+// registerer. It panics if the registerer rejects the exporter, e.g. when it
+// is already registered.
+func mustNewMeterProvider(registerer promclient.Registerer) *metric.MeterProvider {
+	// Histograms are aggregated by common/metric, which hands them over to the
+	// exporter as a producer.
+	exporter, err := prometheus.New(prometheus.WithRegisterer(registerer),
+		prometheus.WithProducer(metric2.HistogramProducer))
 	if err != nil {
-		slog.Error(
-			"Failed to initialize Prometheus metrics exporter",
-			slog.Any("error", err),
-		)
-		os.Exit(1)
+		panic(errors.Wrap(err, "failed to initialize Prometheus metrics exporter"))
 	}
 
-	// Use a specific list of buckets for different types of histograms
-	latencyHistogramView := metric.NewView(
-		metric.Instrument{
-			Kind: metric.InstrumentKindHistogram,
-			Unit: string(metric2.Milliseconds),
-		},
-		metric.Stream{
-			Aggregation: metric.AggregationExplicitBucketHistogram{
-				Boundaries: latencyBucketsMillis,
-			},
-		},
-	)
-	sizeHistogramView := metric.NewView(
-		metric.Instrument{
-			Kind: metric.InstrumentKindHistogram,
-			Unit: string(metric2.Bytes),
-		},
-		metric.Stream{
-			Aggregation: metric.AggregationExplicitBucketHistogram{
-				Boundaries: sizeBucketsBytes,
-			},
-		},
-	)
-	countHistogramView := metric.NewView(
-		metric.Instrument{
-			Kind: metric.InstrumentKindHistogram,
-			Unit: string(metric2.Dimensionless),
-		},
-		metric.Stream{
-			Aggregation: metric.AggregationExplicitBucketHistogram{
-				Boundaries: sizeBucketsCount,
-			},
-		},
-	)
-
-	// Default view to keep all instruments
-	defaultView := metric.NewView(metric.Instrument{Name: "*"}, metric.Stream{})
-
-	provider := metric.NewMeterProvider(metric.WithReader(exporter),
-		metric.WithView(latencyHistogramView, sizeHistogramView, countHistogramView, defaultView))
-
-	// Set as the default provider
-	otel.SetMeterProvider(provider)
+	// Since v1.44.0 the SDK caps each instrument at 2000 attribute sets, collapsing the excess into a single
+	// `otel.metric.overflow` series. Per-shard labels can exceed that in large clusters, so disable the limit.
+	return metric.NewMeterProvider(metric.WithReader(exporter),
+		metric.WithCardinalityLimit(0))
 }
 
 type PrometheusMetrics struct {
@@ -126,7 +79,7 @@ func Start(bindAddress string, tlsConf *libtls.Config) (*PrometheusMetrics, erro
 	lc := net.ListenConfig{}
 	listener, err := lc.Listen(context.Background(), "tcp", bindAddress)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to start the metrics server on %s: %w", bindAddress, err)
 	}
 
 	p := &PrometheusMetrics{
@@ -149,23 +102,27 @@ func Start(bindAddress string, tlsConf *libtls.Config) (*PrometheusMetrics, erro
 		map[string]string{
 			"oxia": "metrics",
 		},
-		func() {
-			if tlsConf != nil {
-				err = p.server.ServeTLS(listener, "", "")
-			} else {
-				err = p.server.Serve(listener)
-			}
-			if err != nil && !errors.Is(err, http.ErrServerClosed) {
-				slog.Error(
-					"Failed to serve metrics",
-					slog.Any("error", err),
-				)
-				os.Exit(1)
-			}
-		},
+		func() { p.serve(listener) },
 	)
 
 	return p, nil
+}
+
+// serve serves the metrics until the server is closed. A failure is logged:
+// the process keeps running without the metrics endpoint.
+func (p *PrometheusMetrics) serve(listener net.Listener) {
+	var err error
+	if p.server.TLSConfig != nil {
+		err = p.server.ServeTLS(listener, "", "")
+	} else {
+		err = p.server.Serve(listener)
+	}
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		slog.Error(
+			"Failed to serve metrics",
+			slog.Any("error", err),
+		)
+	}
 }
 
 func (p *PrometheusMetrics) Port() int {

@@ -89,18 +89,21 @@ func (s *shardAssignmentDispatcher) RegisterForUpdates(req *proto.ShardAssignmen
 		return constant.ErrNamespaceNotFound
 	}
 
+	assignmentsInterceptorFunc, err := s.assignmentsInterceptorFunc(clientStream)
+	if err != nil {
+		s.Unlock()
+		return err
+	}
+
 	initialAssignments := filterByNamespace(s.assignments, namespace)
 
-	clientCh := make(chan *proto.ShardAssignments)
+	// A one-slot mailbox: an update the client has not picked up yet is replaced
+	// by the next one, so a client busy sending gets the latest assignments next
+	clientCh := make(chan *proto.ShardAssignments, 1)
 	clientId := s.nextClientId
 	s.nextClientId++
 
 	s.clients[clientId] = clientCh
-
-	assignmentsInterceptorFunc, err := s.assignmentsInterceptorFunc(clientStream)
-	if err != nil {
-		return err
-	}
 	s.Unlock()
 
 	// Send initial assignments
@@ -115,10 +118,6 @@ func (s *shardAssignmentDispatcher) RegisterForUpdates(req *proto.ShardAssignmen
 	for {
 		select {
 		case assignments := <-clientCh:
-			if assignments == nil {
-				return constant.ErrAborted
-			}
-
 			assignments = filterByNamespace(assignments, namespace)
 			err := clientStream.Send(assignmentsInterceptorFunc(assignments))
 			if err != nil {
@@ -216,7 +215,10 @@ func (s *shardAssignmentDispatcher) PushShardAssignments(stream proto.OxiaCoordi
 	streamReader := ReadStream(
 		s.ctx,
 		stream,
-		s.updateShardAssignment,
+		func(assignments *proto.ShardAssignments) error {
+			s.updateShardAssignment(assignments)
+			return nil
+		},
 		map[string]string{
 			"oxia": "receive-shards-assignments",
 		},
@@ -227,7 +229,7 @@ func (s *shardAssignmentDispatcher) PushShardAssignments(stream proto.OxiaCoordi
 	return streamReader.Run()
 }
 
-func (s *shardAssignmentDispatcher) updateShardAssignment(assignments *proto.ShardAssignments) error {
+func (s *shardAssignmentDispatcher) updateShardAssignment(assignments *proto.ShardAssignments) {
 	// Once we receive the first update of the shards mapping, this service can be
 	// considered "ready" and it will be able to respond to service discovery requests
 	s.healthServer.SetServingStatus(oxiadcommonrpc.ReadinessProbeService, grpc_health_v1.HealthCheckResponse_SERVING)
@@ -255,20 +257,16 @@ func (s *shardAssignmentDispatcher) updateShardAssignment(assignments *proto.Sha
 	s.shardAssignmentsIndex = shardIndex
 	s.allowedAuthorities = allowedAuthorities
 
-	// Update all the clients, without getting stuck if any client is not responsive
-	for id, clientCh := range s.clients {
+	// Update all the clients, without getting stuck if any client is not responsive:
+	// replace an update still waiting in a client mailbox. We are the only sender
+	// and hold the lock, so the put cannot block once the mailbox is drained.
+	for _, clientCh := range s.clients {
 		select {
-		case clientCh <- assignments:
-			// Good, we were able to pass the update to the client
-
+		case <-clientCh:
 		default:
-			// The client is not responsive, cut it off
-			close(clientCh)
-			delete(s.clients, id)
 		}
+		clientCh <- assignments
 	}
-
-	return nil
 }
 
 func (s *shardAssignmentDispatcher) GetLeader(shardId int64) string {
@@ -317,22 +315,20 @@ func NewShardAssignmentDispatcher(healthServer oxiadcommonrpc.HealthServer) Shar
 	return s
 }
 
-func NewStandaloneShardAssignmentDispatcher(numShards uint32) ShardAssignmentsDispatcher {
+func NewStandaloneShardAssignmentDispatcher(numShards uint32, keySorting proto.KeySortingType) ShardAssignmentsDispatcher {
 	assignmentDispatcher := NewShardAssignmentDispatcher(oxiadcommonrpc.NewClosableHealthServer(context.Background())).(*shardAssignmentDispatcher) //nolint:revive
 	assignmentDispatcher.standalone = true
 	res := &proto.ShardAssignments{
 		Namespaces: map[string]*proto.NamespaceShardsAssignment{
 			constant.DefaultNamespace: {
 				ShardKeyRouter: proto.ShardKeyRouter_XXHASH3,
+				KeySorting:     keySorting.ToKeySorting(),
 				Assignments:    generateStandaloneShards(numShards),
 			},
 		},
 	}
 
-	err := assignmentDispatcher.updateShardAssignment(res)
-	if err != nil {
-		panic(err)
-	}
+	assignmentDispatcher.updateShardAssignment(res)
 	return assignmentDispatcher
 }
 

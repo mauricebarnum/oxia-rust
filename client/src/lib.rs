@@ -136,6 +136,7 @@ pub struct PutOptions {
     ephemeral: bool,
     override_version_id: Option<i64>,
     override_modifications_count: Option<i64>,
+    op_index: Option<u32>,
 }
 
 impl PutOptions {
@@ -349,6 +350,7 @@ pub struct DeleteOptions {
     expected_version_id: Option<i64>,
     #[builder(into)]
     partition_key: Option<String>,
+    op_index: Option<u32>,
 }
 
 impl DeleteOptions {
@@ -367,6 +369,7 @@ impl Default for DeleteOptions {
 
 #[derive(Builder, Clone, Debug)]
 #[builder(on(String, into))]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ListOptions {
     #[allow(dead_code)]
     shard: Option<i64>,
@@ -378,6 +381,8 @@ pub struct ListOptions {
     partition_key: Option<String>,
     #[builder(default = false)]
     include_internal_keys: bool,
+    #[builder(default = false)]
+    end_inclusive: bool,
 }
 
 impl ListOptions {
@@ -399,6 +404,7 @@ pub struct ListResponse {
     pub keys: Vec<String>,
     pub sorted: bool,
     pub partial: bool,
+    pub end_inclusive: bool,
 }
 
 impl ListResponse {
@@ -414,6 +420,9 @@ impl ListResponse {
         self.sorted = false;
         if x.partial {
             self.partial = true;
+        }
+        if x.end_inclusive {
+            self.end_inclusive = true;
         }
     }
 
@@ -432,12 +441,14 @@ impl Default for ListResponse {
             keys: Vec::new(),
             sorted: true,
             partial: false,
+            end_inclusive: false,
         }
     }
 }
 
 #[derive(Builder, Clone, Debug)]
 #[builder(on(String, into))]
+#[allow(clippy::struct_excessive_bools)]
 pub struct RangeScanOptions {
     #[allow(dead_code)]
     shard: Option<i64>,
@@ -449,6 +460,8 @@ pub struct RangeScanOptions {
     partition_key: Option<String>,
     #[builder(default = false)]
     include_internal_keys: bool,
+    #[builder(default = false)]
+    end_inclusive: bool,
 }
 
 impl RangeScanOptions {
@@ -470,6 +483,7 @@ pub struct RangeScanResponse {
     pub records: Vec<GetResponse>,
     pub sorted: bool,
     pub partial: bool,
+    pub end_inclusive: bool,
 }
 
 impl RangeScanResponse {
@@ -486,6 +500,9 @@ impl RangeScanResponse {
         self.sorted = false;
         if x.partial {
             self.partial = true;
+        }
+        if x.end_inclusive {
+            self.end_inclusive = true;
         }
     }
 
@@ -504,6 +521,7 @@ impl Default for RangeScanResponse {
             records: vec![],
             sorted: true,
             partial: false,
+            end_inclusive: false,
         }
     }
 }
@@ -513,6 +531,7 @@ pub struct DeleteRangeOptions {
     shard: Option<i64>,
     #[builder(into)]
     partition_key: Option<String>,
+    op_index: Option<u32>,
 }
 
 impl DeleteRangeOptions {

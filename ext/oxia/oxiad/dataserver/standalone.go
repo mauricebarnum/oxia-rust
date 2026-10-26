@@ -38,6 +38,7 @@ import (
 
 	"github.com/oxia-db/oxia/oxiad/dataserver/wal"
 
+	"github.com/oxia-db/oxia/common/commonio"
 	"github.com/oxia-db/oxia/common/constant"
 	"github.com/oxia-db/oxia/common/proto"
 )
@@ -76,7 +77,21 @@ func NewTestConfig(dir string) StandaloneConfig {
 	}
 }
 
-func NewStandalone(config StandaloneConfig) (*Standalone, error) {
+// NewStandalone starts a single-node server with the given configuration,
+// with no replication and no coordinator. Unset data server options are
+// filled with their defaults and validated before the server starts, and
+// NumShards defaults to 1.
+//
+// Use ServiceAddr to obtain the address that Oxia clients should connect to.
+func NewStandalone(config StandaloneConfig) (_ *Standalone, err error) {
+	config.DataServerOptions.WithDefault()
+	if err := config.DataServerOptions.Validate(); err != nil {
+		return nil, err
+	}
+	if config.NumShards == 0 {
+		config.NumShards = 1
+	}
+
 	slog.Info(
 		"Starting Oxia standalone",
 		slog.Any("config", config),
@@ -97,18 +112,32 @@ func NewStandalone(config StandaloneConfig) (*Standalone, error) {
 		SegmentSize: wal.DefaultFactoryOptions.SegmentSize,
 		SyncData:    storageOptions.WAL.IsSyncEnabled(),
 	})
-	var err error
 	if s.kvFactory, err = kvstore.NewPebbleKVFactory(&kvOptions); err != nil {
 		return nil, err
 	}
+	defer func() {
+		if err == nil {
+			return
+		}
+		// Same order as Close
+		if s.healthServer != nil {
+			err = multierr.Append(err, s.healthServer.Close())
+		}
+		err = multierr.Append(err, commonio.CloseIfNotNil(s.shardsDirector))
+		err = multierr.Append(err, commonio.CloseIfNotNil(s.shardAssignmentDispatcher))
+		if s.rpc != nil {
+			err = multierr.Append(err, s.rpc.Close())
+		}
+		err = multierr.Append(err, s.kvFactory.Close())
+	}()
 
 	s.shardsDirector = controller.NewShardsDirector(&storageOptions, s.walFactory, s.kvFactory, newNoOpReplicationRpcProvider())
 
-	if err := s.initializeShards(config.NumShards); err != nil {
+	if err = s.initializeShards(config.NumShards); err != nil {
 		return nil, err
 	}
 
-	s.shardAssignmentDispatcher = assignment.NewStandaloneShardAssignmentDispatcher(config.NumShards)
+	s.shardAssignmentDispatcher = assignment.NewStandaloneShardAssignmentDispatcher(config.NumShards, config.KeySorting)
 	s.healthServer = rpc2.NewClosableHealthServer(context.Background())
 	s.healthServer.SetServingStatus(rpc2.ReadinessProbeService, grpc_health_v1.HealthCheckResponse_SERVING)
 
@@ -167,6 +196,20 @@ func (s *Standalone) initializeShards(numShards uint32) error {
 			Term:              newTerm,
 			ReplicationFactor: 1,
 			FollowerMaps:      make(map[string]*proto.EntryId),
+			// Standalone has no coordinator to negotiate features. Enable the
+			// locally safe features explicitly without also enabling
+			// cluster-specific features such as DB checksums.
+			FeaturesSupported: []proto.Feature{
+				proto.Feature_FEATURE_SECONDARY_INDEX_NAME_VALIDATION,
+				proto.Feature_FEATURE_ORDERED_WRITES,
+				proto.Feature_FEATURE_EPHEMERAL_SECONDARY_INDEX_CLEANUP,
+				proto.Feature_FEATURE_SEQUENCE_LAST_KEY_SEPARATOR,
+				proto.Feature_FEATURE_EPHEMERAL_CLEANUP_NATURAL_SORTING,
+				proto.Feature_FEATURE_DELETE_RANGE_NOTIFICATION_RECORDS,
+				proto.Feature_FEATURE_SEQUENCE_KEY_VALIDATION,
+				proto.Feature_FEATURE_SECONDARY_INDEX_SKIP_UNCHANGED,
+				proto.Feature_FEATURE_RANGE_END_INCLUSIVE,
+			},
 		}); err != nil {
 			return err
 		}

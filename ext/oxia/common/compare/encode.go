@@ -18,6 +18,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"math"
+	"slices"
 	"strings"
 	"unsafe"
 
@@ -27,6 +29,10 @@ import (
 type Encoder interface {
 	Name() string
 	Encode(key string) []byte
+	// AppendEncode appends the bytes of Encode(key) to dst and returns the
+	// extended slice, so that a caller can encode its keys into one buffer
+	// instead of allocating one per key.
+	AppendEncode(dst []byte, key string) []byte
 	Decode(encodedKey []byte) string
 
 	IsInternalKey(encodedKey []byte) bool
@@ -41,6 +47,34 @@ type Encoder interface {
 	// natural one, where a user key is stored raw and can therefore sort after
 	// the internal keys.
 	InternalKeyRange() (start []byte, end []byte)
+
+	// PrefixRanges locates the keys that start with prefix among the encoded
+	// keys.
+	PrefixRanges(prefix string) PrefixRanges
+}
+
+// PrefixRanges are the ranges of encoded keys that hold the keys with a given
+// prefix. The natural encoder keeps them in a single range. The hierarchical
+// encoder sorts the keys by level first, so they are in one range per level,
+// and other keys can sort between two of these ranges: to only visit the keys
+// with the prefix, an iterator has to seek from one range to the next.
+type PrefixRanges interface {
+	// Bounds returns [lower, upper), from the start of the first range to the
+	// end of the last one. upper is nil when the last range runs to the end of
+	// the keyspace.
+	Bounds() (lower []byte, upper []byte)
+
+	// Contains reports whether an encoded key within the bounds is in one of
+	// the ranges, which means that it starts with the prefix.
+	Contains(encodedKey []byte) bool
+
+	// NextStart returns the start of the first range after an encoded key that
+	// is not in a range, or nil when there is none.
+	NextStart(encodedKey []byte) []byte
+
+	// PrevEnd returns the end of the last range before an encoded key that is
+	// not in a range, or nil when there is none.
+	PrevEnd(encodedKey []byte) []byte
 }
 
 // keyRegionSuccessor returns the smallest key that sorts after every key with
@@ -60,6 +94,11 @@ const (
 	encodedSeparator      = 0xff
 	internalKeysBitMarker = 1 << 15
 
+	// maxSeparatorCount is the deepest level the 2-byte prefix can record. The
+	// count shares those bytes with the internal-key marker, so it has to stay
+	// below it.
+	maxSeparatorCount = internalKeysBitMarker - 1
+
 	// maxByteValue is the largest byte value; a prefix made only of these has
 	// no successor.
 	maxByteValue = 0xff
@@ -77,8 +116,21 @@ func (encoderHierarchical) Name() string {
 }
 
 func (encoderHierarchical) Encode(key string) []byte {
+	buf := make([]byte, len(key)+2)
+	encodeHierarchical(buf, key)
+	return buf
+}
+
+func (encoderHierarchical) AppendEncode(dst []byte, key string) []byte {
+	start := len(dst)
+	dst = slices.Grow(dst, len(key)+2)[:start+len(key)+2]
+	encodeHierarchical(dst[start:], key)
+	return dst
+}
+
+// encodeHierarchical writes the encoding of key to buf, of length len(key)+2.
+func encodeHierarchical(buf []byte, key string) {
 	l := len(key)
-	buf := make([]byte, l+2)
 	copy(buf[2:], key)
 
 	// strings.Count appears to be faster than bytes.Count...
@@ -97,6 +149,12 @@ func (encoderHierarchical) Encode(key string) []byte {
 			sepCount--
 		}
 
+		if sepCount > maxSeparatorCount {
+			// Keys deeper than the prefix can count all share the deepest
+			// level, rather than wrapping into the internal-key region
+			sepCount = maxSeparatorCount
+		}
+
 		if strings.HasPrefix(key, constant.InternalKeyPrefix) {
 			// All internal keys at the end
 			sepCount |= internalKeysBitMarker
@@ -104,7 +162,6 @@ func (encoderHierarchical) Encode(key string) []byte {
 	}
 
 	binary.BigEndian.PutUint16(buf, uint16(sepCount))
-	return buf
 }
 
 func (encoderHierarchical) Decode(encoded []byte) string {
@@ -146,6 +203,100 @@ func (encoderHierarchical) InternalKeyRange() (start []byte, end []byte) {
 // mutating them (same contract as encodedInternalKeyPrefixBytes).
 var hierarchicalInternalKeyStart = []byte{internalKeysBitMarker >> 8}
 
+// PrefixRanges: a key is encoded as its level, on 2 bytes, followed by the key
+// with the separators replaced. The keys with the prefix are the ones whose
+// bytes after the level start with the encoded prefix: one range per level,
+// from the level of the prefix itself, which no key with the prefix is below,
+// to the deepest one.
+func (e encoderHierarchical) PrefixRanges(prefix string) PrefixRanges {
+	encoded := e.Encode(prefix)
+	return hierarchicalPrefixRanges{
+		minLevel:  binary.BigEndian.Uint16(encoded),
+		prefix:    encoded[2:],
+		prefixEnd: keyRegionSuccessor(encoded[2:]),
+	}
+}
+
+type hierarchicalPrefixRanges struct {
+	minLevel  uint16
+	prefix    []byte
+	prefixEnd []byte
+}
+
+func (r hierarchicalPrefixRanges) Bounds() (lower []byte, upper []byte) {
+	return r.start(r.minLevel), r.end(math.MaxUint16)
+}
+
+func (r hierarchicalPrefixRanges) Contains(encodedKey []byte) bool {
+	_, rest := splitLevel(encodedKey)
+	return bytes.HasPrefix(rest, r.prefix)
+}
+
+// NextStart takes the level of the key to skip the levels without keys: the
+// next range is in the same level when the key sorts before its range, and in
+// the next level otherwise.
+func (r hierarchicalPrefixRanges) NextStart(encodedKey []byte) []byte {
+	level, rest := splitLevel(encodedKey)
+	switch {
+	case level < r.minLevel:
+		return r.start(r.minLevel)
+	case bytes.Compare(rest, r.prefix) < 0:
+		return r.start(level)
+	case level < math.MaxUint16:
+		return r.start(level + 1)
+	default:
+		return nil
+	}
+}
+
+// PrevEnd mirrors NextStart: the previous range is in the same level when the
+// key sorts after its range, and in the previous level otherwise.
+func (r hierarchicalPrefixRanges) PrevEnd(encodedKey []byte) []byte {
+	level, rest := splitLevel(encodedKey)
+	switch {
+	case level < r.minLevel:
+		return nil
+	case r.prefixEnd != nil && bytes.Compare(rest, r.prefixEnd) >= 0:
+		return r.end(level)
+	case level > r.minLevel:
+		return r.end(level - 1)
+	default:
+		return nil
+	}
+}
+
+func (r hierarchicalPrefixRanges) start(level uint16) []byte {
+	return levelKey(level, r.prefix)
+}
+
+// end returns the end of the range in a level. A prefix without a successor,
+// made only of separators, has its range run to the end of the level.
+func (r hierarchicalPrefixRanges) end(level uint16) []byte {
+	switch {
+	case r.prefixEnd != nil:
+		return levelKey(level, r.prefixEnd)
+	case level < math.MaxUint16:
+		return levelKey(level+1, nil)
+	default:
+		return nil
+	}
+}
+
+func levelKey(level uint16, rest []byte) []byte {
+	key := make([]byte, 2+len(rest))
+	binary.BigEndian.PutUint16(key, level)
+	copy(key[2:], rest)
+	return key
+}
+
+// splitLevel splits an encoded key into its level and the rest. A key too
+// short to hold a whole level sorts first in the level its bytes start.
+func splitLevel(encodedKey []byte) (level uint16, rest []byte) {
+	var header [2]byte
+	n := copy(header[:], encodedKey)
+	return binary.BigEndian.Uint16(header[:]), encodedKey[n:]
+}
+
 // EncoderHierarchical ensure that we can sort keys from same level together
 // and thus we can easily return the children of a given path
 // The encoding is done by prepending 2 bytes with the count of
@@ -177,6 +328,16 @@ func (encoderNatural) Encode(key string) []byte {
 	b[0] = encodedInternalPrefix
 	b[1] = encodedInternalPrefix
 	return b
+}
+
+func (encoderNatural) AppendEncode(dst []byte, key string) []byte {
+	start := len(dst)
+	dst = append(dst, key...)
+	if strings.HasPrefix(key, constant.InternalKeyPrefix) {
+		dst[start] = encodedInternalPrefix
+		dst[start+1] = encodedInternalPrefix
+	}
+	return dst
 }
 
 func (encoderNatural) Decode(encoded []byte) string {
@@ -213,6 +374,39 @@ func (encoderNatural) InternalKeyRange() (start []byte, end []byte) {
 }
 
 var encodedInternalKeyPrefixSuccessor = keyRegionSuccessor(encodedInternalKeyPrefixBytes)
+
+// PrefixRanges: the keys with the prefix are a single range.
+func (e encoderNatural) PrefixRanges(prefix string) PrefixRanges {
+	start := e.Encode(prefix)
+	return naturalPrefixRange{start: start, end: keyRegionSuccessor(start)}
+}
+
+type naturalPrefixRange struct {
+	start []byte
+	end   []byte
+}
+
+func (r naturalPrefixRange) Bounds() (lower []byte, upper []byte) {
+	return r.start, r.end
+}
+
+func (r naturalPrefixRange) Contains(encodedKey []byte) bool {
+	return bytes.HasPrefix(encodedKey, r.start)
+}
+
+func (r naturalPrefixRange) NextStart(encodedKey []byte) []byte {
+	if bytes.Compare(encodedKey, r.start) < 0 {
+		return r.start
+	}
+	return nil
+}
+
+func (r naturalPrefixRange) PrevEnd(encodedKey []byte) []byte {
+	if r.end != nil && bytes.Compare(encodedKey, r.end) >= 0 {
+		return r.end
+	}
+	return nil
+}
 
 var EncoderNatural Encoder = &encoderNatural{}
 

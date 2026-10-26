@@ -38,13 +38,11 @@ var (
 
 type GrpcAuthenticationDelegator struct {
 	provider AuthenticationProvider
-
-	validate func(ctx context.Context, provider AuthenticationProvider) (string, error)
 }
 
 func (delegator *GrpcAuthenticationDelegator) GetUnaryInterceptor() grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
-		_, err := delegator.validate(ctx, delegator.provider)
+		_, err := validateTokenWithContext(ctx, delegator.provider)
 		if err != nil {
 			return nil, status.Error(codes.Unauthenticated, err.Error())
 		}
@@ -55,7 +53,7 @@ func (delegator *GrpcAuthenticationDelegator) GetUnaryInterceptor() grpc.UnarySe
 
 func (delegator *GrpcAuthenticationDelegator) GetStreamInterceptor() grpc.StreamServerInterceptor {
 	return func(srv any, ss grpc.ServerStream, _ *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-		_, err := delegator.validate(ss.Context(), delegator.provider)
+		_, err := validateTokenWithContext(ss.Context(), delegator.provider)
 		if err != nil {
 			return status.Error(codes.Unauthenticated, err.Error())
 		}
@@ -64,29 +62,18 @@ func (delegator *GrpcAuthenticationDelegator) GetStreamInterceptor() grpc.Stream
 	}
 }
 
-func NewGrpcAuthenticationDelegator(provider AuthenticationProvider) (*GrpcAuthenticationDelegator, error) {
-	delegator := &GrpcAuthenticationDelegator{
+func NewGrpcAuthenticationDelegator(provider AuthenticationProvider) *GrpcAuthenticationDelegator {
+	return &GrpcAuthenticationDelegator{
 		provider: provider,
 	}
-	switch provider.AcceptParamType() {
-	case ProviderParamTypeToken:
-		delegator.validate = validateTokenWithContext
-	default:
-		return nil, ErrUnMatchedAuthenticationParamType
-	}
-	return delegator, nil
 }
 
 func validateTokenWithContext(ctx context.Context, provider AuthenticationProvider) (string, error) {
-	meta, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return "", ErrMetadataFetchFailed
-	}
 	peerMeta, ok := peer.FromContext(ctx)
 	if !ok {
 		return "", ErrMetadataFetchFailed
 	}
-	val := meta.Get(MetadataAuthorizationKey)
+	val := metadata.ValueFromIncomingContext(ctx, MetadataAuthorizationKey)
 	if len(val) < 1 {
 		slog.Debug("Receive empty token from the client",
 			slog.String("peer", peerMeta.Addr.String()))

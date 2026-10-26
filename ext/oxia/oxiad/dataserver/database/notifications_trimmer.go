@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+	"go.uber.org/multierr"
 
 	"github.com/oxia-db/oxia/oxiad/dataserver/database/kvstore"
 
@@ -46,9 +47,21 @@ type notificationsTrimmer struct {
 	notificationsRetentionTime time.Duration
 	clock                      time2.Clock
 	log                        *slog.Logger
+	listener                   trimListener
 }
 
-func newNotificationsTrimmer(ctx context.Context, namespace string, shardId int64, kv kvstore.KV, notificationRetentionTime time.Duration, waitClose concurrent.WaitGroup, clock time2.Clock) *notificationsTrimmer {
+// trimListener follows the batches that the trimmer deletes.
+type trimListener interface {
+	// trimming gets the batch that trims the batches up to offset, included,
+	// before it is committed, and returns the function to call if that fails
+	trimming(batch kvstore.WriteBatch, offset int64) (func(), error)
+	// trimmed gets the offset up to which the batches were trimmed, included
+	trimmed(offset int64)
+}
+
+func newNotificationsTrimmer(ctx context.Context, namespace string, shardId int64, kv kvstore.KV,
+	notificationRetentionTime time.Duration, waitClose concurrent.WaitGroup, clock time2.Clock,
+	listener trimListener) *notificationsTrimmer {
 	interval := notificationRetentionTime / 10
 	if interval < minNotificationTrimmingInterval {
 		interval = minNotificationTrimmingInterval
@@ -64,6 +77,7 @@ func newNotificationsTrimmer(ctx context.Context, namespace string, shardId int6
 		interval:                   interval,
 		notificationsRetentionTime: notificationRetentionTime,
 		clock:                      clock,
+		listener:                   listener,
 		log: slog.With(
 			slog.String("component", "db-notifications-trimmer"),
 			slog.String("namespace", namespace),
@@ -151,17 +165,20 @@ func (t *notificationsTrimmer) trimNotifications() error {
 	}
 
 	wb := t.kv.NewWriteBatch()
+	defer wb.Close()
 	if err = wb.DeleteRange(notificationKey(first), notificationKey(trimOffset+1)); err != nil {
+		return err
+	}
+	revert, err := t.listener.trimming(wb, trimOffset)
+	if err != nil {
 		return err
 	}
 
 	if err = wb.Commit(); err != nil {
+		revert()
 		return err
 	}
-
-	if err = wb.Close(); err != nil {
-		return err
-	}
+	t.listener.trimmed(trimOffset)
 
 	t.log.Debug(
 		"Successfully trimmed the notification",
@@ -177,7 +194,7 @@ func (t *notificationsTrimmer) getFirstLast() (first, last int64, err error) {
 	if err != nil {
 		return constant.I64NegativeOne, constant.I64NegativeOne, err
 	}
-	defer it1.Close()
+	defer func() { err = multierr.Append(err, it1.Close()) }()
 	if !it1.Valid() {
 		// There are no entries in DB
 		return constant.I64NegativeOne, constant.I64NegativeOne, nil
@@ -191,7 +208,7 @@ func (t *notificationsTrimmer) getFirstLast() (first, last int64, err error) {
 	if err != nil {
 		return constant.I64NegativeOne, constant.I64NegativeOne, err
 	}
-	defer it2.Close()
+	defer func() { err = multierr.Append(err, it2.Close()) }()
 	if !it2.Valid() {
 		// There are no entries in DB
 		return constant.I64NegativeOne, constant.I64NegativeOne, nil

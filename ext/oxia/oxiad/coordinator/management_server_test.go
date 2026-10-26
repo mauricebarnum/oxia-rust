@@ -87,6 +87,8 @@ func (*testRuntime) SubscribeShardAssignments() *commonwatch.Receiver[*proto.Sha
 
 func (*testRuntime) BecameUnavailable(*proto.DataServerIdentity) {}
 
+func (*testRuntime) FeaturesDiscovered(*proto.DataServerIdentity) {}
+
 func (*testRuntime) CreateDataServer(string, *proto.DataServer) bool { return false }
 
 func (*testRuntime) DeleteDataServer(string) {}
@@ -97,7 +99,9 @@ func (*testRuntime) ListDataServerStatus() map[string]*proto.DataServerStatus { 
 
 func (*testRuntime) GetDataServerStatus(string) (*proto.DataServerStatus, bool) { return nil, false }
 
-func (*testRuntime) CreateNamespace(string, *proto.Namespace) bool { return false }
+func (*testRuntime) CreateNamespace(string, *proto.Namespace) error {
+	return errors.New("unexpected namespace creation")
+}
 
 func (*testRuntime) DeleteNamespace(string) {}
 
@@ -107,7 +111,7 @@ func (r *testRuntime) Metadata() coordmetadata.Metadata { return r.metadata }
 
 func (*testRuntime) RecomputeAssignments() {}
 
-func (*testRuntime) SyncShardControllerServerAddresses() {}
+func (*testRuntime) RefreshShardControllers() {}
 
 func newTestMetadata(t *testing.T, config *proto.ClusterConfiguration) coordmetadata.Metadata {
 	t.Helper()
@@ -131,8 +135,7 @@ func newTestMetadata(t *testing.T, config *proto.ClusterConfiguration) coordmeta
 		},
 	})
 	require.NoError(t, err)
-	metadata, err := metadataFactory.CreateMetadata(t.Context())
-	require.NoError(t, err)
+	metadata := metadataFactory.CreateMetadata(t.Context())
 	_, err = metadata.WaitToBecomeLeader()
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -467,7 +470,7 @@ func TestManagementServerGetNamespace(t *testing.T) {
 			KeySorting:        proto.KeySortingType_NATURAL.String(),
 		}},
 	})
-	require.True(t, metadata.CreateNamespaceStatus("ns-1", &proto.NamespaceStatus{
+	require.NoError(t, metadata.CreateNamespaceStatus("ns-1", &proto.NamespaceStatus{
 		ReplicationFactor: 3,
 		Shards: map[int64]*proto.ShardMetadata{
 			0: {Status: proto.ShardStatusSteadyState},
@@ -503,13 +506,13 @@ func TestManagementServerListNamespaces(t *testing.T) {
 			},
 		},
 	})
-	require.True(t, metadata.CreateNamespaceStatus("ns-1", &proto.NamespaceStatus{
+	require.NoError(t, metadata.CreateNamespaceStatus("ns-1", &proto.NamespaceStatus{
 		ReplicationFactor: 3,
 		Shards: map[int64]*proto.ShardMetadata{
 			0: {Status: proto.ShardStatusSteadyState},
 		},
 	}))
-	require.True(t, metadata.CreateNamespaceStatus("ns-2", &proto.NamespaceStatus{
+	require.NoError(t, metadata.CreateNamespaceStatus("ns-2", &proto.NamespaceStatus{
 		ReplicationFactor: 1,
 		Shards: map[int64]*proto.ShardMetadata{
 			1: {Status: proto.ShardStatusElection},
@@ -566,7 +569,8 @@ func TestManagementServerCreateNamespace(t *testing.T) {
 	assert.False(t, res.Namespace.NotificationsEnabledOrDefault())
 	assert.Equal(t, "natural", res.Namespace.GetKeySorting())
 
-	namespace, found := management.metadata.GetNamespace("ns-1")
+	namespace, found, err := management.metadata.GetNamespace("ns-1")
+	require.NoError(t, err)
 	require.True(t, found)
 	assert.Equal(t, "ns-1", namespace.UnsafeBorrow().GetName())
 }
@@ -631,6 +635,37 @@ func TestManagementServerCreateNamespaceRejectsInvalidRequest(t *testing.T) {
 			_, err := management.CreateNamespace(context.Background(), tt.req)
 			require.Error(t, err)
 			assert.Equal(t, codes.InvalidArgument, grpcstatus.Code(err))
+		})
+	}
+}
+
+func TestManagementServerCreateNamespaceRejectsReservedName(t *testing.T) {
+	serverName := "server-1"
+	management := newReadyManagementServer(
+		newTestMetadata(t, &proto.ClusterConfiguration{
+			Servers: []*proto.DataServerIdentity{
+				dataServer(&serverName, "public-1", "internal-1"),
+			},
+		}),
+		nil,
+	)
+
+	for _, name := range []string{"MANIFEST", "manifest"} {
+		t.Run(name, func(t *testing.T) {
+			_, err := management.CreateNamespace(context.Background(), &proto.CreateNamespaceRequest{
+				Namespace: &proto.Namespace{
+					Name:              name,
+					InitialShardCount: 1,
+					ReplicationFactor: 1,
+					KeySorting:        "natural",
+				},
+			})
+			require.Error(t, err)
+			assert.Equal(t, codes.InvalidArgument, grpcstatus.Code(err))
+
+			_, found, err := management.metadata.GetNamespace(name)
+			require.NoError(t, err)
+			assert.False(t, found)
 		})
 	}
 }
@@ -746,7 +781,8 @@ func TestManagementServerPatchNamespace(t *testing.T) {
 	assert.False(t, res.Namespace.NotificationsEnabledOrDefault())
 	assert.Equal(t, "hierarchical", res.Namespace.GetKeySorting())
 
-	namespace, found := management.metadata.GetNamespace("ns-1")
+	namespace, found, err := management.metadata.GetNamespace("ns-1")
+	require.NoError(t, err)
 	require.True(t, found)
 	assert.EqualValues(t, 1, namespace.UnsafeBorrow().GetInitialShardCount())
 	assert.EqualValues(t, 2, namespace.UnsafeBorrow().GetReplicationFactor())
@@ -788,7 +824,8 @@ func TestManagementServerPatchNamespaceRejectsAntiAffinities(t *testing.T) {
 	assert.Equal(t, codes.InvalidArgument, grpcstatus.Code(err))
 	assert.Nil(t, res)
 
-	namespace, found := management.metadata.GetNamespace("ns-1")
+	namespace, found, err := management.metadata.GetNamespace("ns-1")
+	require.NoError(t, err)
 	require.True(t, found)
 	require.Len(t, namespace.UnsafeBorrow().GetAntiAffinities(), 1)
 	assert.Equal(t, []string{"rack"}, namespace.UnsafeBorrow().GetAntiAffinities()[0].GetLabels())
@@ -947,9 +984,11 @@ func TestManagementServerDeleteNamespace(t *testing.T) {
 	assert.EqualValues(t, 1, res.Namespace.GetInitialShardCount())
 	assert.Equal(t, "natural", res.Namespace.GetKeySorting())
 
-	_, found := management.metadata.GetNamespace("ns-1")
+	_, found, err := management.metadata.GetNamespace("ns-1")
+	require.NoError(t, err)
 	assert.False(t, found)
-	namespace, found := management.metadata.GetNamespace("ns-2")
+	namespace, found, err := management.metadata.GetNamespace("ns-2")
+	require.NoError(t, err)
 	require.True(t, found)
 	assert.Equal(t, "ns-2", namespace.UnsafeBorrow().GetName())
 }
@@ -1000,6 +1039,26 @@ func TestManagementServerGetNamespaceRejectsEmptyLookup(t *testing.T) {
 	assert.Equal(t, codes.InvalidArgument, grpcstatus.Code(err))
 }
 
+type namespaceStatusFailingMetadata struct {
+	coordmetadata.Metadata
+}
+
+func (namespaceStatusFailingMetadata) GetNamespaceStatus(string) (commonobject.Borrowed[*proto.NamespaceStatus], bool, error) {
+	return commonobject.Borrowed[*proto.NamespaceStatus]{}, false, errors.New("status unavailable")
+}
+
+func TestManagementServerGetNamespaceStatusLoadError(t *testing.T) {
+	metadata := namespaceStatusFailingMetadata{Metadata: newTestMetadata(t, &proto.ClusterConfiguration{
+		Namespaces: []*proto.Namespace{{Name: "ns-1", InitialShardCount: 1, ReplicationFactor: 1}},
+	})}
+	management := newReadyManagementServer(metadata, nil)
+
+	_, err := management.GetNamespace(context.Background(), &proto.GetNamespaceRequest{Namespace: "ns-1"})
+	require.Error(t, err)
+	assert.Equal(t, codes.Internal, grpcstatus.Code(err))
+	assert.ErrorContains(t, err, "status unavailable")
+}
+
 func TestManagementServerGetNamespaceNotFound(t *testing.T) {
 	management := newReadyManagementServer(
 		newTestMetadata(t, &proto.ClusterConfiguration{}),
@@ -1040,7 +1099,8 @@ func TestManagementServerCreateDataServer(t *testing.T) {
 	assert.Equal(t, "internal-1", res.DataServer.Identity.GetInternal())
 	assert.Equal(t, map[string]string{"rack": "rack-1"}, res.DataServer.Metadata.GetLabels())
 
-	created, found := management.metadata.GetDataServer(serverName)
+	created, found, err := management.metadata.GetDataServer(serverName)
+	require.NoError(t, err)
 	require.True(t, found)
 	assert.Equal(t, "public-1", created.UnsafeBorrow().Identity.GetPublic())
 }
@@ -1129,7 +1189,8 @@ func TestManagementServerPatchDataServer(t *testing.T) {
 	assert.Equal(t, "internal-1", res.DataServer.Identity.GetInternal())
 	assert.Equal(t, map[string]string{"rack": "rack-2"}, res.DataServer.Metadata.GetLabels())
 
-	patched, found := management.metadata.GetDataServer(serverName)
+	patched, found, err := management.metadata.GetDataServer(serverName)
+	require.NoError(t, err)
 	require.True(t, found)
 	assert.Equal(t, "public-2", patched.UnsafeBorrow().Identity.GetPublic())
 	assert.Equal(t, "internal-1", patched.UnsafeBorrow().Identity.GetInternal())
@@ -1202,7 +1263,8 @@ func TestManagementServerDeleteDataServer(t *testing.T) {
 	assert.Equal(t, "internal-1", res.DataServer.Identity.GetInternal())
 	assert.Equal(t, map[string]string{"rack": "rack-1"}, res.DataServer.Metadata.GetLabels())
 
-	_, found := management.metadata.GetDataServer(serverName)
+	_, found, err := management.metadata.GetDataServer(serverName)
+	require.NoError(t, err)
 	assert.False(t, found)
 }
 
@@ -1259,6 +1321,257 @@ func TestManagementServerDeleteDataServerFailedPrecondition(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, codes.FailedPrecondition, grpcstatus.Code(err))
 
-	_, found := management.metadata.GetDataServer(serverName1)
+	_, found, err := management.metadata.GetDataServer(serverName1)
+	require.NoError(t, err)
 	assert.True(t, found)
+}
+
+func TestManagementServerSetRuntimeIgnoresNil(t *testing.T) {
+	management := newManagementServer(newTestMetadata(t, &proto.ClusterConfiguration{}))
+	management.setRuntime(nil)
+
+	_, err := management.ListNamespaces(t.Context(), &proto.ListNamespacesRequest{})
+	oxiaErr, _ := constant.FromGrpcError(err)
+	assert.ErrorIs(t, oxiaErr, constant.ErrNotInitialized)
+}
+
+func TestManagementServerRedirectError(t *testing.T) {
+	leader := &proto.Coordinator{Name: "coordinator-1"}
+	self := &proto.Coordinator{Name: "coordinator-0"}
+	for _, test := range []struct {
+		name     string
+		metadata coordmetadata.Metadata
+		expected error
+	}{
+		{name: "without metadata", expected: constant.ErrNotInitialized},
+		{
+			name:     "without self",
+			metadata: &testLeaderMetadata{info: leader},
+			expected: constant.ErrNotInitialized,
+		},
+		{
+			// The leader is known, but not where to redirect to
+			name:     "leader without address",
+			metadata: &testLeaderMetadata{info: leader, self: self},
+			expected: constant.ErrNodeIsNotLeader,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			management := newManagementServer(test.metadata)
+
+			_, err := management.ListNamespaces(t.Context(), &proto.ListNamespacesRequest{})
+			oxiaErr, metadata := constant.FromGrpcError(err)
+			assert.ErrorIs(t, oxiaErr, test.expected)
+			_, ok := metadata.GetCoordinatorLeaderHint()
+			assert.False(t, ok)
+		})
+	}
+}
+
+// The metadata errors that are not part of the API are reported as internal
+// errors, and the version conflicts as aborted, for the caller to retry.
+func TestManagementServerReturnsMetadataErrors(t *testing.T) {
+	serverName := "server-1"
+	for _, test := range []struct {
+		name         string
+		conflictCode codes.Code
+		call         func(management *managementServer) error
+	}{
+		{"ListDataServers", codes.Internal, func(management *managementServer) error {
+			_, err := management.ListDataServers(context.Background(), &proto.ListDataServersRequest{})
+			return err
+		}},
+		{"GetDataServer", codes.Internal, func(management *managementServer) error {
+			_, err := management.GetDataServer(context.Background(), &proto.GetDataServerRequest{DataServer: serverName})
+			return err
+		}},
+		{"CreateDataServer", codes.Aborted, func(management *managementServer) error {
+			_, err := management.CreateDataServer(context.Background(), &proto.CreateDataServerRequest{
+				DataServer: &proto.DataServer{Identity: dataServer(&serverName, "public-1", "internal-1")},
+			})
+			return err
+		}},
+		{"PatchDataServer", codes.Aborted, func(management *managementServer) error {
+			_, err := management.PatchDataServer(context.Background(), &proto.PatchDataServerRequest{
+				DataServer: &proto.DataServer{Identity: dataServer(&serverName, "public-1", "internal-1")},
+			})
+			return err
+		}},
+		{"DeleteDataServer", codes.Aborted, func(management *managementServer) error {
+			_, err := management.DeleteDataServer(context.Background(),
+				&proto.DeleteDataServerRequest{DataServer: serverName})
+			return err
+		}},
+		{"ListNamespaces", codes.Internal, func(management *managementServer) error {
+			_, err := management.ListNamespaces(context.Background(), &proto.ListNamespacesRequest{})
+			return err
+		}},
+		{"CreateNamespace", codes.Aborted, func(management *managementServer) error {
+			_, err := management.CreateNamespace(context.Background(), &proto.CreateNamespaceRequest{
+				Namespace: &proto.Namespace{Name: "ns-1", InitialShardCount: 1, ReplicationFactor: 1, KeySorting: "natural"},
+			})
+			return err
+		}},
+		{"PatchNamespace", codes.Aborted, func(management *managementServer) error {
+			_, err := management.PatchNamespace(context.Background(), &proto.PatchNamespaceRequest{
+				Namespace: &proto.Namespace{Name: "ns-1", ReplicationFactor: 1},
+			})
+			return err
+		}},
+		{"DeleteNamespace", codes.Aborted, func(management *managementServer) error {
+			_, err := management.DeleteNamespace(context.Background(), &proto.DeleteNamespaceRequest{Namespace: "ns-1"})
+			return err
+		}},
+		{"GetNamespace", codes.Internal, func(management *managementServer) error {
+			_, err := management.GetNamespace(context.Background(), &proto.GetNamespaceRequest{Namespace: "ns-1"})
+			return err
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for _, failure := range []struct {
+				err  error
+				code codes.Code
+			}{
+				{errors.New("metadata unavailable"), codes.Internal},
+				{metadatacommon.ErrBadVersion, test.conflictCode},
+			} {
+				metadata := &failingMetadata{Metadata: newTestMetadata(t, &proto.ClusterConfiguration{}), err: failure.err}
+				management := newReadyManagementServer(metadata, nil)
+
+				err := test.call(management)
+				require.Error(t, err)
+				assert.Equal(t, failure.code, grpcstatus.Code(err))
+			}
+		})
+	}
+}
+
+func TestManagementServerListNamespacesStatusLoadError(t *testing.T) {
+	metadata := &failingMetadata{
+		Metadata: newTestMetadata(t, &proto.ClusterConfiguration{
+			Namespaces: []*proto.Namespace{{Name: "ns-1", InitialShardCount: 1, ReplicationFactor: 1}},
+		}),
+		statusErr: errors.New("status unavailable"),
+	}
+	management := newReadyManagementServer(metadata, nil)
+
+	_, err := management.ListNamespaces(context.Background(), &proto.ListNamespacesRequest{})
+	assert.Equal(t, codes.Internal, grpcstatus.Code(err))
+	assert.ErrorContains(t, err, "status unavailable")
+}
+
+func TestManagementServerSplitShard(t *testing.T) {
+	metadata := newTestMetadata(t, &proto.ClusterConfiguration{})
+	splitPoint := uint32(100)
+	management := newReadyManagementServer(metadata, &splitRuntime{testRuntime: &testRuntime{metadata: metadata}})
+
+	res, err := management.SplitShard(context.Background(), &proto.SplitShardRequest{
+		Namespace:  "ns-1",
+		Shard:      1,
+		SplitPoint: &splitPoint,
+	})
+	require.NoError(t, err)
+	assert.EqualValues(t, 2, res.LeftChildShard)
+	assert.EqualValues(t, 3, res.RightChildShard)
+}
+
+func TestManagementServerSplitShardReturnsRuntimeError(t *testing.T) {
+	management := newReadyManagementServer(newTestMetadata(t, &proto.ClusterConfiguration{}), nil)
+
+	_, err := management.SplitShard(context.Background(), &proto.SplitShardRequest{Namespace: "ns-1", Shard: 1})
+	require.ErrorContains(t, err, "unexpected split shard request")
+}
+
+// failingMetadata fails the configuration reads and writes with err, and the
+// namespace status lists with statusErr, when they are set.
+type failingMetadata struct {
+	coordmetadata.Metadata
+	err       error
+	statusErr error
+}
+
+func (m *failingMetadata) GetConfig() (commonobject.Borrowed[*proto.ClusterConfiguration], error) {
+	if m.err != nil {
+		return commonobject.Borrowed[*proto.ClusterConfiguration]{}, m.err
+	}
+	return m.Metadata.GetConfig()
+}
+
+func (m *failingMetadata) GetDataServer(name string) (commonobject.Borrowed[*proto.DataServer], bool, error) {
+	if m.err != nil {
+		return commonobject.Borrowed[*proto.DataServer]{}, false, m.err
+	}
+	return m.Metadata.GetDataServer(name)
+}
+
+func (m *failingMetadata) CreateDataServer(dataServer *proto.DataServer) error {
+	if m.err != nil {
+		return m.err
+	}
+	return m.Metadata.CreateDataServer(dataServer)
+}
+
+func (m *failingMetadata) PatchDataServer(dataServer *proto.DataServer) (*proto.DataServer, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.Metadata.PatchDataServer(dataServer)
+}
+
+func (m *failingMetadata) DeleteDataServer(name string) (*proto.DataServer, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.Metadata.DeleteDataServer(name)
+}
+
+func (m *failingMetadata) ListNamespace() (map[string]commonobject.Borrowed[*proto.Namespace], error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.Metadata.ListNamespace()
+}
+
+func (m *failingMetadata) ListNamespaceStatus() (map[string]commonobject.Borrowed[*proto.NamespaceStatus], error) {
+	if m.statusErr != nil {
+		return nil, m.statusErr
+	}
+	return m.Metadata.ListNamespaceStatus()
+}
+
+func (m *failingMetadata) CreateNamespace(namespace *proto.Namespace) error {
+	if m.err != nil {
+		return m.err
+	}
+	return m.Metadata.CreateNamespace(namespace)
+}
+
+func (m *failingMetadata) PatchNamespace(namespace *proto.Namespace) (*proto.Namespace, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.Metadata.PatchNamespace(namespace)
+}
+
+func (m *failingMetadata) DeleteNamespace(name string) (*proto.Namespace, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.Metadata.DeleteNamespace(name)
+}
+
+func (m *failingMetadata) GetNamespace(name string) (commonobject.Borrowed[*proto.Namespace], bool, error) {
+	if m.err != nil {
+		return commonobject.Borrowed[*proto.Namespace]{}, false, m.err
+	}
+	return m.Metadata.GetNamespace(name)
+}
+
+// splitRuntime splits every shard into the two next shard ids.
+type splitRuntime struct {
+	*testRuntime
+}
+
+func (*splitRuntime) InitiateSplit(_ string, shard int64, _ *uint32) (leftShardID int64, rightShardID int64, err error) {
+	return shard + 1, shard + 2, nil
 }

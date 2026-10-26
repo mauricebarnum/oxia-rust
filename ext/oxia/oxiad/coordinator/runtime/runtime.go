@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
 	"github.com/emirpasic/gods/v2/sets/linkedhashset"
 	"github.com/pkg/errors"
 	"go.uber.org/multierr"
@@ -29,8 +30,10 @@ import (
 
 	"github.com/oxia-db/oxia/common/constant"
 	commonobject "github.com/oxia-db/oxia/common/object"
+	"github.com/oxia-db/oxia/oxiad/common/health"
 	oxiadcommonrpc "github.com/oxia-db/oxia/oxiad/common/rpc"
 	coordmetadata "github.com/oxia-db/oxia/oxiad/coordinator/metadata"
+	metadatacommon "github.com/oxia-db/oxia/oxiad/coordinator/metadata/common"
 
 	"github.com/oxia-db/oxia/oxiad/common/sharding"
 	"github.com/oxia-db/oxia/oxiad/coordinator/rpc"
@@ -46,14 +49,9 @@ import (
 
 	"github.com/oxia-db/oxia/common/process"
 	"github.com/oxia-db/oxia/common/proto"
+	oxiatime "github.com/oxia-db/oxia/common/time"
 	commonwatch "github.com/oxia-db/oxia/oxiad/common/watch"
 )
-
-// dataServerRecoveryStabilizationWindow is how long a data server must stay
-// Running after recovering from a health-check failure before the load
-// balancer considers it for leader rebalancing again. Failure handling (the
-// re-election of leaders away from a dead node) is not affected.
-const dataServerRecoveryStabilizationWindow = 5 * time.Minute
 
 type runtime struct {
 	sync.RWMutex
@@ -147,14 +145,14 @@ func (c *runtime) ListDataServerStatus() map[string]*proto.DataServerStatus {
 	statuses := make(map[string]*proto.DataServerStatus, len(c.dataServerControllers)+len(c.drainingNodes))
 	for name, dataServerController := range c.dataServerControllers {
 		statuses[name] = &proto.DataServerStatus{
-			State:             dataServerController.Status().ToProto(),
-			SupportedFeatures: dataServerController.SupportedFeatures(),
+			State:             dataServerController.GetStatus().GetState().ToProto(),
+			SupportedFeatures: dataServerController.GetFeatures(),
 		}
 	}
 	for name, dataServerController := range c.drainingNodes {
 		statuses[name] = &proto.DataServerStatus{
-			State:             dataServerController.Status().ToProto(),
-			SupportedFeatures: dataServerController.SupportedFeatures(),
+			State:             dataServerController.GetStatus().GetState().ToProto(),
+			SupportedFeatures: dataServerController.GetFeatures(),
 		}
 	}
 	return statuses
@@ -172,8 +170,8 @@ func (c *runtime) GetDataServerStatus(name string) (*proto.DataServerStatus, boo
 		return nil, false
 	}
 	return &proto.DataServerStatus{
-		State:             dataServerController.Status().ToProto(),
-		SupportedFeatures: dataServerController.SupportedFeatures(),
+		State:             dataServerController.GetStatus().GetState().ToProto(),
+		SupportedFeatures: dataServerController.GetFeatures(),
 	}, true
 }
 
@@ -200,6 +198,8 @@ func (c *runtime) CreateDataServer(name string, dataServer *proto.DataServer) bo
 		c,
 		c.rpc,
 		c.insID,
+		oxiatime.SlowInitialInterval,
+		health.DefaultCheckPolicy,
 	)
 	return true
 }
@@ -214,22 +214,36 @@ func (c *runtime) DeleteDataServer(name string) {
 	}
 	c.logger.Info("Detected a removed node", slog.Any("server", name))
 	delete(c.dataServerControllers, name)
-	nc.SetStatus(dataservercontroller.Draining)
+	nc.Drain()
 	c.drainingNodes[name] = nc
 }
 
-func (c *runtime) SyncShardControllerServerAddresses() {
+func (c *runtime) RefreshShardControllers() {
 	c.Lock()
 	defer c.Unlock()
 
 	for _, sc := range c.shardControllers {
-		sc.SyncServerAddress()
+		sc.Refresh()
 	}
 }
 
-func (c *runtime) CreateNamespace(name string, namespaceConfig *proto.Namespace) bool {
-	baseShardID := c.metadata.ReserveShardIDs(namespaceConfig.GetInitialShardCount())
-	status := c.metadata.ListNamespaceStatus()
+func (c *runtime) CreateNamespace(name string, namespaceConfig *proto.Namespace) error {
+	_, exists, err := c.metadata.GetNamespaceStatus(name)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return c.initShardControllers(name, namespaceConfig)
+	}
+
+	baseShardID, err := c.metadata.AllocateShardIDs(namespaceConfig.GetInitialShardCount())
+	if err != nil {
+		return err
+	}
+	status, err := c.metadata.ListNamespaceStatus()
+	if err != nil {
+		return err
+	}
 	namespaceStatus := &proto.NamespaceStatus{
 		Shards:            map[int64]*proto.ShardMetadata{},
 		ReplicationFactor: namespaceConfig.GetReplicationFactor(),
@@ -237,10 +251,9 @@ func (c *runtime) CreateNamespace(name string, namespaceConfig *proto.Namespace)
 	status[name] = commonobject.Borrow(namespaceStatus)
 
 	for _, shard := range sharding.GenerateShards(baseShardID, namespaceConfig.GetInitialShardCount()) {
-		esm, err := c.selectNewEnsemble(name, shard.Id, namespaceConfig, status)
+		esm, err := c.selectNewEnsemble(name, shard.Id, namespaceConfig, status, nil)
 		if err != nil {
-			c.logger.Error("failed to select new ensembles", slog.Any("shard", shard), slog.Any("error", err))
-			continue
+			return errors.Wrapf(err, "failed to select the ensemble of shard %d", shard.Id)
 		}
 
 		namespaceStatus.Shards[shard.Id] = &proto.ShardMetadata{
@@ -255,22 +268,41 @@ func (c *runtime) CreateNamespace(name string, namespaceConfig *proto.Namespace)
 		}
 	}
 
-	created := c.metadata.CreateNamespaceStatus(name, namespaceStatus)
-	if !created {
-		return false
+	if err := c.metadata.CreateNamespaceStatus(name, namespaceStatus); err != nil {
+		return err
 	}
 
+	return c.initShardControllers(name, namespaceConfig)
+}
+
+func (c *runtime) initShardControllers(name string, namespaceConfig *proto.Namespace) error {
 	c.Lock()
 	defer c.Unlock()
 
-	for shard, shardMetadata := range namespaceStatus.GetShards() {
+	// Shard deletion removes status before removing its controller from the
+	// map. Read under the runtime lock to avoid reviving a deleted shard.
+	namespaceStatus, exists, err := c.metadata.GetNamespaceStatus(name)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("%w: namespace %q status disappeared during controller initialization",
+			metadatacommon.ErrConflict, name)
+	}
+	for shard, shardMetadata := range namespaceStatus.UnsafeBorrow().GetShards() {
+		if shardMetadata.GetStatusOrDefault() == proto.ShardStatusDeleting {
+			continue
+		}
+		if _, exists := c.shardControllers[shard]; exists {
+			continue
+		}
 		c.shardControllers[shard] = shardcontroller.NewController(name, shard, namespaceConfig,
 			shardMetadata, c.metadata, c.findDataServerFeatures,
 			c, c.rpc, shardcontroller.DefaultPeriodicTasksInterval)
 		slog.Info("Added new shard", slog.Int64("shard", shard),
 			slog.String("namespace", name), slog.Any("shard-metadata", shardMetadata))
 	}
-	return true
+	return nil
 }
 
 func (c *runtime) DeleteNamespace(namespace string) {
@@ -283,7 +315,7 @@ func (c *runtime) DeleteNamespace(namespace string) {
 	defer c.Unlock()
 	for shard := range namespaceStatus.GetShards() {
 		if s, exist := c.shardControllers[shard]; exist {
-			s.DeleteShard()
+			s.Delete()
 		}
 	}
 }
@@ -298,17 +330,22 @@ func (c *runtime) RecomputeAssignments() {
 func (c *runtime) findDataServerFeatures(dataServers []*proto.DataServerIdentity) map[string][]proto.Feature {
 	c.RLock()
 	defer c.RUnlock()
+	return c.findDataServerFeaturesLocked(dataServers)
+}
 
+// findDataServerFeaturesLocked is findDataServerFeatures, for the callers that
+// already hold the lock.
+func (c *runtime) findDataServerFeaturesLocked(dataServers []*proto.DataServerIdentity) map[string][]proto.Feature {
 	features := make(map[string][]proto.Feature)
 	for _, dataServer := range dataServers {
 		dataServerID := dataServer.GetNameOrDefault()
 		if serverController, exist := c.dataServerControllers[dataServerID]; exist {
-			features[dataServerID] = serverController.SupportedFeatures()
+			features[dataServerID] = serverController.GetFeatures()
 			continue
 		}
 		// fallback to draining node if alive not found
 		if serverController, exist := c.drainingNodes[dataServerID]; exist {
-			features[dataServerID] = serverController.SupportedFeatures()
+			features[dataServerID] = serverController.GetFeatures()
 			continue
 		}
 	}
@@ -343,11 +380,22 @@ func cloneNamespaceStatuses(namespaces map[string]commonobject.Borrowed[*proto.N
 
 // selectNewEnsemble select a new server ensemble based on namespace policy and current cluster status.
 // It uses the ensemble selector to choose appropriate servers and returns the selected server metadata or an error.
-func (c *runtime) selectNewEnsemble(namespace string, shard int64, ns *proto.Namespace, editingStatus map[string]commonobject.Borrowed[*proto.NamespaceStatus]) ([]*proto.DataServerIdentity, error) {
-	dataServers := c.metadata.ListDataServer()
+// When eligible is set, only the data servers that it accepts can be selected.
+func (c *runtime) selectNewEnsemble(namespace string, shard int64, ns *proto.Namespace, editingStatus map[string]commonobject.Borrowed[*proto.NamespaceStatus],
+	eligible func(dataServer *proto.DataServerIdentity) bool) ([]*proto.DataServerIdentity, error) {
+	dataServers, err := c.metadata.ListDataServer()
+	if err != nil {
+		return nil, err
+	}
 	nodes, metadata := dataServersToCandidatesAndMetadata(dataServers)
+	candidates := nodes
+	if eligible != nil {
+		candidates = nodes.Select(func(_ int, name string) bool {
+			return eligible(dataServers[name].UnsafeBorrow().GetIdentity())
+		})
+	}
 	ensembleContext := &ensemble.Context{
-		Candidates:         nodes,
+		Candidates:         candidates,
 		CandidatesMetadata: metadata,
 		AntiAffinities:     ns.GetAntiAffinities(),
 		Namespace:          namespace,
@@ -359,7 +407,6 @@ func (c *runtime) selectNewEnsemble(namespace string, shard int64, ns *proto.Nam
 		},
 	}
 	var ensembles []string
-	var err error
 	if ensembles, err = c.ensembleSelector.Select(ensembleContext); err != nil {
 		return nil, err
 	}
@@ -451,6 +498,15 @@ func (c *runtime) BecameUnavailable(node *proto.DataServerIdentity) {
 	}
 }
 
+func (c *runtime) FeaturesDiscovered(node *proto.DataServerIdentity) {
+	c.RLock()
+	defer c.RUnlock()
+
+	for _, sc := range c.shardControllers {
+		sc.FeaturesDiscovered(node)
+	}
+}
+
 func (c *runtime) SubscribeShardAssignments() *commonwatch.Receiver[*proto.ShardAssignments] {
 	return c.assignmentsWatch.Subscribe()
 }
@@ -459,14 +515,7 @@ func (c *runtime) startBackgroundActionWorker() {
 	for {
 		select {
 		case ac := <-c.loadBalancer.Action():
-			switch ac.Type() {
-			case action.SwapNode:
-				c.handleActionChangeEnsemble(ac)
-			case action.Election:
-				c.handleActionElection(ac)
-			default:
-				panic("unknown action type")
-			}
+			c.dispatchAction(ac)
 
 		case <-c.ctx.Done():
 			return
@@ -474,49 +523,43 @@ func (c *runtime) startBackgroundActionWorker() {
 	}
 }
 
-func (c *runtime) handleActionElection(ac action.Action) {
-	var electionAc *action.ElectionAction
-	var ok bool
-	if electionAc, ok = ac.(*action.ElectionAction); !ok {
-		panic("unexpected action type")
-	}
+func (c *runtime) dispatchAction(ac action.Action) {
 	c.logger.Info("Applying swap action", slog.Any("swap-action", ac))
 
 	c.RLock()
-	sc, ok := c.shardControllers[electionAc.Shard]
+	sc, ok := c.shardControllers[ac.GetShard()]
 	c.RUnlock()
 	if !ok {
-		c.logger.Warn("Shard controller not found", slog.Int64("shard", electionAc.Shard))
-		electionAc.Done("")
+		c.logger.Warn("Shard controller not found", slog.Int64("shard", ac.GetShard()))
+		ac.Error(constant.ErrResourceUnavailable)
 		return
 	}
-	electionAc.Done(sc.Election(electionAc))
-}
-
-func (c *runtime) handleActionChangeEnsemble(ac action.Action) {
-	var changeEnsembleAction *action.ChangeEnsembleAction
-	var ok bool
-	if changeEnsembleAction, ok = ac.(*action.ChangeEnsembleAction); !ok {
-		panic("unexpected action type")
-	}
-	c.logger.Info("Applying swap action", slog.Any("swap-action", ac))
-
-	c.RLock()
-	sc, ok := c.shardControllers[changeEnsembleAction.Shard]
-	c.RUnlock()
-	if !ok {
-		c.logger.Warn("Shard controller not found", slog.Int64("shard", changeEnsembleAction.Shard))
-		changeEnsembleAction.Error(constant.ErrResourceUnavailable)
-		return
-	}
-
-	sc.ChangeEnsemble(changeEnsembleAction)
+	sc.Dispatch(ac)
 }
 
 // This is called while already holding the lock on the coordinator.
 func (c *runtime) computeNewAssignments() {
-	config := c.metadata.GetConfig().UnsafeBorrow()
-	status := c.metadata.ListNamespaceStatus()
+	_ = backoff.RetryNotify(c.computeNewAssignments0, oxiatime.NewBackOff(c.ctx), func(err error, retryAfter time.Duration) {
+		c.logger.Warn("Failed to compute the shard assignments, retrying later",
+			slog.Any("error", err),
+			slog.Duration("retry-after", retryAfter))
+	})
+}
+
+func (c *runtime) computeNewAssignments0() error {
+	borrowedConfig, err := c.metadata.GetConfig()
+	if err != nil {
+		return err
+	}
+	config := borrowedConfig.UnsafeBorrow()
+	status, err := c.metadata.ListNamespaceStatus()
+	if err != nil {
+		return err
+	}
+	namespaces, err := c.metadata.ListNamespace()
+	if err != nil {
+		return err
+	}
 	assignments := &proto.ShardAssignments{
 		Namespaces:         map[string]*proto.NamespaceShardsAssignment{},
 		AllowedAuthorities: mergedAuthorities(status, config.GetServers(), config.GetAllowExtraAuthorities()),
@@ -524,9 +567,11 @@ func (c *runtime) computeNewAssignments() {
 	// Update the leader for the shards on all the namespaces
 	for name, borrowedNs := range status {
 		ns := borrowedNs.UnsafeBorrow()
+		keySorting, _ := namespaces[name].UnsafeBorrow().GetKeySortingType()
 		nsAssignments := &proto.NamespaceShardsAssignment{
 			Assignments:    make([]*proto.ShardAssignment, 0),
 			ShardKeyRouter: proto.ShardKeyRouter_XXHASH3,
+			KeySorting:     keySorting.ToKeySorting(),
 		}
 
 		for shard, a := range ns.Shards {
@@ -561,6 +606,7 @@ func (c *runtime) computeNewAssignments() {
 	}
 
 	c.assignmentsWatch.Publish(assignments)
+	return nil
 }
 
 func mergedAuthorities(status map[string]commonobject.Borrowed[*proto.NamespaceStatus], servers []*proto.DataServerIdentity, extraAuthorities []string) []string {
@@ -621,263 +667,31 @@ func dataServersFromStatus(status map[string]commonobject.Borrowed[*proto.Namesp
 	return result
 }
 
-// InitiateSplit validates and initiates a shard split. It creates child shards
-// in the cluster status and starts a SplitController to drive the split.
-func (c *runtime) InitiateSplit(namespace string, parentShardId int64, splitPoint *uint32) (leftChild, rightChild int64, err error) {
-	c.Lock()
-	defer c.Unlock()
-
-	status := cloneNamespaceStatuses(c.metadata.ListNamespaceStatus())
-
-	// Validate namespace
-	borrowedNs, exists := status[namespace]
-	if !exists {
-		return 0, 0, errors.Errorf("namespace %q not found", namespace)
-	}
-	ns := borrowedNs.UnsafeBorrow()
-
-	// Validate parent shard
-	parentMeta, exists := ns.Shards[parentShardId]
-	if !exists {
-		return 0, 0, errors.Errorf("shard %d not found in namespace %q", parentShardId, namespace)
-	}
-	if parentMeta.GetStatusOrDefault() != proto.ShardStatusSteadyState {
-		return 0, 0, errors.Errorf("shard %d is not in steady state (status=%s)", parentShardId, parentMeta.GetStatus())
-	}
-	if parentMeta.Split != nil {
-		return 0, 0, errors.Errorf("shard %d already has an active split", parentShardId)
-	}
-	if len(parentMeta.PendingDeleteShardNodes) > 0 {
-		return 0, 0, errors.Errorf("shard %d has pending ensemble changes", parentShardId)
-	}
-	if parentMeta.GetInt32HashRange().GetMax()-parentMeta.GetInt32HashRange().GetMin() < 1 {
-		return 0, 0, errors.Errorf("shard %d hash range is too small to split", parentShardId)
-	}
-
-	// Compute split point
-	var sp uint32
-	if splitPoint != nil {
-		sp = *splitPoint
-		if sp < parentMeta.GetInt32HashRange().GetMin() || sp >= parentMeta.GetInt32HashRange().GetMax() {
-			return 0, 0, errors.Errorf("split point %d is outside shard's hash range [%d, %d]",
-				sp, parentMeta.GetInt32HashRange().GetMin(), parentMeta.GetInt32HashRange().GetMax())
-		}
-	} else {
-		sp = parentMeta.GetInt32HashRange().GetMin() + (parentMeta.GetInt32HashRange().GetMax()-parentMeta.GetInt32HashRange().GetMin())/2
-	}
-
-	// Allocate child shard IDs
-	leftChildId := c.metadata.ReserveShardIDs(2)
-	rightChildId := leftChildId + 1
-	// Select ensembles for children.
-	// After selecting the left child's ensemble, insert it into the cloned
-	// status so the right child's selection sees the updated load distribution
-	// and picks a different server.
-	nsConfig := c.namespaceConfigForSplit(namespace)
-	leftEnsemble, err := c.selectNewEnsemble(namespace, leftChildId, nsConfig, status)
-	if err != nil {
-		return 0, 0, errors.Wrap(err, "failed to select ensemble for left child")
-	}
-
-	// Update cloned status with left child placement before selecting right child
-	status[namespace].UnsafeBorrow().Shards[leftChildId] = &proto.ShardMetadata{
-		Status:   proto.ShardStatusSteadyState,
-		Ensemble: leftEnsemble,
-		Int32HashRange: &proto.HashRange{
-			Min: parentMeta.GetInt32HashRange().GetMin(),
-			Max: sp,
-		},
-	}
-	rightEnsemble, err := c.selectNewEnsemble(namespace, rightChildId, nsConfig, status)
-	if err != nil {
-		return 0, 0, errors.Wrap(err, "failed to select ensemble for right child")
-	}
-
-	nsCloned := status[namespace].UnsafeBorrow()
-
-	// Create split metadata for parent
-	parentMetaCloned := nsCloned.Shards[parentShardId]
-	parentMetaCloned.Split = &proto.SplitMetadata{
-		Phase:         proto.SplitPhaseBootstrap,
-		ChildShardIds: []int64{leftChildId, rightChildId},
-		SplitPoint:    sp,
-	}
-
-	// Create left child shard
-	nsCloned.Shards[leftChildId] = &proto.ShardMetadata{
-		Status:   proto.ShardStatusSteadyState,
-		Term:     0,
-		Ensemble: leftEnsemble,
-		Int32HashRange: &proto.HashRange{
-			Min: parentMeta.GetInt32HashRange().GetMin(),
-			Max: sp,
-		},
-		Split: &proto.SplitMetadata{
-			Phase:         proto.SplitPhaseBootstrap,
-			ParentShardId: parentShardId,
-			SplitPoint:    sp,
-		},
-	}
-
-	// Create right child shard
-	nsCloned.Shards[rightChildId] = &proto.ShardMetadata{
-		Status:   proto.ShardStatusSteadyState,
-		Term:     0,
-		Ensemble: rightEnsemble,
-		Int32HashRange: &proto.HashRange{
-			Min: sp + 1,
-			Max: parentMeta.GetInt32HashRange().GetMax(),
-		},
-		Split: &proto.SplitMetadata{
-			Phase:         proto.SplitPhaseBootstrap,
-			ParentShardId: parentShardId,
-			SplitPoint:    sp,
-		},
-	}
-
-	// Persist
-	c.metadata.UpdateNamespaceStatus(namespace, nsCloned)
-
-	c.logger.Info("Split initiated",
-		slog.Int64("parent-shard", parentShardId),
-		slog.Int64("left-child", leftChildId),
-		slog.Int64("right-child", rightChildId),
-		slog.Uint64("split-point", uint64(sp)),
-	)
-
-	// Create shard controllers for children
-	for _, childId := range []int64{leftChildId, rightChildId} {
-		childMeta := nsCloned.Shards[childId]
-		c.shardControllers[childId] = shardcontroller.NewController(namespace, childId, nsConfig,
-			childMeta, c.metadata, c.findDataServerFeatures,
-			c, c.rpc, shardcontroller.DefaultPeriodicTasksInterval)
-	}
-
-	// Start split controller
-	sc := shardcontroller.NewSplitController(shardcontroller.SplitControllerConfig{
-		Namespace:     namespace,
-		ParentShardId: parentShardId,
-		Metadata:      c.metadata,
-		RpcProvider:   c.rpc,
-		EventListener: c,
-		EnsembleSelector: func(ns string) ([]*proto.DataServerIdentity, error) {
-			return c.selectNewEnsemble(ns, 0, c.namespaceConfigForSplit(ns), c.metadata.ListNamespaceStatus())
-		},
-	})
-	c.splitControllers[parentShardId] = sc
-
-	return leftChildId, rightChildId, nil
-}
-
-// SplitComplete is called by the SplitController at the end of the Cutover
-// phase, after children are re-elected in clean terms and the parent is marked
-// Deleting. The coordinator triggers the parent shard's deletion (which retries
-// indefinitely until all ensemble members have deleted the shard) and recomputes
-// shard assignments so clients discover the children.
-//
-// NOTE: This is called from within the split controller's own goroutine,
-// so we must NOT call sc.Close() on the split controller (that would deadlock
-// on wg.Wait). Instead we just remove it from the map and let the goroutine
-// finish naturally.
-func (c *runtime) SplitComplete(parentShard int64, leftChild int64, rightChild int64) {
-	c.Lock()
-	defer c.Unlock()
-
-	c.logger.Info("Split complete, triggering parent shard deletion",
-		slog.Int64("parent-shard", parentShard),
-		slog.Int64("left-child", leftChild),
-		slog.Int64("right-child", rightChild),
-	)
-
-	// Remove split controller from map without calling Close (would deadlock).
-	// The goroutine will return naturally after this callback.
-	delete(c.splitControllers, parentShard)
-
-	// Trigger the parent shard controller's deletion. The shard controller
-	// retries DeleteShard RPCs indefinitely with backoff, handles unreachable
-	// nodes, and removes the parent from cluster status when done.
-	if sc, exists := c.shardControllers[parentShard]; exists {
-		sc.DeleteShard()
-	}
-
-	c.computeNewAssignments()
-}
-
-// SplitAborted is called by the SplitController when a split has been
-// aborted due to timeout or cancellation. The split controller has already
-// cleaned up observer cursors, deleted child shards from status, and
-// cleared the parent's split metadata.
-func (c *runtime) SplitAborted(parentShard int64, leftChild int64, rightChild int64) {
-	c.Lock()
-	defer c.Unlock()
-
-	c.logger.Warn("Split aborted",
-		slog.Int64("parent-shard", parentShard),
-		slog.Int64("left-child", leftChild),
-		slog.Int64("right-child", rightChild),
-	)
-
-	// Remove split controller from map (goroutine will return after this).
-	delete(c.splitControllers, parentShard)
-
-	// Close child shard controllers.
-	for _, childId := range []int64{leftChild, rightChild} {
-		if sc, exists := c.shardControllers[childId]; exists {
-			_ = sc.Close()
-			delete(c.shardControllers, childId)
-		}
-	}
-
-	c.computeNewAssignments()
-}
-
-func (c *runtime) namespaceConfigForSplit(namespace string) *proto.Namespace {
-	borrowedNsConfig, exist := c.metadata.GetNamespace(namespace)
-	if !exist {
-		return &proto.Namespace{}
-	}
-	return borrowedNsConfig.UnsafeBorrow()
-}
-
-// restartInProgressSplits checks the cluster status for any shards that have
-// active SplitMetadata and creates SplitControllers to resume them.
-func (c *runtime) restartInProgressSplits(clusterStatus map[string]commonobject.Borrowed[*proto.NamespaceStatus]) {
-	for ns, borrowedShards := range clusterStatus {
-		shards := borrowedShards.UnsafeBorrow()
-		for shardId, meta := range shards.Shards {
-			if meta.Split == nil {
-				continue
-			}
-			// Only create split controller from the parent shard (has ChildShardIds)
-			if len(meta.Split.ChildShardIds) == 0 {
-				continue
-			}
-
-			c.logger.Info("Resuming in-progress split",
-				slog.String("namespace", ns),
-				slog.Int64("parent-shard", shardId),
-				slog.String("phase", meta.Split.GetPhaseOrDefault().String()),
-			)
-
-			sc := shardcontroller.NewSplitController(shardcontroller.SplitControllerConfig{
-				Namespace:     ns,
-				ParentShardId: shardId,
-				Metadata:      c.metadata,
-				RpcProvider:   c.rpc,
-				EventListener: c,
-				EnsembleSelector: func(namespace string) ([]*proto.DataServerIdentity, error) {
-					return c.selectNewEnsemble(namespace, 0, c.namespaceConfigForSplit(namespace), c.metadata.ListNamespaceStatus())
-				},
-			})
-			c.splitControllers[shardId] = sc
-		}
-	}
-}
-
 func New(
 	metadata coordmetadata.Metadata,
 	rpcProvider rpc.ProviderFactory,
 ) (Runtime, error) {
+	clusterStatus, err := metadata.ListNamespaceStatus()
+	if err != nil {
+		return nil, err
+	}
+	insID, err := metadata.GetInstanceID()
+	if err != nil {
+		return nil, err
+	}
+	config, err := metadata.GetConfig()
+	if err != nil {
+		return nil, err
+	}
+	loadBalancerConfig, err := metadata.GetLoadBalancerConfig()
+	if err != nil {
+		return nil, err
+	}
+	namespaces := make(map[string]*proto.Namespace, len(config.UnsafeBorrow().GetNamespaces()))
+	for _, namespace := range config.UnsafeBorrow().GetNamespaces() {
+		namespaces[namespace.GetName()] = namespace
+	}
+
 	c := &runtime{
 		logger: slog.With(
 			slog.String("component", "coordinator"),
@@ -888,14 +702,16 @@ func New(
 		dataServerControllers: make(map[string]dataservercontroller.Controller),
 		drainingNodes:         make(map[string]dataservercontroller.Controller),
 		metadata:              metadata,
-		assignmentsWatch:      commonwatch.New(&proto.ShardAssignments{}),
+		insID:                 insID,
+		assignmentsWatch:      commonwatch.New[*proto.ShardAssignments](nil),
 	}
 
 	c.ctx, c.ctxCancel = context.WithCancel(context.Background())
 
 	c.loadBalancer = balancer.NewLoadBalancer(balancer.Options{
-		Context:  c.ctx,
-		Metadata: c.metadata,
+		Context:            c.ctx,
+		Metadata:           c.metadata,
+		LoadBalancerConfig: loadBalancerConfig.UnsafeBorrow(),
 		NodeAvailableJudger: func(nodeID string) bool {
 			c.RLock()
 			defer c.RUnlock()
@@ -906,17 +722,22 @@ func New(
 				return false
 			}
 			// A node that just recovered from a health-check failure is left
-			// out of leader rebalancing until it has been stable for a while:
-			// moving leaders straight back onto it is what turns one flap
-			// into a rebalancing loop.
-			return nc.IsStablyRunning(dataServerRecoveryStabilizationWindow)
+			// out of leader rebalancing until it has been stable for 5
+			// minutes: moving leaders straight back onto it is what turns one
+			// flap into a rebalancing loop. The re-election of leaders away
+			// from a dead node is not affected.
+			status := nc.GetStatus()
+			return status.GetState() == dataservercontroller.Running &&
+				time.Since(status.GetLastTransitionTime()) >= 5*time.Minute
 		},
 	})
 
-	clusterStatus := c.metadata.ListNamespaceStatus()
-	c.insID = c.metadata.GetInstanceID()
-
 	c.rpc = rpcProvider(c.insID)
+
+	// The data server controllers start running as soon as they are created,
+	// and call back into the runtime under its lock: hold it until every
+	// controller below is in place, so they never see the maps half-built.
+	c.Lock()
 
 	// init node controller
 	for _, node := range dataServersFromStatus(clusterStatus) {
@@ -928,6 +749,8 @@ func New(
 			c,
 			c.rpc,
 			c.insID,
+			oxiatime.SlowInitialInterval,
+			health.DefaultCheckPolicy,
 		)
 	}
 
@@ -936,12 +759,9 @@ func New(
 		shards := borrowedShards.UnsafeBorrow()
 		for shard := range shards.Shards {
 			shardMetadata := shards.Shards[shard]
-			var nsConfig *proto.Namespace
-			borrowedNsConfig, exist := c.metadata.GetNamespace(ns)
+			nsConfig, exist := namespaces[ns]
 			if !exist {
 				nsConfig = &proto.Namespace{}
-			} else {
-				nsConfig = borrowedNsConfig.UnsafeBorrow()
 			}
 			c.shardControllers[shard] = shardcontroller.NewController(ns, shard, nsConfig,
 				shardMetadata, c.metadata, c.findDataServerFeatures,
@@ -951,6 +771,7 @@ func New(
 
 	// Restart any in-progress splits from persisted state
 	c.restartInProgressSplits(clusterStatus)
+	c.Unlock()
 
 	c.wg.Go(func() {
 		process.DoWithLabels(c.ctx, map[string]string{
@@ -959,7 +780,7 @@ func New(
 	})
 	c.loadBalancer.Start()
 
-	autoSplitInterval := c.metadata.GetConfig().UnsafeBorrow().GetAutoSplitWithDefaults().GetCollectionIntervalDurationOrDefault()
+	autoSplitInterval := config.UnsafeBorrow().GetAutoSplitWithDefaults().GetCollectionIntervalDurationOrDefault()
 	c.autoSplitMonitor = autosplit.NewMonitor(c.metadata, c.rpc, c, autoSplitInterval)
 	c.autoSplitMonitor.Start()
 

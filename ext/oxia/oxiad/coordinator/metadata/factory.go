@@ -38,6 +38,9 @@ var _ raft.Interceptor = &Factory{}
 type Factory struct {
 	mu sync.Mutex
 
+	closeOnce sync.Once
+	closeErr  error
+
 	statusProvider  provider.Provider[*commonproto.ClusterStatus]
 	configProvider  provider.Provider[*commonproto.ClusterConfiguration]
 	coordinatorName string
@@ -66,8 +69,8 @@ func New(ctx context.Context, options *option.Options) (*Factory, error) {
 	}
 	switch meta.ProviderName {
 	case metadatacommon.NameMemory:
-		factory.statusProvider = memory.NewProvider(metadatacodec.ClusterStatusCodec, metadatacommon.WatchDisabled, meta.Name)
-		factory.configProvider = memory.NewProvider(metadatacodec.ClusterConfigCodec, metadatacommon.WatchEnabled, meta.Name)
+		factory.statusProvider = memory.NewProvider(metadatacodec.ClusterStatusCodec, metadatacommon.WatchDisabled, meta.Name) //nolint:contextcheck // the memory provider owns its context
+		factory.configProvider = memory.NewProvider(metadatacodec.ClusterConfigCodec, metadatacommon.WatchEnabled, meta.Name)  //nolint:contextcheck // the memory provider owns its context
 	case metadatacommon.NameFile:
 		if factory.statusProvider, err = file.NewProvider(ctx, meta.File.StatusPath(), metadatacodec.ClusterStatusCodec, metadatacommon.WatchDisabled, meta.Name); err != nil {
 			return nil, err
@@ -80,24 +83,17 @@ func New(ctx context.Context, options *option.Options) (*Factory, error) {
 		if err != nil {
 			return nil, err
 		}
-		if factory.configProvider, err = kubernetes.NewProvider(ctx, client, meta.Kubernetes.Namespace, meta.Kubernetes.ConfigNameOrDefault(), metadatacodec.ClusterConfigCodec, metadatacommon.WatchEnabled, meta.Name); err != nil {
-			return nil, err
-		}
-		if factory.statusProvider, err = kubernetes.NewProvider(ctx, client, meta.Kubernetes.Namespace, meta.Kubernetes.StatusNameOrDefault(), metadatacodec.ClusterStatusCodec, metadatacommon.WatchDisabled, meta.Name); err != nil {
-			return nil, err
-		}
+		factory.configProvider = kubernetes.NewProvider(ctx, client, meta.Kubernetes.Namespace, meta.Kubernetes.ConfigNameOrDefault(), metadatacodec.ClusterConfigCodec, metadatacommon.WatchEnabled, meta.Name)
+		factory.statusProvider = kubernetes.NewProvider(ctx, client, meta.Kubernetes.Namespace, meta.Kubernetes.StatusNameOrDefault(), metadatacodec.ClusterStatusCodec, metadatacommon.WatchDisabled, meta.Name)
 	case metadatacommon.NameRaft:
 		if factory.raft, err = raft.New(meta.Raft.Address, meta.Raft.BootstrapNodes, meta.Raft.DataDir, factory); err != nil {
 			return nil, fmt.Errorf("failed to create raft metadata provider: %w", err)
 		}
-		factory.configProvider = raft.NewProvider(ctx, factory.raft, metadatacodec.ClusterConfigCodec, metadatacommon.WatchEnabled)
+		configProvider := raft.NewProvider(ctx, factory.raft, metadatacodec.ClusterConfigCodec, metadatacommon.WatchEnabled)
+		factory.configProvider = configProvider
 		// Raft apply callbacks only drive the config watch today.
 		// Status watch is intentionally unsupported; if we add it later,
 		// this needs to fan out to the status provider too.
-		configProvider, ok := factory.configProvider.(*raft.Provider[*commonproto.ClusterConfiguration])
-		if !ok {
-			return nil, errors.New("failed to create raft config provider")
-		}
 		factory.raftInterceptor = configProvider
 		factory.statusProvider = raft.NewProvider(ctx, factory.raft, metadatacodec.ClusterStatusCodec, metadatacommon.WatchDisabled)
 	default:
@@ -106,17 +102,59 @@ func New(ctx context.Context, options *option.Options) (*Factory, error) {
 	return factory, nil
 }
 
-func (f *Factory) CreateMetadata(ctx context.Context) (Metadata, error) {
+// SeedClusterConfig stores the given cluster configuration if none exists yet.
+// The configuration is validated first, so an invalid one is rejected and
+// nothing is stored. It is a no-op when a configuration is already present,
+// and it tolerates losing the seeding race to another coordinator.
+func (f *Factory) SeedClusterConfig(config *commonproto.ClusterConfiguration) error {
+	if err := config.Validate(); err != nil {
+		return fmt.Errorf("invalid cluster configuration to seed: %w", err)
+	}
+	f.mu.Lock()
+	configProvider := f.configProvider
+	f.mu.Unlock()
+
+	current, err := configProvider.Load()
+	if err != nil {
+		return fmt.Errorf("failed to load the cluster configuration: %w", err)
+	}
+	if current.Version != metadatacommon.NotExists {
+		return nil
+	}
+	if _, err := configProvider.Store(provider.Versioned[*commonproto.ClusterConfiguration]{
+		Value:   config,
+		Version: metadatacommon.NotExists,
+	}); err != nil {
+		if errors.Is(err, metadatacommon.ErrBadVersion) {
+			// Another coordinator stored a configuration first.
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func (f *Factory) CreateMetadata(ctx context.Context) Metadata {
 	f.mu.Lock()
 	statusProvider := f.statusProvider
 	configProvider := f.configProvider
 	coordinatorName := f.coordinatorName
 	f.mu.Unlock()
 
-	return newMetadata(ctx, statusProvider, configProvider, coordinatorName), nil
+	return newDefaultMetadata(ctx, statusProvider, configProvider, coordinatorName)
 }
 
+// Close closes the metadata providers. It is safe to call more than once,
+// and concurrently: a coordinator whose start is cancelled closes its factory
+// from the cancellation, to end a pending leadership wait.
 func (f *Factory) Close() error {
+	f.closeOnce.Do(func() {
+		f.closeErr = f.close()
+	})
+	return f.closeErr
+}
+
+func (f *Factory) close() error {
 	f.mu.Lock()
 	statusProvider := f.statusProvider
 	configProvider := f.configProvider

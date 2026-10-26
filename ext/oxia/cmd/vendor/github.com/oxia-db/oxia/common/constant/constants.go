@@ -26,8 +26,11 @@ const (
 	MetadataShardId           = "shard-id"
 	MetadataSplitHashRangeMin = "split-hash-range-min"
 	MetadataSplitHashRangeMax = "split-hash-range-max"
-	MetadataInstanceId        = "instance-id"
-	DefaultNamespace          = "default"
+	// The hash range of the parent of a split child.
+	MetadataSplitParentHashRangeMin = "split-parent-hash-range-min"
+	MetadataSplitParentHashRangeMax = "split-parent-hash-range-max"
+	MetadataInstanceId              = "instance-id"
+	DefaultNamespace                = "default"
 
 	DefaultPublicPort   = 6648
 	DefaultInternalPort = 6649
@@ -35,4 +38,7 @@ const (
 
 	MaxSessionTimeout = 5 * time.Minute
 	MinSessionTimeout = 2 * time.Second
+
+	// MaxGrpcFrameSize is the largest gRPC message size allowed by both the client and the server.
+	MaxGrpcFrameSize = 256 * 1024 * 1024
 )

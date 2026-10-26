@@ -38,6 +38,7 @@ type managementServer struct {
 
 	metadata coordmetadata.Metadata
 	runtime  atomic.Value
+	stopped  atomic.Bool
 }
 
 func (management *managementServer) setRuntime(runtime coordruntime.Runtime) {
@@ -47,10 +48,17 @@ func (management *managementServer) setRuntime(runtime coordruntime.Runtime) {
 	management.runtime.Store(runtime)
 }
 
+// stop makes the admin API answer as a coordinator that is not the leader,
+// redirecting to the leader when it is known: for a coordinator that lost the
+// leadership.
+func (management *managementServer) stop() {
+	management.stopped.Store(true)
+}
+
 func (management *managementServer) getRuntime() (coordruntime.Runtime, error) {
 	metadata := management.metadata
 	runtime, runtimeLoaded := management.runtime.Load().(coordruntime.Runtime)
-	if metadata == nil || !runtimeLoaded {
+	if metadata == nil || !runtimeLoaded || management.stopped.Load() {
 		return nil, management.redirectError()
 	}
 	return runtime, nil
@@ -87,7 +95,11 @@ func (management *managementServer) ListDataServers(_ context.Context, _ *proto.
 	if err != nil {
 		return nil, err
 	}
-	config := runtime.Metadata().GetConfig().UnsafeBorrow()
+	borrowedConfig, err := runtime.Metadata().GetConfig()
+	if err != nil {
+		return nil, grpcstatus.Errorf(codes.Internal, "failed to list data servers: %v", err)
+	}
+	config := borrowedConfig.UnsafeBorrow()
 	statuses := runtime.ListDataServerStatus()
 
 	views := make([]*proto.DataServerView, 0, len(config.GetServers()))
@@ -130,7 +142,10 @@ func (management *managementServer) GetDataServer(_ context.Context, req *proto.
 		return nil, grpcstatus.Error(codes.InvalidArgument, "data server must not be empty")
 	}
 
-	borrowedDataServer, found := runtime.Metadata().GetDataServer(req.DataServer)
+	borrowedDataServer, found, err := runtime.Metadata().GetDataServer(req.DataServer)
+	if err != nil {
+		return nil, grpcstatus.Errorf(codes.Internal, "failed to get data server %q: %v", req.DataServer, err)
+	}
 	if !found {
 		return nil, grpcstatus.Errorf(codes.NotFound, "data server %q not found", req.DataServer)
 	}
@@ -248,8 +263,14 @@ func (management *managementServer) ListNamespaces(_ context.Context, _ *proto.L
 	if err != nil {
 		return nil, err
 	}
-	namespaces := runtime.Metadata().ListNamespace()
-	statuses := runtime.Metadata().ListNamespaceStatus()
+	namespaces, err := runtime.Metadata().ListNamespace()
+	if err != nil {
+		return nil, grpcstatus.Errorf(codes.Internal, "failed to list namespaces: %v", err)
+	}
+	statuses, err := runtime.Metadata().ListNamespaceStatus()
+	if err != nil {
+		return nil, grpcstatus.Errorf(codes.Internal, "failed to list namespaces: %v", err)
+	}
 
 	responseNamespaces := make([]*proto.NamespaceView, 0, len(namespaces))
 	for name, namespace := range namespaces {
@@ -394,13 +415,20 @@ func (management *managementServer) GetNamespace(_ context.Context, req *proto.G
 		return nil, grpcstatus.Error(codes.InvalidArgument, "namespace must not be empty")
 	}
 
-	namespace, found := runtime.Metadata().GetNamespace(req.Namespace)
+	namespace, found, err := runtime.Metadata().GetNamespace(req.Namespace)
+	if err != nil {
+		return nil, grpcstatus.Errorf(codes.Internal, "failed to get namespace %q: %v", req.Namespace, err)
+	}
 	if !found {
 		return nil, grpcstatus.Errorf(codes.NotFound, "namespace %q not found", req.Namespace)
 	}
 
 	namespaceStatus := &proto.NamespaceStatus{}
-	if borrowedStatus, found := runtime.Metadata().GetNamespaceStatus(req.Namespace); found {
+	borrowedStatus, found, err := runtime.Metadata().GetNamespaceStatus(req.Namespace)
+	if err != nil {
+		return nil, grpcstatus.Errorf(codes.Internal, "failed to get namespace %q: %v", req.Namespace, err)
+	}
+	if found {
 		if status := borrowedStatus.UnsafeBorrow(); status != nil {
 			namespaceStatus = status
 		}

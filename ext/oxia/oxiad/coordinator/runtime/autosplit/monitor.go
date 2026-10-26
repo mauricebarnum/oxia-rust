@@ -140,7 +140,12 @@ func (m *Monitor) run() {
 }
 
 func (m *Monitor) evaluate() {
-	config := m.metadata.GetConfig().UnsafeBorrow()
+	borrowedConfig, err := m.metadata.GetConfig()
+	if err != nil {
+		m.logger.Warn("Failed to evaluate the auto-split", slog.Any("error", err))
+		return
+	}
+	config := borrowedConfig.UnsafeBorrow()
 	autoSplit := config.GetAutoSplitWithDefaults()
 
 	if !autoSplit.GetEnabled() {
@@ -152,7 +157,11 @@ func (m *Monitor) evaluate() {
 
 	m.evaluationsCounter.Inc()
 
-	namespaces := m.metadata.ListNamespaceStatus()
+	namespaces, err := m.metadata.ListNamespaceStatus()
+	if err != nil {
+		m.logger.Warn("Failed to evaluate the auto-split", slog.Any("error", err))
+		return
+	}
 
 	if m.anySplitInProgress(namespaces) {
 		return
@@ -279,6 +288,11 @@ func (m *Monitor) shardCandidate(key shardKey, meta *proto.ShardMetadata,
 	if stats == nil {
 		return candidate{}, false
 	}
+	// A split child that still holds records of its parent outside its hash
+	// range can't be split until it deletes them, and its size counts them
+	if stats.GetSplitFilterPending() {
+		return candidate{}, false
+	}
 
 	ratio := m.computeOvershoot(key, meta.Leader, stats, autoSplit, now)
 	if ratio <= 1.0 {
@@ -320,13 +334,12 @@ func (m *Monitor) computeOvershoot(key shardKey, leader *proto.DataServerIdentit
 
 	leaderID := leader.GetNameOrDefault()
 
-	switch {
-	case tracker.leader != leaderID:
+	if tracker.leader != leaderID {
 		// Leader changed (or first sample): the cumulative counters belong to a
 		// different process, so drop the rate until we have two same-leader
 		// samples rather than computing a spurious cross-leader delta.
 		tracker.throughputOps = 0
-	case tracker.lastStats != nil:
+	} else if tracker.lastStats != nil {
 		elapsed := now.Sub(tracker.lastSampleTime).Seconds()
 		if elapsed > 0 {
 			prevTotal := tracker.lastStats.GetReadOpsTotal() + tracker.lastStats.GetWriteOpsTotal()
@@ -340,8 +353,6 @@ func (m *Monitor) computeOvershoot(key shardKey, leader *proto.DataServerIdentit
 				tracker.throughputOps = 0
 			}
 		}
-	default:
-		// Same leader, first sample for this tracker: no rate to compute yet.
 	}
 
 	tracker.leader = leaderID

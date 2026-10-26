@@ -16,14 +16,15 @@ package metric
 
 import (
 	"fmt"
-	"log/slog"
-	"os"
 	"sync"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
+
+// meterName is the instrumentation scope of the oxia metrics.
+const meterName = "oxia"
 
 var (
 	meter metric.Meter
@@ -32,9 +33,7 @@ var (
 
 func GetMeter() metric.Meter {
 	once.Do(func() {
-		meter = otel.GetMeterProvider().Meter(
-			"oxia",
-		)
+		meter = otel.GetMeterProvider().Meter(meterName)
 	})
 	return meter
 }
@@ -50,17 +49,20 @@ func LabelsForShard(namespace string, shard int64) map[string]any {
 	}
 }
 
-func fatalOnErr(err error, name string) {
+// panicOnErr fails the creation of a metric. The OTel SDK only fails it for a
+// programming error, e.g. an invalid name, so the creators panic rather than
+// make every component handle an error that cannot happen at runtime.
+func panicOnErr(err error, name string) {
 	if err != nil {
-		slog.Error(
-			"Failed to create metric",
-			slog.String("metric-name", name),
-		)
-		os.Exit(1)
+		panic(fmt.Errorf("failed to create metric %s: %w", name, err))
 	}
 }
 
 func getAttrs(labels map[string]any) (options metric.MeasurementOption) {
+	return metric.WithAttributeSet(getAttrSet(labels))
+}
+
+func getAttrSet(labels map[string]any) attribute.Set {
 	attrs := make([]attribute.KeyValue, 0, len(labels))
 	for k, v := range labels {
 		key := attribute.Key(k)
@@ -80,12 +82,11 @@ func getAttrs(labels map[string]any) (options metric.MeasurementOption) {
 			attr = key.String(t)
 
 		default:
-			slog.Error(fmt.Sprintf("Invalid label type %#v", v))
-			os.Exit(1)
+			panic(fmt.Sprintf("invalid type %T of metric label %s", v, k))
 		}
 
 		attrs = append(attrs, attr)
 	}
 
-	return metric.WithAttributes(attrs...)
+	return attribute.NewSet(attrs...)
 }

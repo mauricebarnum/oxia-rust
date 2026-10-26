@@ -15,18 +15,21 @@
 package balancer
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/emirpasic/gods/v2/lists/arraylist"
 	"github.com/emirpasic/gods/v2/sets/linkedhashset"
 	"github.com/stretchr/testify/assert"
 
 	commonobject "github.com/oxia-db/oxia/common/object"
 	"github.com/oxia-db/oxia/common/proto"
-	commonwatch "github.com/oxia-db/oxia/oxiad/common/watch"
+	"github.com/oxia-db/oxia/oxiad/common/cache"
 	coordmetadata "github.com/oxia-db/oxia/oxiad/coordinator/metadata"
 	"github.com/oxia-db/oxia/oxiad/coordinator/metadata/provider"
 	"github.com/oxia-db/oxia/oxiad/coordinator/runtime/action"
@@ -42,6 +45,13 @@ type mockMetadata struct {
 	nsConfigs map[string]*proto.Namespace
 	nodeMap   map[string]*proto.DataServerIdentity
 	lbConfig  *proto.LoadBalancer
+
+	namespaceStatusErr     error
+	listNamespaceStatusErr error
+	listNamespaceErr       error
+	listDataServerErr      error
+	getNamespaceErr        error
+	getDataServerErr       error
 }
 
 func dataServer(id string) *proto.DataServerIdentity {
@@ -66,57 +76,69 @@ func (*mockMetadata) WaitToBecomeLeader() (<-chan struct{}, error) {
 	return nil, nil //nolint:nilnil
 }
 
-func (m *mockMetadata) GetInstanceID() string { return m.status.GetInstanceId() }
+func (m *mockMetadata) GetInstanceID() (string, error) { return m.status.GetInstanceId(), nil }
 
-func (*mockMetadata) ReserveShardIDs(uint32) int64 { return 0 }
+func (*mockMetadata) AllocateShardIDs(uint32) (int64, error) { return 0, nil }
 
-func (*mockMetadata) CreateNamespaceStatus(string, *proto.NamespaceStatus) bool {
-	return false
+func (*mockMetadata) CreateNamespaceStatus(string, *proto.NamespaceStatus) error {
+	return errors.New("not implemented")
 }
 
-func (*mockMetadata) UpdateNamespaceStatus(string, *proto.NamespaceStatus) {}
-
-func (m *mockMetadata) ListNamespaceStatus() map[string]commonobject.Borrowed[*proto.NamespaceStatus] {
+func (m *mockMetadata) ListNamespaceStatus() (map[string]commonobject.Borrowed[*proto.NamespaceStatus], error) {
+	if m.listNamespaceStatusErr != nil {
+		return nil, m.listNamespaceStatusErr
+	}
 	statuses := make(map[string]commonobject.Borrowed[*proto.NamespaceStatus], len(m.status.GetNamespaces()))
 	for name, status := range m.status.GetNamespaces() {
 		statuses[name] = commonobject.Borrow(status)
 	}
-	return statuses
+	return statuses, nil
 }
 
-func (m *mockMetadata) GetNamespaceStatus(namespace string) (commonobject.Borrowed[*proto.NamespaceStatus], bool) {
+func (m *mockMetadata) GetNamespaceStatus(namespace string) (commonobject.Borrowed[*proto.NamespaceStatus], bool, error) {
+	if m.namespaceStatusErr != nil {
+		return commonobject.Borrowed[*proto.NamespaceStatus]{}, false, m.namespaceStatusErr
+	}
 	status, exists := m.status.GetNamespaces()[namespace]
 	if !exists {
-		return commonobject.Borrowed[*proto.NamespaceStatus]{}, false
+		return commonobject.Borrowed[*proto.NamespaceStatus]{}, false, nil
 	}
-	return commonobject.Borrow(status), true
+	return commonobject.Borrow(status), true, nil
 }
 
-func (m *mockMetadata) GetShardStatus(namespace string, shard int64) (commonobject.Borrowed[*proto.ShardMetadata], bool) {
+func (m *mockMetadata) GetShardStatus(namespace string, shard int64) (commonobject.Borrowed[*proto.ShardMetadata], bool, error) {
 	namespaceStatus, exists := m.status.GetNamespaces()[namespace]
 	if !exists {
-		return commonobject.Borrowed[*proto.ShardMetadata]{}, false
+		return commonobject.Borrowed[*proto.ShardMetadata]{}, false, nil
 	}
 	shardStatus, exists := namespaceStatus.GetShards()[shard]
 	if !exists {
-		return commonobject.Borrowed[*proto.ShardMetadata]{}, false
+		return commonobject.Borrowed[*proto.ShardMetadata]{}, false, nil
 	}
-	return commonobject.Borrow(shardStatus), true
+	return commonobject.Borrow(shardStatus), true, nil
 }
 
 func (*mockMetadata) DeleteNamespaceStatus(string) commonobject.Borrowed[*proto.NamespaceStatus] {
 	return commonobject.Borrowed[*proto.NamespaceStatus]{}
 }
 
-func (m *mockMetadata) UpdateShardStatus(namespace string, shard int64, shardMetadata *proto.ShardMetadata) {
+func (m *mockMetadata) UpdateShardStatus(namespace string, shard int64, shardMetadata *proto.ShardMetadata) error {
 	ns, exists := m.status.GetNamespaces()[namespace]
 	if !exists {
-		return
+		return nil
 	}
 	ns.Shards[shard] = shardMetadata
+	return nil
 }
 
-func (*mockMetadata) DeleteShardStatus(string, int64) {}
+func (m *mockMetadata) PatchNamespaceStatus(namespace string, modify func(*proto.NamespaceStatus) bool) error {
+	if ns, exists := m.status.GetNamespaces()[namespace]; exists {
+		modify(ns)
+	}
+	return nil
+}
+
+func (*mockMetadata) DeleteShardStatus(string, int64) error { return nil }
 
 func (*mockMetadata) IsReady(*proto.ClusterConfiguration) bool { return true }
 
@@ -132,39 +154,40 @@ func (*mockMetadata) DeleteNamespace(string) (*proto.Namespace, error) {
 	return &proto.Namespace{}, nil
 }
 
-func (m *mockMetadata) ListNamespace() map[string]commonobject.Borrowed[*proto.Namespace] {
+func (m *mockMetadata) ListNamespace() (map[string]commonobject.Borrowed[*proto.Namespace], error) {
+	if m.listNamespaceErr != nil {
+		return nil, m.listNamespaceErr
+	}
 	namespaces := make(map[string]commonobject.Borrowed[*proto.Namespace], len(m.nsConfigs))
 	for name, namespace := range m.nsConfigs {
 		namespaces[name] = commonobject.Borrow(namespace)
 	}
-	return namespaces
+	return namespaces, nil
 }
 
-func (m *mockMetadata) GetConfig() commonobject.Borrowed[*proto.ClusterConfiguration] {
+func (m *mockMetadata) GetConfig() (commonobject.Borrowed[*proto.ClusterConfiguration], error) {
 	namespaces := make([]*proto.Namespace, 0, len(m.nsConfigs))
 	for _, namespace := range m.nsConfigs {
 		namespaces = append(namespaces, namespace)
 	}
 	return commonobject.Borrow(&proto.ClusterConfiguration{
 		Namespaces: namespaces,
-	})
+	}), nil
 }
 
-func (*mockMetadata) SubscribeConfig() *commonwatch.Receiver[provider.Versioned[*proto.ClusterConfiguration]] {
-	return commonwatch.New(provider.Versioned[*proto.ClusterConfiguration]{
-		Value:   &proto.ClusterConfiguration{},
-		Version: "",
-	}).Subscribe()
+// SubscribeConfig is not used by these tests.
+func (*mockMetadata) SubscribeConfig() *cache.Subscription[provider.Versioned[*proto.ClusterConfiguration]] {
+	return nil
 }
 
-func (m *mockMetadata) GetLoadBalancer() commonobject.Borrowed[*proto.LoadBalancer] {
+func (m *mockMetadata) GetLoadBalancerConfig() (commonobject.Borrowed[*proto.LoadBalancer], error) {
 	if m.lbConfig != nil {
-		return commonobject.Borrow(m.lbConfig)
+		return commonobject.Borrow(m.lbConfig), nil
 	}
 	return commonobject.Borrow(&proto.LoadBalancer{
 		ScheduleInterval: "30s",
 		QuarantineTime:   "5m",
-	})
+	}), nil
 }
 
 func (*mockMetadata) CreateDataServer(*proto.DataServer) error {
@@ -179,7 +202,10 @@ func (*mockMetadata) DeleteDataServer(string) (*proto.DataServer, error) {
 	return &proto.DataServer{}, nil
 }
 
-func (m *mockMetadata) ListDataServer() map[string]commonobject.Borrowed[*proto.DataServer] {
+func (m *mockMetadata) ListDataServer() (map[string]commonobject.Borrowed[*proto.DataServer], error) {
+	if m.listDataServerErr != nil {
+		return nil, m.listDataServerErr
+	}
 	dataServers := make(map[string]commonobject.Borrowed[*proto.DataServer], m.nodes.Size())
 	for _, id := range m.nodes.Values() {
 		name := id
@@ -199,21 +225,32 @@ func (m *mockMetadata) ListDataServer() map[string]commonobject.Borrowed[*proto.
 			Metadata: metadata,
 		})
 	}
-	return dataServers
+	return dataServers, nil
 }
 
-func (m *mockMetadata) GetNamespace(namespace string) (commonobject.Borrowed[*proto.Namespace], bool) {
+// GetNamespaceTermOptions is not used by these tests.
+func (*mockMetadata) GetNamespaceTermOptions(string) (*proto.NewTermOptions, error) {
+	return &proto.NewTermOptions{}, nil
+}
+
+func (m *mockMetadata) GetNamespace(namespace string) (commonobject.Borrowed[*proto.Namespace], bool, error) {
+	if m.getNamespaceErr != nil {
+		return commonobject.Borrowed[*proto.Namespace]{}, false, m.getNamespaceErr
+	}
 	nc, ok := m.nsConfigs[namespace]
 	if !ok {
-		return commonobject.Borrowed[*proto.Namespace]{}, false
+		return commonobject.Borrowed[*proto.Namespace]{}, false, nil
 	}
-	return commonobject.Borrow(nc), true
+	return commonobject.Borrow(nc), true, nil
 }
 
-func (m *mockMetadata) GetDataServer(name string) (commonobject.Borrowed[*proto.DataServer], bool) {
+func (m *mockMetadata) GetDataServer(name string) (commonobject.Borrowed[*proto.DataServer], bool, error) {
+	if m.getDataServerErr != nil {
+		return commonobject.Borrowed[*proto.DataServer]{}, false, m.getDataServerErr
+	}
 	n, ok := m.nodeMap[name]
 	if !ok {
-		return commonobject.Borrowed[*proto.DataServer]{}, false
+		return commonobject.Borrowed[*proto.DataServer]{}, false, nil
 	}
 	metadata, ok := m.metadata[name]
 	if !ok {
@@ -222,7 +259,7 @@ func (m *mockMetadata) GetDataServer(name string) (commonobject.Borrowed[*proto.
 	return commonobject.Borrow(&proto.DataServer{
 		Identity: n,
 		Metadata: metadata,
-	}), true
+	}), true, nil
 }
 
 // alwaysErrorSelector is a selector that always returns ErrUnsatisfiedAntiAffinity.
@@ -238,12 +275,14 @@ func newTestBalancer(
 	metadata *mockMetadata,
 	sel selector.Selector[*single.Context, string],
 ) *nodeBasedBalancer {
+	// The mock never fails to load the configuration
+	loadBalancerConf, _ := metadata.GetLoadBalancerConfig()
 	return &nodeBasedBalancer{
 		logger:                  slog.Default(),
 		ctx:                     ctx,
 		ctxCancel:               cancel,
 		wg:                      sync.WaitGroup{},
-		loadBalancerConf:        metadata.GetLoadBalancer().UnsafeBorrow(),
+		loadBalancerConf:        loadBalancerConf.UnsafeBorrow(),
 		metadata:                metadata,
 		selector:                sel,
 		loadRatioAlgorithm:      single.DefaultShardsRank,
@@ -441,6 +480,47 @@ func TestIsBalancedRequiresNamespaceStatus(t *testing.T) {
 	assert.False(t, b.IsBalanced())
 }
 
+func TestIsBalancedFalseOnNamespaceStatusError(t *testing.T) {
+	sv1 := dataServer("sv-1")
+	sv2 := dataServer("sv-2")
+	sv3 := dataServer("sv-3")
+	ensemble := []*proto.DataServerIdentity{sv1, sv2, sv3}
+
+	metadata := &mockMetadata{
+		status: &proto.ClusterStatus{
+			Namespaces: map[string]*proto.NamespaceStatus{
+				"ns": {
+					ReplicationFactor: 3,
+					Shards: map[int64]*proto.ShardMetadata{
+						0: {Status: proto.ShardStatusSteadyState, Leader: sv1, Ensemble: ensemble},
+						1: {Status: proto.ShardStatusSteadyState, Leader: sv2, Ensemble: ensemble},
+						2: {Status: proto.ShardStatusSteadyState, Leader: sv3, Ensemble: ensemble},
+					},
+				},
+			},
+		},
+		nodes:    linkedhashset.New("sv-1", "sv-2", "sv-3"),
+		metadata: map[string]*proto.DataServerMetadata{},
+		nsConfigs: map[string]*proto.Namespace{
+			"ns": {Name: "ns", ReplicationFactor: 3},
+		},
+		nodeMap: map[string]*proto.DataServerIdentity{
+			"sv-1": sv1,
+			"sv-2": sv2,
+			"sv-3": sv3,
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	b := newTestBalancer(ctx, cancel, metadata, &alwaysErrorSelector{})
+	assert.True(t, b.IsBalanced())
+
+	metadata.namespaceStatusErr = errors.New("status unavailable")
+	assert.False(t, b.IsBalanced())
+}
+
 // selectRecordingSelector records whether Select was ever called.
 type selectRecordingSelector struct {
 	called bool
@@ -552,7 +632,9 @@ func TestSwapShardPassesNamespaceAndShardToSelector(t *testing.T) {
 	defer cancel()
 
 	b := newTestBalancer(ctx, cancel, metadata, sel)
-	candidates, candidatesMetadata := dataServersToCandidatesAndMetadata(metadata.ListDataServer())
+	dataServers, err := metadata.ListDataServer()
+	assert.NoError(t, err)
+	candidates, candidatesMetadata := dataServersToCandidatesAndMetadata(dataServers)
 	loadRatios := single.DefaultShardsRank(&model.RatioParams{
 		NodeShardsInfos: map[string][]model.ShardInfo{
 			"sv-1": {{
@@ -569,7 +651,7 @@ func TestSwapShardPassesNamespaceAndShardToSelector(t *testing.T) {
 		},
 	})
 
-	_, err := b.swapShard(
+	_, err = b.swapShard(
 		&model.ShardLoadRatio{
 			ShardInfo: &model.ShardInfo{
 				Namespace: "ns-1",
@@ -646,4 +728,436 @@ func TestBalanceHighestNodeDoesNotHangOnSelectorError(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("rebalanceEnsemble hung due to infinite loop on selector error")
 	}
+}
+
+func TestNodeBasedBalancerRebalanceLeaderQuarantinesShardOnFailedElection(t *testing.T) {
+	sv1 := dataServer("sv-1")
+	sv2 := dataServer("sv-2")
+	sv3 := dataServer("sv-3")
+
+	ensemble := []*proto.DataServerIdentity{sv1, sv2, sv3}
+	status := &proto.ClusterStatus{
+		Namespaces: map[string]*proto.NamespaceStatus{
+			"ns": {
+				ReplicationFactor: 3,
+				Shards: map[int64]*proto.ShardMetadata{
+					0: {Status: proto.ShardStatusSteadyState, Leader: sv1, Ensemble: ensemble},
+					1: {Status: proto.ShardStatusSteadyState, Leader: sv1, Ensemble: ensemble},
+					2: {Status: proto.ShardStatusSteadyState, Leader: sv1, Ensemble: ensemble},
+				},
+			},
+		},
+	}
+	metadata := &mockMetadata{
+		status:   status,
+		nodes:    linkedhashset.New("sv-1", "sv-2", "sv-3"),
+		metadata: map[string]*proto.DataServerMetadata{},
+		nsConfigs: map[string]*proto.Namespace{
+			"ns": {Name: "ns", ReplicationFactor: 3},
+		},
+		nodeMap: map[string]*proto.DataServerIdentity{
+			"sv-1": sv1,
+			"sv-2": sv2,
+			"sv-3": sv3,
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	b := newTestBalancer(ctx, cancel, metadata, &alwaysErrorSelector{})
+
+	electedShard := make(chan int64, 1)
+	go func() {
+		ac := <-b.actionCh
+		electedShard <- ac.GetShard()
+		ac.Error(errors.New("the election failed"))
+	}()
+	b.rebalanceLeader()
+
+	assert.Equal(t, []int64{<-electedShard}, b.quarantineShards().Values())
+}
+
+func TestNodeBasedBalancerCloseStopsBackgroundTasks(t *testing.T) {
+	metadata := newBalancedMockMetadata()
+	lb := NewLoadBalancer(Options{
+		Context:             t.Context(),
+		Metadata:            metadata,
+		LoadBalancerConfig:  &proto.LoadBalancer{ScheduleInterval: "30s", QuarantineTime: "5m"},
+		NodeAvailableJudger: func(string) bool { return true },
+	})
+	lb.Start()
+	lb.Trigger()
+
+	assert.NoError(t, lb.Close())
+	assert.ErrorIs(t, lb.(*nodeBasedBalancer).ctx.Err(), context.Canceled)
+	assert.NotPanics(t, lb.Trigger)
+}
+
+func TestNodeBasedBalancerRebalanceEnsembleFailsOnStatusError(t *testing.T) {
+	metadata := newBalancedMockMetadata()
+	metadata.listNamespaceStatusErr = errors.New("status unavailable")
+	b := newTestBalancer(t.Context(), func() {}, metadata, &alwaysErrorSelector{})
+
+	assert.False(t, b.rebalanceEnsemble())
+	assert.Empty(t, b.actionCh)
+}
+
+func TestNodeBasedBalancerRebalanceEnsembleFailsOnDataServerError(t *testing.T) {
+	metadata := newBalancedMockMetadata()
+	metadata.listDataServerErr = errors.New("data servers unavailable")
+	b := newTestBalancer(t.Context(), func() {}, metadata, &alwaysErrorSelector{})
+
+	assert.False(t, b.rebalanceEnsemble())
+	assert.Empty(t, b.actionCh)
+}
+
+func TestNodeBasedBalancerRebalanceEnsembleLogsAtDebugLevel(t *testing.T) {
+	metadata := newBalancedMockMetadata()
+	// A data server without metadata is a candidate with empty metadata
+	metadata.metadata["sv-1"] = nil
+	b := newTestBalancer(t.Context(), func() {}, metadata, &alwaysErrorSelector{})
+	logs := &bytes.Buffer{}
+	b.logger = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	b.nodeQuarantineNodeMap.Store("sv-2", time.Now())
+
+	assert.True(t, b.rebalanceEnsemble())
+	assert.Contains(t, logs.String(), "start shard rebalance")
+	assert.Contains(t, logs.String(), `quarantine-nodes="LinkedHashSet\nsv-2"`)
+	assert.Contains(t, logs.String(), "end shard rebalance")
+}
+
+func TestNodeBasedBalancerRebalanceEnsembleSettlesOnUnevenSpread(t *testing.T) {
+	// 11 replicas on 3 nodes -> 4/4/3 should be stable
+	metadata := newBalancedMockMetadata()
+	sv1, sv2 := metadata.nodeMap["sv-1"], metadata.nodeMap["sv-2"]
+	metadata.status.Namespaces["ns-2"] = &proto.NamespaceStatus{
+		ReplicationFactor: 2,
+		Shards: map[int64]*proto.ShardMetadata{
+			3: {Status: proto.ShardStatusSteadyState, Leader: sv1, Ensemble: []*proto.DataServerIdentity{sv1, sv2}},
+		},
+	}
+	metadata.nsConfigs["ns-2"] = &proto.Namespace{Name: "ns-2", ReplicationFactor: 2}
+	b := newTestBalancer(t.Context(), func() {}, metadata, single.NewSelector())
+	swaps := make(chan int64, 1000)
+	go func() {
+		for ac := range b.actionCh {
+			swaps <- ac.GetShard()
+			ac.Done(nil)
+		}
+	}()
+
+	assert.True(t, b.rebalanceEnsemble())
+	assert.True(t, b.IsBalanced())
+	close(b.actionCh)
+	select {
+	case shard := <-swaps:
+		t.Fatalf("expected no swap, got a swap of shard %d", shard)
+	default:
+	}
+}
+
+func TestNodeBasedBalancerBalanceHighestNodeIgnoresEmptyRatios(t *testing.T) {
+	sel := &contextRecordingSelector{}
+	b := newTestBalancer(t.Context(), func() {}, newBalancedMockMetadata(), sel)
+	loadRatios := single.DefaultShardsRank(&model.RatioParams{NodeShardsInfos: map[string][]model.ShardInfo{}})
+
+	b.balanceHighestNode(loadRatios, linkedhashset.New[string](), map[string]*proto.DataServerMetadata{}, &sync.WaitGroup{})
+
+	assert.Empty(t, sel.namespace)
+	assert.Empty(t, b.quarantineNodes().Values())
+}
+
+func TestNodeBasedBalancerBalanceHighestNodeSkipsQuarantinedNode(t *testing.T) {
+	sel := &contextRecordingSelector{}
+	b := newTestBalancer(t.Context(), func() {}, newBalancedMockMetadata(), sel)
+	b.nodeQuarantineNodeMap.Store("sv-1", time.Now())
+	loadRatios := single.DefaultShardsRank(&model.RatioParams{NodeShardsInfos: map[string][]model.ShardInfo{
+		"sv-1": {shardInfo(1, "sv-1"), shardInfo(2, "sv-1"), shardInfo(3, "sv-1")},
+		"sv-2": {shardInfo(4, "sv-2"), shardInfo(5, "sv-2")},
+		"sv-3": {},
+	}})
+	candidates := linkedhashset.New("sv-1", "sv-2", "sv-3")
+
+	b.balanceHighestNode(loadRatios, candidates, map[string]*proto.DataServerMetadata{}, &sync.WaitGroup{})
+
+	// The shards of sv-2, the most loaded node that is not quarantined, can't
+	// be moved: it is quarantined in turn
+	assert.Contains(t, []int64{4, 5}, sel.shard)
+	assert.ElementsMatch(t, []string{"sv-1", "sv-2"}, b.quarantineNodes().Values())
+}
+
+func TestNodeBasedBalancerBalanceHighestNodeStopsWhenAllNodesQuarantined(t *testing.T) {
+	sel := &contextRecordingSelector{}
+	b := newTestBalancer(t.Context(), func() {}, newBalancedMockMetadata(), sel)
+	for _, node := range []string{"sv-1", "sv-2", "sv-3"} {
+		b.nodeQuarantineNodeMap.Store(node, time.Now())
+	}
+	loadRatios := single.DefaultShardsRank(&model.RatioParams{NodeShardsInfos: map[string][]model.ShardInfo{
+		"sv-1": {shardInfo(1, "sv-1"), shardInfo(2, "sv-1")},
+		"sv-2": {shardInfo(3, "sv-2")},
+		"sv-3": {},
+	}})
+	candidates := linkedhashset.New("sv-1", "sv-2", "sv-3")
+
+	b.balanceHighestNode(loadRatios, candidates, map[string]*proto.DataServerMetadata{}, &sync.WaitGroup{})
+
+	assert.Empty(t, sel.namespace)
+	assert.Empty(t, b.actionCh)
+}
+
+func TestNodeBasedBalancerBalanceHighestNodeIgnoresMissingNode(t *testing.T) {
+	sel := &contextRecordingSelector{}
+	b := newTestBalancer(t.Context(), func() {}, newBalancedMockMetadata(), sel)
+	loadRatios := model.NewRatio(1, 0, 0.1, arraylist.New[*model.NodeLoadRatio](nil))
+
+	b.balanceHighestNode(loadRatios, linkedhashset.New[string](), map[string]*proto.DataServerMetadata{}, &sync.WaitGroup{})
+
+	assert.Empty(t, sel.namespace)
+	assert.Empty(t, b.actionCh)
+}
+
+func TestNodeBasedBalancerBalanceHighestNodeIgnoresMissingShard(t *testing.T) {
+	sel := &contextRecordingSelector{}
+	b := newTestBalancer(t.Context(), func() {}, newBalancedMockMetadata(), sel)
+	loadRatios := model.NewRatio(1, 0, 0.1, arraylist.New(&model.NodeLoadRatio{
+		NodeID:      "sv-1",
+		Node:        dataServer("sv-1"),
+		Ratio:       1,
+		ShardRatios: arraylist.New[*model.ShardLoadRatio](nil),
+	}))
+
+	b.balanceHighestNode(loadRatios, linkedhashset.New("sv-1"), map[string]*proto.DataServerMetadata{}, &sync.WaitGroup{})
+
+	assert.Empty(t, sel.namespace)
+	assert.Empty(t, b.actionCh)
+}
+
+func TestNodeBasedBalancerSwapShardKeepsShardOnSelectedSourceNode(t *testing.T) {
+	metadata := newBalancedMockMetadata()
+	b := newTestBalancer(t.Context(), func() {}, metadata, &fixedSelector{target: "sv-1"})
+
+	swapped, err := swapShardOffNode(t, b, metadata, "ns")
+
+	assert.NoError(t, err)
+	assert.False(t, swapped)
+	assert.Empty(t, b.actionCh)
+}
+
+func TestNodeBasedBalancerSwapShardFailsOnNamespaceError(t *testing.T) {
+	metadata := newBalancedMockMetadata()
+	metadata.getNamespaceErr = errors.New("namespace unavailable")
+	b := newTestBalancer(t.Context(), func() {}, metadata, &fixedSelector{target: "sv-3"})
+
+	swapped, err := swapShardOffNode(t, b, metadata, "ns")
+
+	assert.ErrorIs(t, err, metadata.getNamespaceErr)
+	assert.False(t, swapped)
+}
+
+func TestNodeBasedBalancerSwapShardSkipsUnknownNamespace(t *testing.T) {
+	metadata := newBalancedMockMetadata()
+	b := newTestBalancer(t.Context(), func() {}, metadata, &fixedSelector{target: "sv-3"})
+
+	swapped, err := swapShardOffNode(t, b, metadata, "unknown")
+
+	assert.NoError(t, err)
+	assert.False(t, swapped)
+	assert.Empty(t, b.actionCh)
+}
+
+func TestNodeBasedBalancerSwapShardFailsOnDataServerError(t *testing.T) {
+	metadata := newBalancedMockMetadata()
+	metadata.getDataServerErr = errors.New("data server unavailable")
+	b := newTestBalancer(t.Context(), func() {}, metadata, &fixedSelector{target: "sv-3"})
+
+	swapped, err := swapShardOffNode(t, b, metadata, "ns")
+
+	assert.ErrorIs(t, err, metadata.getDataServerErr)
+	assert.False(t, swapped)
+}
+
+func TestNodeBasedBalancerSwapShardFailsOnUnknownTarget(t *testing.T) {
+	metadata := newBalancedMockMetadata()
+	b := newTestBalancer(t.Context(), func() {}, metadata, &fixedSelector{target: "sv-9"})
+
+	swapped, err := swapShardOffNode(t, b, metadata, "ns")
+
+	assert.ErrorContains(t, err, "target node does not exist")
+	assert.False(t, swapped)
+}
+
+func TestNodeBasedBalancerSwapShardFailsOnTargetWithoutIdentity(t *testing.T) {
+	metadata := newBalancedMockMetadata()
+	metadata.nodeMap["sv-3"] = nil
+	b := newTestBalancer(t.Context(), func() {}, metadata, &fixedSelector{target: "sv-3"})
+
+	swapped, err := swapShardOffNode(t, b, metadata, "ns")
+
+	assert.ErrorContains(t, err, "target node does not have identity")
+	assert.False(t, swapped)
+}
+
+func TestNodeBasedBalancerCheckQuarantineNodesReleasesExpiredNodes(t *testing.T) {
+	b := newTestBalancer(t.Context(), func() {}, newBalancedMockMetadata(), &alwaysErrorSelector{})
+	b.nodeQuarantineNodeMap.Store("sv-1", time.Now().Add(-time.Hour))
+	b.nodeQuarantineNodeMap.Store("sv-2", time.Now())
+
+	b.checkQuarantineNodes()
+
+	assert.Equal(t, []string{"sv-2"}, b.quarantineNodes().Values())
+}
+
+func TestNodeBasedBalancerCheckQuarantineShardsReleasesExpiredShards(t *testing.T) {
+	b := newTestBalancer(t.Context(), func() {}, newBalancedMockMetadata(), &alwaysErrorSelector{})
+	b.shardQuarantineShardMap.Store(int64(1), time.Now().Add(-time.Hour))
+	b.shardQuarantineShardMap.Store(int64(2), time.Now())
+
+	b.checkQuarantineShards()
+
+	assert.Equal(t, []int64{2}, b.quarantineShards().Values())
+}
+
+func TestIsBalancedFalseOnNamespaceConfigError(t *testing.T) {
+	metadata := newBalancedMockMetadata()
+	b := newTestBalancer(t.Context(), func() {}, metadata, &alwaysErrorSelector{})
+	assert.True(t, b.IsBalanced())
+
+	metadata.listNamespaceErr = errors.New("config unavailable")
+	assert.False(t, b.IsBalanced())
+}
+
+func TestIsBalancedFalseOnDataServerError(t *testing.T) {
+	metadata := newBalancedMockMetadata()
+	metadata.listDataServerErr = errors.New("data servers unavailable")
+	b := newTestBalancer(t.Context(), func() {}, metadata, &alwaysErrorSelector{})
+
+	assert.False(t, b.IsBalanced())
+}
+
+func TestIsBalancedWithoutShards(t *testing.T) {
+	metadata := newBalancedMockMetadata()
+	metadata.nodes = linkedhashset.New[string]()
+	metadata.status.Namespaces["ns"].Shards = map[int64]*proto.ShardMetadata{}
+	b := newTestBalancer(t.Context(), func() {}, metadata, &alwaysErrorSelector{})
+
+	assert.True(t, b.IsBalanced())
+}
+
+func TestNodeBasedBalancerRebalanceLeaderSkipsQuarantinedShards(t *testing.T) {
+	metadata := newBalancedMockMetadata()
+	for _, shard := range metadata.status.Namespaces["ns"].Shards {
+		shard.Leader = metadata.nodeMap["sv-1"]
+	}
+	b := newTestBalancer(t.Context(), func() {}, metadata, &alwaysErrorSelector{})
+	for shard := range metadata.status.Namespaces["ns"].Shards {
+		b.shardQuarantineShardMap.Store(shard, time.Now())
+	}
+
+	b.rebalanceLeader()
+
+	assert.Empty(t, b.actionCh)
+}
+
+func TestNodeBasedBalancerRebalanceLeaderFailsOnStatusError(t *testing.T) {
+	metadata := newBalancedMockMetadata()
+	metadata.listNamespaceStatusErr = errors.New("status unavailable")
+	b := newTestBalancer(t.Context(), func() {}, metadata, &alwaysErrorSelector{})
+
+	b.rebalanceLeader()
+
+	assert.Empty(t, b.actionCh)
+}
+
+func TestNodeBasedBalancerRebalanceLeaderFailsOnDataServerError(t *testing.T) {
+	metadata := newBalancedMockMetadata()
+	metadata.listDataServerErr = errors.New("data servers unavailable")
+	b := newTestBalancer(t.Context(), func() {}, metadata, &alwaysErrorSelector{})
+
+	b.rebalanceLeader()
+
+	assert.Empty(t, b.actionCh)
+}
+
+func TestNodeBasedBalancerRebalanceLeaderQuarantinesShardWhenLeaderUnchanged(t *testing.T) {
+	metadata := newBalancedMockMetadata()
+	for _, shard := range metadata.status.Namespaces["ns"].Shards {
+		shard.Leader = metadata.nodeMap["sv-1"]
+	}
+	b := newTestBalancer(t.Context(), func() {}, metadata, &alwaysErrorSelector{})
+	logs := &bytes.Buffer{}
+	b.logger = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	electedShard := make(chan int64, 1)
+	go func() {
+		ac := <-b.actionCh
+		electedShard <- ac.GetShard()
+		ac.Done("sv-1")
+	}()
+	b.rebalanceLeader()
+
+	assert.Equal(t, []int64{<-electedShard}, b.quarantineShards().Values())
+	assert.Contains(t, logs.String(), "start leader rebalance")
+	assert.Contains(t, logs.String(), "end leader rebalance")
+}
+
+// fixedSelector always selects the target.
+type fixedSelector struct {
+	target string
+}
+
+func (s *fixedSelector) Select(*single.Context) (string, error) {
+	return s.target, nil
+}
+
+// newBalancedMockMetadata returns the metadata of a namespace with 3 shards
+// replicated on the 3 data servers, each one leading a shard.
+func newBalancedMockMetadata() *mockMetadata {
+	sv1 := &proto.DataServerIdentity{Name: new("sv-1"), Internal: "sv-1"}
+	sv2 := &proto.DataServerIdentity{Name: new("sv-2"), Internal: "sv-2"}
+	sv3 := &proto.DataServerIdentity{Name: new("sv-3"), Internal: "sv-3"}
+	ensemble := []*proto.DataServerIdentity{sv1, sv2, sv3}
+	return &mockMetadata{
+		status: &proto.ClusterStatus{
+			Namespaces: map[string]*proto.NamespaceStatus{
+				"ns": {
+					ReplicationFactor: 3,
+					Shards: map[int64]*proto.ShardMetadata{
+						0: {Status: proto.ShardStatusSteadyState, Leader: sv1, Ensemble: ensemble},
+						1: {Status: proto.ShardStatusSteadyState, Leader: sv2, Ensemble: ensemble},
+						2: {Status: proto.ShardStatusSteadyState, Leader: sv3, Ensemble: ensemble},
+					},
+				},
+			},
+		},
+		nodes:     linkedhashset.New("sv-1", "sv-2", "sv-3"),
+		metadata:  map[string]*proto.DataServerMetadata{},
+		nsConfigs: map[string]*proto.Namespace{"ns": {Name: "ns", ReplicationFactor: 3}},
+		nodeMap:   map[string]*proto.DataServerIdentity{"sv-1": sv1, "sv-2": sv2, "sv-3": sv3},
+	}
+}
+
+// swapShardOffNode swaps a shard of the namespace, replicated on sv-1 and
+// sv-2, off sv-1.
+func swapShardOffNode(t *testing.T, b *nodeBasedBalancer, metadata *mockMetadata, namespace string) (bool, error) {
+	t.Helper()
+	dataServers, err := metadata.ListDataServer()
+	assert.NoError(t, err)
+	candidates, candidatesMetadata := dataServersToCandidatesAndMetadata(dataServers)
+	shard := shardInfo(42, "sv-1", "sv-2")
+	shard.Namespace = namespace
+	loadRatios := single.DefaultShardsRank(&model.RatioParams{NodeShardsInfos: map[string][]model.ShardInfo{
+		"sv-1": {shard},
+		"sv-2": {shard},
+		"sv-3": {},
+	}})
+	return b.swapShard(&model.ShardLoadRatio{ShardInfo: &shard, Ratio: 1}, metadata.nodeMap["sv-1"],
+		&sync.WaitGroup{}, loadRatios, candidates, candidatesMetadata)
+}
+
+func shardInfo(shard int64, ensemble ...string) model.ShardInfo {
+	info := model.ShardInfo{Namespace: "ns", ShardID: shard}
+	for _, node := range ensemble {
+		info.Ensemble = append(info.Ensemble, &proto.DataServerIdentity{Name: new(node), Internal: node})
+	}
+	return info
 }

@@ -24,9 +24,10 @@ import (
 	"time"
 
 	hashicorpraft "github.com/hashicorp/raft"
-	"github.com/magodo/slog2hclog"
 	"github.com/pkg/errors"
 	"go.uber.org/multierr"
+
+	"github.com/oxia-db/oxia/common/failpoint"
 )
 
 type Raft struct {
@@ -53,6 +54,16 @@ func New(
 	raftBootstrapNodes []string,
 	raftDataDir string,
 	interceptor Interceptor,
+) (*Raft, error) {
+	return newRaft(raftAddress, raftBootstrapNodes, raftDataDir, interceptor, nil)
+}
+
+func newRaft(
+	raftAddress string,
+	raftBootstrapNodes []string,
+	raftDataDir string,
+	interceptor Interceptor,
+	failpoints *failpoint.Failpoints,
 ) (_ *Raft, err error) {
 	metadataRaft := &Raft{
 		logger:      slog.With(slog.String("component", "metadata-provider-raft")),
@@ -64,6 +75,7 @@ func New(
 		slog.With(slog.String("component", "metadata-provider-raft-state-container")),
 		metadataRaft.interceptor,
 	)
+	metadataRaft.sc.failpoints = failpoints
 
 	nodeID := raftAddress
 	dataDir := filepath.Join(raftDataDir, nodeID)
@@ -79,7 +91,7 @@ func New(
 	config.LogLevel = "INFO"
 	levelVar := &slog.LevelVar{}
 	levelVar.Set(slog.LevelInfo)
-	config.Logger = slog2hclog.New(metadataRaft.logger, levelVar)
+	config.Logger = newHclogAdapter(metadataRaft.logger, levelVar)
 
 	addr, err := net.ResolveTCPAddr("tcp", raftAddress)
 	if err != nil {
@@ -113,9 +125,11 @@ func New(
 		return nil, errors.Wrap(err, "failed to create raft node")
 	}
 
-	if hasState, err := hashicorpraft.HasExistingState(metadataRaft.store, metadataRaft.store, snapshotStore); err != nil {
+	hasState, err := hashicorpraft.HasExistingState(metadataRaft.store, metadataRaft.store, snapshotStore)
+	if err = failpoints.Fail("new.hasExistingState", err); err != nil {
 		return nil, errors.Wrap(err, "failed to check existing state")
-	} else if !hasState {
+	}
+	if !hasState {
 		configuration := hashicorpraft.Configuration{
 			Servers: getRaftServers(raftBootstrapNodes),
 		}

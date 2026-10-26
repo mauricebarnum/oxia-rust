@@ -132,11 +132,8 @@ func (s *publicRpcServer) GetShardAssignments(req *proto.ShardAssignmentsRequest
 	}
 	err := s.assignmentDispatcher.RegisterForUpdates(req, srv)
 	if err != nil {
-		s.log.Warn(
-			"Failed to add client for shards assignments notifications",
-			slog.Any("error", err),
-			slog.String("peer", rpc.GetPeer(streamContext)),
-		)
+		s.complain("Failed to add client for shards assignments notifications", err,
+			slog.String("peer", rpc.GetPeer(streamContext)))
 		return constant.IntoGrpcStatusError(err)
 	}
 
@@ -159,10 +156,7 @@ func (s *publicRpcServer) Write(ctx context.Context, write *proto.WriteRequest) 
 
 	wr, err := lc.WriteBlock(ctx, write)
 	if err != nil {
-		s.log.Warn(
-			"Failed to perform write operation",
-			slog.Any("error", err),
-		)
+		s.complain("Failed to perform write operation", err)
 		return nil, constant.IntoGrpcStatusError(err)
 	}
 
@@ -286,27 +280,34 @@ func (s *publicRpcServer) WriteStream(stream proto.OxiaClient_WriteStreamServer)
 	select {
 	case err := <-finished:
 		if err != nil {
-			s.log.Warn("Failed to perform write operation", slog.Any("error", err))
+			s.complain("Failed to perform write operation", err)
 			return constant.IntoGrpcStatusError(err)
 		}
 		return nil
 	case <-streamCtx.Done():
 		return streamCtx.Err()
 	// Monitor the leader context to make sure the gRPC server can be gracefully shut down.
+	// The leader controller is closed: this node no longer leads the shard. Reply with a
+	// retryable error, as the plain context error would reach the client as a
+	// non-retryable Canceled status, failing the in-flight writes.
 	case <-leaderCtx.Done():
-		return leaderCtx.Err()
+		return constant.IntoGrpcStatusError(constant.ErrNodeIsNotLeader)
 	}
 }
 
-// warnOnStreamError logs failures of streaming data operations, except the
-// expected ones. The stream context ends whenever the client goes away — it
-// cancels the RPC, its deadline expires, or its connection shuts down — so
-// failures with a done context are not worth a warning.
-func (s *publicRpcServer) warnOnStreamError(ctx context.Context, operation string, err error) {
-	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+// complain logs the failure of a client request, except a cancellation or an
+// expired deadline. The failures that redirect the client to another node are
+// logged at debug level.
+func (s *publicRpcServer) complain(msg string, err error, args ...any) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return
 	}
-	s.log.Warn("Failed to perform operation", slog.String("operation", operation), slog.Any("error", err))
+	args = append(args, slog.Any("error", err))
+	if errors.Is(err, constant.ErrNodeIsNotLeader) || errors.Is(err, constant.ErrResourceUnavailable) {
+		s.log.Debug(msg, args...)
+		return
+	}
+	s.log.Warn(msg, args...)
 }
 
 func (s *publicRpcServer) Read(request *proto.ReadRequest, stream proto.OxiaClient_ReadServer) error {
@@ -332,7 +333,7 @@ func (s *publicRpcServer) Read(request *proto.ReadRequest, stream proto.OxiaClie
 		err = batcher.Flush()
 	}
 	if err != nil {
-		s.warnOnStreamError(ctx, "read", err)
+		s.complain("Failed to perform operation", err, slog.String("operation", "read"))
 		return constant.IntoGrpcStatusError(err)
 	}
 	return nil
@@ -351,15 +352,27 @@ func (s *publicRpcServer) List(request *proto.ListRequest, stream proto.OxiaClie
 	if err != nil {
 		return err
 	}
+	// The leader controller includes the end of the range when the request says
+	// so, and the responses say whether it did
+	request.EndInclusive = includesRangeEnd(lc, request.EndInclusive)
+	sent := false
 	batcher := concurrent.NewBatcher[string](maxTotalListKeyCount, maxTotalListKeySize,
 		func(key string) int { return protowire.SizeBytes(len(key)) },
-		func(container []string) error { return stream.Send(&proto.ListResponse{Keys: container}) })
+		func(container []string) error {
+			sent = true
+			return stream.Send(&proto.ListResponse{Keys: container, EndInclusive: request.EndInclusive})
+		})
 
 	if err = lc.List(ctx, request, batcher.Add); err == nil {
 		err = batcher.Flush()
 	}
+	if err == nil && request.EndInclusive && !sent {
+		// Without keys in the range, the client still needs a response that says
+		// that it includes its end
+		err = stream.Send(&proto.ListResponse{EndInclusive: true})
+	}
 	if err != nil {
-		s.warnOnStreamError(ctx, "list", err)
+		s.complain("Failed to perform operation", err, slog.String("operation", "list"))
 		return constant.IntoGrpcStatusError(err)
 	}
 	return nil
@@ -381,20 +394,40 @@ func (s *publicRpcServer) RangeScan(request *proto.RangeScanRequest, stream prot
 		return err
 	}
 
+	// The leader controller includes the end of the range when the request says
+	// so, and the responses say whether it did
+	request.EndInclusive = includesRangeEnd(lc, request.EndInclusive)
+	sent := false
 	batcher := concurrent.NewBatcher[*proto.GetResponse](maxTotalScanBatchCount, maxTotalReadValueSize,
 		func(response *proto.GetResponse) int { return len(response.Value) },
 		func(container []*proto.GetResponse) error {
-			return stream.Send(&proto.RangeScanResponse{Records: container})
+			sent = true
+			return stream.Send(&proto.RangeScanResponse{Records: container, EndInclusive: request.EndInclusive})
 		})
 
 	if err = lc.RangeScan(ctx, request, batcher.Add); err == nil {
 		err = batcher.Flush()
 	}
+	if err == nil && request.EndInclusive && !sent {
+		// Without keys in the range, the client still needs a response that says
+		// that it includes its end
+		err = stream.Send(&proto.RangeScanResponse{EndInclusive: true})
+	}
 	if err != nil {
-		s.warnOnStreamError(ctx, "range-scan", err)
+		s.complain("Failed to perform operation", err, slog.String("operation", "range-scan"))
 		return constant.IntoGrpcStatusError(err)
 	}
 	return nil
+}
+
+// includesRangeEnd reports whether the leader includes the end of the range of
+// a List or a RangeScan request, with end_inclusive: only on a shard that
+// enabled FEATURE_RANGE_END_INCLUSIVE, which a server without it can't lead
+// afterwards. The responses say whether it did, since older servers ignore
+// end_inclusive. It's checked once per request, as the feature can be enabled
+// while the request runs.
+func includesRangeEnd(lc lead.LeaderController, endInclusive bool) bool {
+	return endInclusive && lc.IsFeatureEnabled(proto.Feature_FEATURE_RANGE_END_INCLUSIVE)
 }
 
 func (s *publicRpcServer) GetNotifications(req *proto.NotificationsRequest, stream proto.OxiaClient_GetNotificationsServer) error {
@@ -413,8 +446,9 @@ func (s *publicRpcServer) GetNotifications(req *proto.NotificationsRequest, stre
 	ctx := stream.Context()
 
 	finish := make(chan error, 1)
-	lc.GetNotifications(ctx, req, concurrent.NewStreamOnce(func(notificationBatch *proto.NotificationBatch) error {
-		return stream.Send(notificationBatch)
+	lc.GetNotifications(ctx, req, concurrent.NewStreamOnce(func(notificationBatch *proto.EncodedNotificationBatch) error {
+		// The codec sends the encoded batch as it is
+		return stream.SendMsg(notificationBatch)
 	}, func(err error) {
 		channel.PushNoBlock(finish, err)
 	}))
@@ -424,10 +458,7 @@ func (s *publicRpcServer) GetNotifications(req *proto.NotificationsRequest, stre
 		select {
 		case err := <-finish:
 			if err != nil {
-				s.log.Warn(
-					"Failed to handle notifications request",
-					slog.Any("error", err),
-				)
+				s.complain("Failed to handle notifications request", err)
 				return constant.IntoGrpcStatusError(err)
 			}
 			return nil
@@ -455,10 +486,7 @@ func (s *publicRpcServer) CreateSession(ctx context.Context, req *proto.CreateSe
 	}
 	res, err := lc.CreateSession(req)
 	if err != nil {
-		s.log.Warn(
-			"Failed to create session",
-			slog.Any("error", err),
-		)
+		s.complain("Failed to create session", err)
 		return nil, constant.IntoGrpcStatusError(err)
 	}
 	return res, nil
@@ -479,10 +507,7 @@ func (s *publicRpcServer) KeepAlive(ctx context.Context, req *proto.SessionHeart
 	}
 	err = lc.KeepAlive(req.SessionId)
 	if err != nil {
-		s.log.Warn(
-			"Failed to listen to heartbeats",
-			slog.Any("error", err),
-		)
+		s.complain("Failed to listen to heartbeats", err)
 		return nil, constant.IntoGrpcStatusError(err)
 	}
 	return &proto.KeepAliveResponse{}, nil
@@ -501,7 +526,7 @@ func (s *publicRpcServer) CloseSession(ctx context.Context, req *proto.CloseSess
 	res, err := lc.CloseSession(req)
 	if err != nil {
 		if !errors.Is(err, constant.ErrSessionNotFound) {
-			s.log.Warn("Failed to close session", slog.Any("error", err))
+			s.complain("Failed to close session", err)
 		}
 		return nil, constant.IntoGrpcStatusError(err)
 	}
@@ -557,7 +582,7 @@ func (s *publicRpcServer) resolveLeader(ctx context.Context, shardId *int64) (le
 		if errors.Is(err, constant.ErrNodeIsNotLeader) {
 			return nil, constant.IntoGrpcStatusError(err, constant.WithLeaderHint(shardID, s.assignmentDispatcher.GetLeader(shardID)))
 		}
-		s.log.Warn("Failed to get the leader controller", slog.Any("error", err))
+		s.complain("Failed to get the leader controller", err)
 		return nil, constant.IntoGrpcStatusError(err)
 	}
 	return lc, nil
