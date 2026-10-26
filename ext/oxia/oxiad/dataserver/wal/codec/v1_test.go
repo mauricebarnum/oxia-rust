@@ -16,12 +16,15 @@ package codec
 
 import (
 	"encoding/binary"
+	"math"
 	"os"
 	"path"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/oxia-db/oxia/oxiad/common/vfs"
 )
 
 func TestV1_GetHeaderSize(t *testing.T) {
@@ -33,13 +36,48 @@ func TestV1_Codec(t *testing.T) {
 	payload := []byte{1}
 	recordSize, _ := v1.WriteRecord(buf, 0, 0, payload)
 	assert.EqualValues(t, recordSize, 5)
-	getRecordSize, err := v1.GetRecordSize(buf, 0)
+	payloadSize, _, _, err := v1.ReadHeaderWithValidation(buf, 0)
 	assert.NoError(t, err)
-	assert.EqualValues(t, getRecordSize, recordSize)
+	assert.EqualValues(t, recordSize-v1PayloadSizeLen, payloadSize)
 
 	getPayload, _, _, err := v1.ReadRecordWithValidation(buf, 0)
 	assert.NoError(t, err)
 	assert.EqualValues(t, payload, getPayload)
+}
+
+func TestV1_BreakingPoint_SizeOverflow(t *testing.T) {
+	buf := make([]byte, 100)
+
+	v1.WriteRecord(buf, 0, 0, []byte{1})
+	// a size this close to the uint32 max wraps once the header size is added to it
+	binary.BigEndian.PutUint32(buf, math.MaxUint32)
+
+	_, _, _, err := v1.ReadHeaderWithValidation(buf, 0)
+	assert.ErrorIs(t, err, ErrOffsetOutOfBounds)
+}
+
+func TestV1_BreakingPoint_PartialHeader(t *testing.T) {
+	buf := make([]byte, 100)
+
+	v1.WriteRecord(buf, 0, 0, []byte{1})
+
+	// an offset with fewer than HeaderSize bytes behind it has no readable header
+	_, _, _, err := v1.ReadHeaderWithValidation(buf, uint32(len(buf))-1)
+	assert.ErrorIs(t, err, ErrOffsetOutOfBounds)
+}
+
+func TestV1_RecoverIndexWithSizeOverflow(t *testing.T) {
+	buf := make([]byte, 100)
+
+	v1.WriteRecord(buf, 0, 0, []byte{1})
+	// HeaderSize + payloadSize wraps to exactly 0, so recovery must not advance by nothing
+	binary.BigEndian.PutUint32(buf, math.MaxUint32-v1.HeaderSize+1)
+
+	index, _, newFileOffset, lastEntryOffset, err := v1.RecoverIndex(buf, 0, 0, nil)
+	assert.NoError(t, err)
+	assert.Empty(t, index)
+	assert.EqualValues(t, 0, newFileOffset)
+	assert.EqualValues(t, -1, lastEntryOffset)
 }
 
 func TestV1_WriteReadIndex(t *testing.T) {
@@ -51,9 +89,9 @@ func TestV1_WriteReadIndex(t *testing.T) {
 		binary.BigEndian.PutUint32(indexBuf[i*4:], uint32(i))
 	}
 	p := path.Join(dir, fileName+v1.GetIdxExtension())
-	err := v1.WriteIndex(p, indexBuf)
+	err := v1.WriteIndex(vfs.OSFS{}, p, indexBuf)
 	assert.NoError(t, err)
-	index, err := v1.ReadIndex(p)
+	index, err := v1.ReadIndex(vfs.OSFS{}, p)
 	assert.NoError(t, err)
 	for i := 0; i < elementsNum; i++ {
 		idx := ReadInt(index, uint32(i*4))
@@ -63,9 +101,9 @@ func TestV1_WriteReadIndex(t *testing.T) {
 
 func TestV1_ReadEmptyIndex(t *testing.T) {
 	p := path.Join(t.TempDir(), "empty-index"+v1.GetIdxExtension())
-	assert.NoError(t, v1.WriteIndex(p, nil))
+	assert.NoError(t, v1.WriteIndex(vfs.OSFS{}, p, nil))
 
-	_, err := v1.ReadIndex(p)
+	_, err := v1.ReadIndex(vfs.OSFS{}, p)
 	assert.ErrorIs(t, err, ErrDataCorrupted)
 }
 
@@ -96,4 +134,26 @@ func TestV1_RecoverIndex(t *testing.T) {
 		assert.NoError(t, err)
 		assert.EqualValues(t, payloads[i], payload)
 	}
+}
+
+func TestV1ReadRecordWithValidationRejectsTruncatedHeader(t *testing.T) {
+	_, _, _, err := v1.ReadRecordWithValidation(make([]byte, 2), 0)
+	assert.ErrorIs(t, err, ErrOffsetOutOfBounds)
+}
+
+func TestV1WriteIndexFailsWhenDirectoryIsMissing(t *testing.T) {
+	p := path.Join(t.TempDir(), "missing", "0"+v1.GetIdxExtension())
+
+	err := v1.WriteIndex(vfs.OSFS{}, p, []byte{0, 0, 0, 1})
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestV1ReadIndexFailsWhenFileIsMissing(t *testing.T) {
+	_, err := v1.ReadIndex(vfs.OSFS{}, path.Join(t.TempDir(), "0"+v1.GetIdxExtension()))
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestV1ReadIndexFailsWhenPathIsDirectory(t *testing.T) {
+	_, err := v1.ReadIndex(vfs.OSFS{}, t.TempDir())
+	assert.ErrorContains(t, err, "failed to read segment index file")
 }

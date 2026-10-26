@@ -66,6 +66,26 @@ func TestQuorumAckTrackerRF2(t *testing.T) {
 	assert.EqualValues(t, 2, at.CommitOffset())
 }
 
+func TestQuorumAckTrackerAckBeyondHead(t *testing.T) {
+	at := NewQuorumAckTracker(2, 1, wal.InvalidOffset)
+	at.AdvanceHeadOffset(2)
+
+	c1, err := at.NewCursorAcker(wal.InvalidOffset)
+	assert.NoError(t, err)
+
+	// An ack for an offset the leader never wrote must be ignored: it must not
+	// commit the entries that do exist, and it must not push the cursor past
+	// the head.
+	c1.Ack(100)
+	assert.EqualValues(t, 2, at.HeadOffset())
+	assert.Equal(t, wal.InvalidOffset, at.CommitOffset())
+
+	// A later ack for the real head still commits, proving the out-of-range
+	// ack did not poison the cursor's tracked offset.
+	c1.Ack(2)
+	assert.EqualValues(t, 2, at.CommitOffset())
+}
+
 func TestQuorumAckTrackerRF3(t *testing.T) {
 	at := NewQuorumAckTracker(3, 1, wal.InvalidOffset)
 
@@ -305,8 +325,7 @@ func TestQuorumAckTracker_ClearPending(t *testing.T) {
 	}()
 
 	time.Sleep(100 * time.Millisecond)
-	err := at.Close()
-	assert.NoError(t, err)
+	at.Close()
 
 	// Wait for the result from asyncRes
 	select {
@@ -467,7 +486,7 @@ func TestQuorumAckTracker_CloseWaitsForInFlightCallback(t *testing.T) {
 
 	closeDone := make(chan struct{})
 	go func() {
-		assert.NoError(t, at.Close())
+		at.Close()
 		close(closeDone)
 	}()
 
@@ -600,4 +619,24 @@ func TestQuorumAckTracker_WaitForHeadOffsetOrCommitAdvance(t *testing.T) {
 			return false
 		}
 	}, 10*time.Second, 10*time.Millisecond)
+}
+
+// A closed tracker doesn't account the acks of its cursors anymore.
+func TestCursorAckerAckAfterTrackerClose(t *testing.T) {
+	at := NewQuorumAckTracker(3, 1, wal.InvalidOffset)
+	c1, err := at.NewCursorAcker(wal.InvalidOffset)
+	assert.NoError(t, err)
+
+	at.Close()
+	c1.Ack(1)
+	assert.Equal(t, wal.InvalidOffset, at.CommitOffset())
+}
+
+func TestQuorumAckTrackerWaitForCommitOffsetCanceled(t *testing.T) {
+	at := NewQuorumAckTracker(3, 1, wal.InvalidOffset)
+	defer at.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	assert.ErrorIs(t, at.WaitForCommitOffset(ctx, 1), context.Canceled)
 }

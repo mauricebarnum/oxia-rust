@@ -19,6 +19,7 @@ type listOptions struct {
 
 	secondaryIndexName *string
 	showInternalKeys   bool
+	endInclusive       bool
 }
 
 // ListOption represents an option for the [SyncClient.List] operation.
@@ -52,8 +53,9 @@ func (u *useIndex) applyGet(opts *getOptions) {
 	opts.secondaryIndexName = &u.indexName
 }
 
-// UseIndex let the users specify a different index to follow for the
-// Note: The returned list will contain they primary keys of the records.
+// UseIndex selects the secondary index used to interpret keys and key ranges
+// in Get, List, and RangeScan operations. Index names must not contain '/'.
+// Returned record keys remain the corresponding primary keys.
 func UseIndex(indexName string) ListOption {
 	return &useIndex{indexName}
 }
@@ -80,4 +82,33 @@ func (*showInternalKeys) applyGet(*getOptions) {
 // By default, only user's keys are returned.
 func ShowInternalKeys(show bool) ListOption {
 	return &showInternalKeys{show}
+}
+
+// ///////////////////////////////////////////////////////////////////////////////////
+
+type endInclusive struct{}
+
+func (endInclusive) applyList(opts *listOptions) {
+	opts.endInclusive = true
+}
+
+func (endInclusive) applyRangeScan(opts *rangeScanOptions) {
+	opts.endInclusive = true
+}
+
+func (endInclusive) applyGet(*getOptions) {
+	// No-op
+}
+
+// EndInclusive makes List and RangeScan include the end of the range: the
+// record whose key is maxKeyExclusive, or with [UseIndex], the records whose
+// secondary key is maxKeyExclusive. An empty maxKeyExclusive is then the empty
+// key, rather than no bound. With [UseIndex], a range from a key to the same
+// key returns the records whose secondary key is that key.
+//
+// The leader of a shard includes the end once all the servers of the shard
+// support it. Until then, List and RangeScan fail with
+// [ErrEndInclusiveUnsupported], rather than leave the end out.
+func EndInclusive() ListOption {
+	return endInclusive{}
 }

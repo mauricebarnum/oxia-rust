@@ -17,9 +17,13 @@ package compare
 import (
 	"bytes"
 	"fmt"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/oxia-db/oxia/common/constant"
 )
 
 func TestEncodeDecode(t *testing.T) {
@@ -111,6 +115,159 @@ func TestEncodeInternalKeys(t *testing.T) {
 	}
 }
 
+func TestEncoderIsInternalKeyEmpty(t *testing.T) {
+	for _, encoder := range []Encoder{EncoderNatural, EncoderHierarchical} {
+		t.Run(encoder.Name(), func(t *testing.T) {
+			assert.False(t, encoder.IsInternalKey(nil))
+			assert.False(t, encoder.IsInternalKey([]byte{}))
+		})
+	}
+}
+
+// A key carries its own separator count in the 2-byte prefix, and that count
+// shares the prefix with the internal-key marker. Keys with more separators
+// than the prefix can hold must not reach into the marker, nor wrap around and
+// come back as a different key.
+func TestEncodeDeeplyNestedKeys(t *testing.T) {
+	enc := EncoderHierarchical
+
+	for _, test := range []struct {
+		name     string
+		sepCount int
+	}{
+		{"below the marker", maxSeparatorCount - 1},
+		{"at the marker", internalKeysBitMarker},
+		{"past the marker", internalKeysBitMarker + 1},
+		{"wrapping the prefix", 1 << 16},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// The trailing "a" keeps the last two bytes from being separators,
+			// which would otherwise drop the count by one
+			key := strings.Repeat("/", test.sepCount) + "a"
+
+			encoded := enc.Encode(key)
+			assert.False(t, enc.IsInternalKey(encoded))
+			assert.Equal(t, key, enc.Decode(encoded))
+
+			// and it still sorts before the internal keys
+			assert.Equal(t, -1, bytes.Compare(encoded, enc.Encode("__oxia/xyz")))
+		})
+	}
+}
+
+func TestEncodeDeeplyNestedInternalKeys(t *testing.T) {
+	enc := EncoderHierarchical
+
+	key := constant.InternalKeyPrefix + strings.Repeat("/", 1<<16) + "a"
+	encoded := enc.Encode(key)
+
+	assert.True(t, enc.IsInternalKey(encoded))
+	assert.Equal(t, key, enc.Decode(encoded))
+}
+
+func TestEncoderAppendEncodeMatchesEncode(t *testing.T) {
+	keys := []string{"", "a", "/", "//", "/a", "/a/", "/a//", "a//", "/a/b/c", "a\xffb", strings.Repeat("/", 1<<16) + "a"}
+	for _, key := range slices.Clone(keys) {
+		keys = append(keys, constant.InternalKeyPrefix+key)
+	}
+
+	for _, encoder := range []Encoder{EncoderNatural, EncoderHierarchical} {
+		t.Run(encoder.Name(), func(t *testing.T) {
+			// One buffer for all the keys, as a caller reuses it, after bytes
+			// that the encoding must leave as they are
+			buf := []byte("prefix")
+			for _, key := range keys {
+				expected := append([]byte("prefix"), encoder.Encode(key)...)
+				buf = encoder.AppendEncode(buf[:len("prefix")], key)
+				assert.Equal(t, expected, buf, "%.40q", key)
+			}
+
+			// A buffer with room for the key takes no allocation
+			assert.Zero(t, testing.AllocsPerRun(10, func() {
+				buf = encoder.AppendEncode(buf[:0], "__oxia/a/b//")
+			}))
+		})
+	}
+}
+
+// The keys with a prefix are in a single range with the natural encoder, and in
+// one range per level with the hierarchical one. From a key without the prefix,
+// NextStart and PrevEnd have to move past the key, towards the nearest keys
+// with the prefix, without skipping any.
+func TestPrefixRanges(t *testing.T) {
+	// Every key of up to 4 bytes made of 'a', 'b' and the separator, and keys
+	// deeper than the level can count, each as a regular and an internal key
+	var keys []string
+	var add func(key string)
+	add = func(key string) {
+		keys = append(keys, key, constant.InternalKeyPrefix+key)
+		if len(key) < 4 {
+			for _, c := range []string{"a", "b", "/"} {
+				add(key + c)
+			}
+		}
+	}
+	add("")
+	for _, key := range []string{strings.Repeat("a/", 1<<15) + "a", strings.Repeat("b/", 1<<15) + "b"} {
+		keys = append(keys, key, constant.InternalKeyPrefix+key)
+	}
+
+	for _, encoder := range []Encoder{EncoderNatural, EncoderHierarchical} {
+		t.Run(encoder.Name(), func(t *testing.T) {
+			encoded := make(map[string][]byte, len(keys))
+			for _, key := range keys {
+				encoded[key] = encoder.Encode(key)
+			}
+			slices.SortFunc(keys, func(a, b string) int { return bytes.Compare(encoded[a], encoded[b]) })
+
+			for _, prefix := range []string{"", "a", "a/", "a//", "/", "//", "b/a", "ba/"} {
+				for _, prefix := range []string{prefix, constant.InternalKeyPrefix + prefix} {
+					ranges := encoder.PrefixRanges(prefix)
+					lower, upper := ranges.Bounds()
+
+					// The positions of the keys with the prefix
+					var withPrefix []int
+					for i, key := range keys {
+						hasPrefix := strings.HasPrefix(key, prefix)
+						assert.Equal(t, hasPrefix, ranges.Contains(encoded[key]), "%q %.40q", prefix, key)
+						if hasPrefix {
+							withPrefix = append(withPrefix, i)
+							assert.LessOrEqual(t, bytes.Compare(lower, encoded[key]), 0, "%q %.40q", prefix, key)
+							assert.True(t, upper == nil || bytes.Compare(encoded[key], upper) < 0, "%q %.40q", prefix, key)
+						}
+					}
+
+					for i, key := range keys {
+						if strings.HasPrefix(key, prefix) {
+							continue
+						}
+						n, _ := slices.BinarySearch(withPrefix, i)
+						before, after := withPrefix[:n], withPrefix[n:]
+
+						if next := ranges.NextStart(encoded[key]); next == nil {
+							assert.Empty(t, after, "%q %.40q", prefix, key)
+						} else {
+							assert.Positive(t, bytes.Compare(next, encoded[key]), "%q %.40q", prefix, key)
+							if len(after) > 0 {
+								assert.GreaterOrEqual(t, bytes.Compare(encoded[keys[after[0]]], next), 0, "%q %.40q", prefix, key)
+							}
+						}
+
+						if prev := ranges.PrevEnd(encoded[key]); prev == nil {
+							assert.Empty(t, before, "%q %.40q", prefix, key)
+						} else {
+							assert.LessOrEqual(t, bytes.Compare(prev, encoded[key]), 0, "%q %.40q", prefix, key)
+							if len(before) > 0 {
+								assert.Negative(t, bytes.Compare(encoded[keys[before[len(before)-1]]], prev), "%q %.40q", prefix, key)
+							}
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
 // The buffer passed to Decode is Pebble memory, handed out under an explicit
 // read-only contract (Iterator.Key): it must not be modified. In the current
 // pebble version it is the iterator's own position buffer, which pebble keeps
@@ -129,6 +286,20 @@ func TestEncoderNaturalDecodeDoesNotMutateInput(t *testing.T) {
 	originalPlain := bytes.Clone(plain)
 	assert.Equal(t, "a/b/c", encoderNatural{}.Decode(plain))
 	assert.Equal(t, originalPlain, plain)
+}
+
+func TestGetEncoder(t *testing.T) {
+	encoder, err := GetEncoder("hierarchical")
+	assert.NoError(t, err)
+	assert.Equal(t, "hierarchical", encoder.Name())
+
+	encoder, err = GetEncoder("natural")
+	assert.NoError(t, err)
+	assert.Equal(t, "natural", encoder.Name())
+
+	encoder, err = GetEncoder("unknown")
+	assert.EqualError(t, err, "unknown encoder unknown")
+	assert.Nil(t, encoder)
 }
 
 func BenchmarkEncoderNaturalDecode(b *testing.B) {

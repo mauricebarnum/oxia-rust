@@ -16,10 +16,7 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"log/slog"
-	"os"
 	"sync"
 
 	"google.golang.org/grpc/codes"
@@ -117,10 +114,7 @@ func (r *maelstromReplicationRpcProvider) HandleStreamError(streamId int64) {
 		return
 	}
 
-	select {
-	case s.failed <- status.Error(codes.Unavailable, "replicate stream reset by peer"):
-	default:
-	}
+	s.failed <- status.Error(codes.Unavailable, "replicate stream reset by peer")
 }
 
 func (r *maelstromReplicationRpcProvider) Truncate(follower string, req *proto.TruncateRequest) (*proto.TruncateResponse, error) {
@@ -146,10 +140,18 @@ type maelstromReplicateClient struct {
 	md        metadata.MD
 	responses chan *proto.Ack
 	failed    chan error
+
+	// Sequence number of the next append. Only the cursor's sender goroutine
+	// touches it: like on a gRPC stream, Send is never called concurrently.
+	nextSeq int64
 }
 
 func (m *maelstromReplicateClient) Send(request *proto.Append) error {
-	b, err := json.Marshal(&Message[OxiaStreamMessage]{
+	oxiaMsg, err := toJSON(request)
+	if err != nil {
+		return err
+	}
+	if err := sendResponse(&Message[OxiaStreamMessage]{
 		Src:  thisNode,
 		Dest: m.follower,
 		Body: OxiaStreamMessage{
@@ -157,15 +159,14 @@ func (m *maelstromReplicateClient) Send(request *proto.Append) error {
 				Type:  MsgTypeAppend,
 				MsgId: msgIdGenerator.Add(1),
 			},
-			OxiaMsg:  toJSON(request),
+			OxiaMsg:  oxiaMsg,
 			StreamId: m.streamId,
+			Seq:      m.nextSeq,
 		},
-	})
-	if err != nil {
-		panic("failed to serialize json")
+	}); err != nil {
+		return err
 	}
-
-	fmt.Fprintln(os.Stdout, string(b))
+	m.nextSeq++
 	return nil
 }
 

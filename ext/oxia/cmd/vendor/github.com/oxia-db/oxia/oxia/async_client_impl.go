@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/pkg/errors"
 	"go.uber.org/multierr"
@@ -27,7 +28,7 @@ import (
 	"github.com/oxia-db/oxia/common/concurrent"
 	commonbatch "github.com/oxia-db/oxia/oxia/batch"
 
-	"github.com/oxia-db/oxia/common/compare"
+	"github.com/oxia-db/oxia/common/constant"
 	"github.com/oxia-db/oxia/common/proto"
 	"github.com/oxia-db/oxia/oxia/internal"
 	"github.com/oxia-db/oxia/oxia/internal/batch"
@@ -39,7 +40,7 @@ type clientImpl struct {
 	sync.Mutex
 	options           clientOptions
 	shardManager      internal.ShardManager
-	writeBatchManager *batch.Manager
+	writeBatchManager *batch.WriteManager
 	readBatchManager  *batch.Manager
 	executor          internal.Executor
 	sessions          *sessions
@@ -81,12 +82,27 @@ func NewAsyncClient(serviceAddress string, opts ...ClientOption) (AsyncClient, e
 	rpcProvider := internal.NewRpcProvider(ctx, options.namespace, options.tls, options.authentication, options.serviceAddress, func() internal.ShardManager {
 		return shardManager
 	}, grpcDialOptions...)
+
+	batcherFactory := batch.NewBatcherFactory(
+		rpcProvider,
+		options.namespace,
+		options.batchLinger,
+		options.maxRequestsPerBatch,
+		metrics.NewMetrics(options.meterProvider),
+		options.requestTimeout)
+	batcherFactory.WriteRerouter = c.rerouteWrites
+	batcherFactory.ReadRerouter = c.rerouteReads
+	// The shard manager tells the write batchers when shards are replaced
+	c.writeBatchManager = batch.NewWriteManager(ctx, func(ctx context.Context, shard *int64) commonbatch.Batcher {
+		return batcherFactory.NewWriteBatcher(ctx, shard, options.maxBatchSize)
+	}, c.forwardWrite)
+
 	if options.failureInjection.Contains(DizzyShardManager) {
 		shardManager, err = internal.NewDizzyShardManager(internal.NewShardStrategy(), rpcProvider, serviceAddress,
-			options.namespace, options.requestTimeout)
+			options.namespace, options.requestTimeout, c.writeBatchManager.ShardsReplaced)
 	} else {
 		shardManager, err = internal.NewShardManager(internal.NewShardStrategy(), rpcProvider, serviceAddress,
-			options.namespace, options.requestTimeout)
+			options.namespace, options.requestTimeout, c.writeBatchManager.ShardsReplaced)
 	}
 	if err != nil {
 		cancel()
@@ -96,46 +112,108 @@ func NewAsyncClient(serviceAddress string, opts ...ClientOption) (AsyncClient, e
 	c.rpcProvider = rpcProvider
 	c.shardManager = shardManager
 
-	batcherFactory := batch.NewBatcherFactory(
-		rpcProvider,
-		options.namespace,
-		options.batchLinger,
-		options.maxRequestsPerBatch,
-		metrics.NewMetrics(options.meterProvider),
-		options.requestTimeout)
-	c.writeBatchManager = batch.NewManager(ctx, func(ctx context.Context, shard *int64) commonbatch.Batcher {
-		return batcherFactory.NewWriteBatcher(ctx, shard, options.maxBatchSize)
-	})
 	c.readBatchManager = batch.NewManager(ctx, batcherFactory.NewReadBatcher)
 	c.executor = rpcProvider
 
 	c.sessions = newSessions(c.ctx, c.shardManager, c.rpcProvider, c.options)
 
-	batcherFactory.WriteRerouter = c.rerouteWrites
-	batcherFactory.ReadRerouter = c.rerouteReads
-
 	return c, nil
 }
 
-func (c *clientImpl) rerouteWrites(puts []model.PutCall, deletes []model.DeleteCall, deleteRanges []model.DeleteRangeCall) {
-	for _, put := range puts {
-		shardId := c.shardManager.Get(put.PartitionKeyOrKey())
-		c.writeBatchManager.Get(shardId).Add(put)
+// rerouteWrites hands off the calls of a batch that failed because its shard
+// was removed from the shard map to the shards that replaced it, in their
+// original order. Those shards hold the calls issued after the shard map
+// changed until the removed shard has handed off all its calls.
+func (c *clientImpl) rerouteWrites(removedShardId int64, puts []model.PutCall, deletes []model.DeleteCall,
+	deleteRanges []model.DeleteRangeCall) {
+	for _, call := range model.InOpIndexOrder(puts, deletes, deleteRanges) {
+		c.sendToSuccessors(removedShardId, call, c.writeBatchManager.HandOff)
 	}
-	for _, del := range deletes {
-		shardId := c.shardManager.Get(del.Key)
-		c.writeBatchManager.Get(shardId).Add(del)
+}
+
+// forwardWrite sends a call that was routed to a shard with the shard map from
+// before the shard was removed to the shards that replaced it.
+func (c *clientImpl) forwardWrite(removedShardId int64, call any) {
+	c.sendToSuccessors(removedShardId, call, c.writeBatchManager.Add)
+}
+
+// sendToSuccessors sends a call for a removed shard to the shard that replaced
+// it for the call's key, or, for a delete range without a partition key, to all
+// the shards that replaced it.
+func (c *clientImpl) sendToSuccessors(removedShardId int64, call any, send func(shardId int64, call any)) {
+	var key string
+	var fail func(error)
+	switch call := call.(type) {
+	case model.PutCall:
+		key, fail = call.PartitionKeyOrKey(), func(err error) { call.Callback(nil, err) }
+	case model.DeleteCall:
+		key, fail = call.PartitionKeyOrKey(), func(err error) { call.Callback(nil, err) }
+	case model.DeleteRangeCall:
+		if call.PartitionKey == nil {
+			c.sendDeleteRangeToSuccessors(removedShardId, call, send)
+			return
+		}
+		key, fail = *call.PartitionKey, func(err error) { call.Callback(nil, err) }
+	default:
+		panic("invalid call")
 	}
-	for _, dr := range deleteRanges {
-		for _, shardId := range c.shardManager.GetAll() {
-			c.writeBatchManager.Get(shardId).Add(dr)
+
+	if shardId, ok := c.shardManager.GetSuccessor(removedShardId, key); ok {
+		send(shardId, call)
+	} else {
+		fail(constant.ErrShardNotFound)
+	}
+}
+
+// sendDeleteRangeToSuccessors sends a delete range without a partition key
+// that was sent to a removed shard. The other shards got their own copy of the
+// delete range when it was issued, so it only goes to the shards that replaced
+// the removed one.
+func (c *clientImpl) sendDeleteRangeToSuccessors(removedShardId int64, call model.DeleteRangeCall,
+	send func(shardId int64, call any)) {
+	successors := c.shardManager.GetSuccessors(removedShardId)
+	if len(successors) == 0 {
+		call.Callback(nil, constant.ErrShardNotFound)
+		return
+	}
+	call.Callback = multiShardDeleteRangeCallback(len(successors), call.Callback)
+	for _, shardId := range successors {
+		send(shardId, call)
+	}
+}
+
+// multiShardDeleteRangeCallback invokes the callback once for a delete range
+// sent to multiple shards: with the first failure, discarding the remaining
+// responses, or otherwise with the OK response once every shard has responded.
+func multiShardDeleteRangeCallback(numShards int,
+	callback func(*proto.DeleteRangeResponse, error)) func(*proto.DeleteRangeResponse, error) {
+	m := sync.Mutex{}
+	counter := numShards
+
+	return func(response *proto.DeleteRangeResponse, err error) {
+		m.Lock()
+		if counter == 0 {
+			// Response already sent, nothing to do
+			m.Unlock()
+			return
+		}
+		if err != nil || response.Status != proto.Status_OK {
+			counter = 0
+		} else {
+			counter--
+		}
+		done := counter == 0
+		m.Unlock()
+
+		if done {
+			callback(response, err)
 		}
 	}
 }
 
 func (c *clientImpl) rerouteReads(gets []model.GetCall) {
 	for _, get := range gets {
-		shardId := c.shardManager.Get(get.Key)
+		shardId := c.shardManager.Get(get.PartitionKeyOrKey())
 		c.readBatchManager.Get(shardId).Add(get)
 	}
 }
@@ -145,12 +223,24 @@ func (c *clientImpl) Close() error {
 		c.sessions.Close(),
 		c.writeBatchManager.Close(),
 		c.readBatchManager.Close(),
+		c.shardManager.Close(),
 		c.rpcProvider.Close(),
 	)
 	c.cancel()
 
 	err = multierr.Append(err, c.closeNotifications())
 	return err
+}
+
+// validateKey checks that a key, or a key range bound, that a write sends is
+// valid UTF-8, as proto3 requires for strings. The server doesn't check it, and
+// its key encoders store a key that isn't on another key: e.g. with the natural
+// key sorting, "\xff\xffoxia/term" is stored on the internal key "__oxia/term".
+func validateKey(key string) error {
+	if !utf8.ValidString(key) {
+		return errors.Wrapf(ErrInvalidOptions, "key %q is not valid UTF-8", key)
+	}
+	return nil
 }
 
 func (c *clientImpl) Put(key string, value []byte, options ...PutOption) <-chan PutResult {
@@ -165,34 +255,40 @@ func (c *clientImpl) Put(key string, value []byte, options ...PutOption) <-chan 
 		close(ch)
 	}
 
+	if err := validateKey(key); err != nil {
+		callback(nil, err)
+		return ch
+	}
 	opts, err := newPutOptions(options)
 	if err != nil {
 		callback(nil, err)
 		return ch
 	}
 
-	shardId := c.getShardForKey(key, opts)
 	putCall := model.PutCall{
 		Key:                key,
 		Value:              value,
 		ExpectedVersionId:  opts.expectedVersion,
 		SequenceKeysDeltas: opts.sequenceKeysDeltas,
 		PartitionKey:       opts.partitionKey,
+		CallContext:        opts.callContext,
 		Callback:           callback,
 		SecondaryIndexes:   toSecondaryIndexes(opts.secondaryIndexes),
 	}
 	if opts.ephemeral {
 		putCall.ClientIdentity = &c.options.identity
-		c.sessions.executeWithSessionId(shardId, func(sessionId int64, err error) {
+		c.sessions.executeWithSessionId(func() int64 {
+			return c.getShardForKey(key, opts)
+		}, func(shardId int64, sessionId int64, err error) {
 			if err != nil {
 				callback(nil, err)
 				return
 			}
 			putCall.SessionId = &sessionId
-			c.writeBatchManager.Get(shardId).Add(putCall)
+			c.writeBatchManager.Add(shardId, putCall)
 		})
 	} else {
-		c.writeBatchManager.Get(shardId).Add(putCall)
+		c.writeBatchManager.Add(c.getShardForKey(key, opts), putCall)
 	}
 	return ch
 }
@@ -207,11 +303,17 @@ func (c *clientImpl) Delete(key string, options ...DeleteOption) <-chan error {
 		}
 		close(ch)
 	}
+	if err := validateKey(key); err != nil {
+		callback(nil, err)
+		return ch
+	}
 	opts := newDeleteOptions(options)
 	shardId := c.getShardForKey(key, opts)
-	c.writeBatchManager.Get(shardId).Add(model.DeleteCall{
+	c.writeBatchManager.Add(shardId, model.DeleteCall{
 		Key:               key,
 		ExpectedVersionId: opts.expectedVersion,
+		PartitionKey:      opts.partitionKey,
+		CallContext:       opts.callContext,
 		Callback:          callback,
 	})
 	return ch
@@ -219,10 +321,17 @@ func (c *clientImpl) Delete(key string, options ...DeleteOption) <-chan error {
 
 func (c *clientImpl) DeleteRange(minKeyInclusive string, maxKeyExclusive string, options ...DeleteRangeOption) <-chan error {
 	ch := make(chan error, 1)
+	for _, bound := range []string{minKeyInclusive, maxKeyExclusive} {
+		if err := validateKey(bound); err != nil {
+			ch <- err
+			close(ch)
+			return ch
+		}
+	}
 	opts := newDeleteRangeOptions(options)
 	if opts.partitionKey != nil {
 		shardId := c.getShardForKey("", opts)
-		c.doSingleShardDeleteRange(shardId, minKeyInclusive, maxKeyExclusive, ch)
+		c.doSingleShardDeleteRange(shardId, minKeyInclusive, maxKeyExclusive, opts.partitionKey, opts.callContext, ch)
 		return ch
 	}
 
@@ -232,9 +341,12 @@ func (c *clientImpl) DeleteRange(minKeyInclusive string, maxKeyExclusive string,
 
 	for _, shardId := range shardIDs {
 		// chInner := make(chan error, 1)
-		c.writeBatchManager.Get(shardId).Add(model.DeleteRangeCall{
+		c.writeBatchManager.Add(shardId, model.DeleteRangeCall{
 			MinKeyInclusive: minKeyInclusive,
 			MaxKeyExclusive: maxKeyExclusive,
+			// Shared by the calls to all the shards: once one is sent, the
+			// others are not dropped anymore
+			CallContext: opts.callContext,
 			Callback: func(response *proto.DeleteRangeResponse, err error) {
 				if err != nil {
 					wg.Fail(err)
@@ -257,10 +369,13 @@ func (c *clientImpl) DeleteRange(minKeyInclusive string, maxKeyExclusive string,
 	return ch
 }
 
-func (c *clientImpl) doSingleShardDeleteRange(shardId int64, minKeyInclusive string, maxKeyExclusive string, ch chan error) {
-	c.writeBatchManager.Get(shardId).Add(model.DeleteRangeCall{
+func (c *clientImpl) doSingleShardDeleteRange(shardId int64, minKeyInclusive string, maxKeyExclusive string,
+	partitionKey *string, callContext *model.CallContext, ch chan error) {
+	c.writeBatchManager.Add(shardId, model.DeleteRangeCall{
 		MinKeyInclusive: minKeyInclusive,
 		MaxKeyExclusive: maxKeyExclusive,
+		PartitionKey:    partitionKey,
+		CallContext:     callContext,
 		Callback: func(response *proto.DeleteRangeResponse, err error) {
 			if err != nil {
 				ch <- err
@@ -274,7 +389,7 @@ func (c *clientImpl) doSingleShardDeleteRange(shardId int64, minKeyInclusive str
 }
 
 func (c *clientImpl) Get(key string, options ...GetOption) <-chan GetResult {
-	ch := make(chan GetResult)
+	ch := make(chan GetResult, 1)
 
 	opts := newGetOptions(options)
 	if opts.partitionKey == nil && //
@@ -295,6 +410,7 @@ func (c *clientImpl) doSingleShardGet(key string, opts *getOptions, ch chan GetR
 		ComparisonType:     opts.comparisonType,
 		IncludeValue:       opts.includeValue,
 		SecondaryIndexName: opts.secondaryIndexName,
+		PartitionKey:       opts.partitionKey,
 		Callback: func(response *proto.GetResponse, err error) {
 			ch <- toGetResult(response, key, err)
 			close(ch)
@@ -302,14 +418,14 @@ func (c *clientImpl) doSingleShardGet(key string, opts *getOptions, ch chan GetR
 	})
 }
 
-func compareGetResponse(a, b *proto.GetResponse) int {
+func compareGetResponse(order keyOrder, a, b *proto.GetResponse) int {
 	if a.SecondaryIndexKey != nil && b.SecondaryIndexKey != nil {
-		c := compare.CompareWithSlash([]byte(a.GetSecondaryIndexKey()), []byte(b.GetSecondaryIndexKey()))
+		c := order.compare(a.GetSecondaryIndexKey(), b.GetSecondaryIndexKey())
 		if c != 0 {
 			return c
 		}
 	}
-	return compare.CompareWithSlash([]byte(a.GetKey()), []byte(b.GetKey()))
+	return order.compare(a.GetKey(), b.GetKey())
 }
 
 func validateComparisonType(c proto.KeyComparisonType) error {
@@ -329,7 +445,8 @@ var keyNotFound = &proto.GetResponse{
 	Status: proto.Status_KEY_NOT_FOUND,
 }
 
-func selectResponse(kc proto.KeyComparisonType, selected *proto.GetResponse, response *proto.GetResponse) *proto.GetResponse {
+func selectResponse(kc proto.KeyComparisonType, order keyOrder, selected *proto.GetResponse,
+	response *proto.GetResponse) *proto.GetResponse {
 	if response != nil && response.Status == proto.Status_OK {
 		switch kc {
 		case proto.KeyComparisonType_EQUAL:
@@ -338,12 +455,12 @@ func selectResponse(kc proto.KeyComparisonType, selected *proto.GetResponse, res
 			}
 
 		case proto.KeyComparisonType_FLOOR, proto.KeyComparisonType_LOWER:
-			if selected == keyNotFound || compareGetResponse(selected, response) < 0 {
+			if selected == keyNotFound || compareGetResponse(order, selected, response) < 0 {
 				selected = response
 			}
 
 		case proto.KeyComparisonType_CEILING, proto.KeyComparisonType_HIGHER:
-			if selected == keyNotFound || compareGetResponse(selected, response) > 0 {
+			if selected == keyNotFound || compareGetResponse(order, selected, response) > 0 {
 				selected = response
 			}
 		default:
@@ -362,7 +479,7 @@ func (c *clientImpl) doMultiShardGet(key string, options *getOptions, ch chan Ge
 	}
 
 	shards := c.shardManager.GetAll()
-	callback := multiShardGetCallback(key, options.comparisonType, len(shards), ch)
+	callback := multiShardGetCallback(key, options.comparisonType, c.keyOrder(), len(shards), ch)
 
 	for _, shardId := range shards {
 		c.readBatchManager.Get(shardId).Add(model.GetCall{
@@ -379,7 +496,7 @@ func (c *clientImpl) doMultiShardGet(key string, options *getOptions, ch chan Ge
 // get: the first error wins and terminates the result channel, discarding the
 // remaining responses; otherwise the best response for the comparison type is
 // selected once every shard has responded.
-func multiShardGetCallback(key string, comparisonType proto.KeyComparisonType, numShards int,
+func multiShardGetCallback(key string, comparisonType proto.KeyComparisonType, order keyOrder, numShards int,
 	ch chan GetResult) func(*proto.GetResponse, error) {
 	m := sync.Mutex{}
 	counter := numShards
@@ -401,7 +518,7 @@ func multiShardGetCallback(key string, comparisonType proto.KeyComparisonType, n
 			return
 		}
 
-		selected = selectResponse(comparisonType, selected, response)
+		selected = selectResponse(comparisonType, order, selected, response)
 
 		counter--
 		if counter == 0 {
@@ -411,23 +528,46 @@ func multiShardGetCallback(key string, comparisonType proto.KeyComparisonType, n
 	}
 }
 
-func (c *clientImpl) listFromShard(ctx context.Context, minKeyInclusive string, maxKeyExclusive string, showInternalKeys bool, shardId int64, secondaryIndexName *string,
-	ch chan<- ListResult) {
+func (c *clientImpl) listFromShard(ctx context.Context, minKeyInclusive string, maxKeyExclusive string,
+	opts *listOptions, shardId int64, ch chan<- ListResult) {
 	request := &proto.ListRequest{
 		Shard:               &shardId,
 		StartInclusive:      minKeyInclusive,
 		EndExclusive:        maxKeyExclusive,
-		SecondaryIndexName:  secondaryIndexName,
-		IncludeInternalKeys: showInternalKeys,
+		SecondaryIndexName:  opts.secondaryIndexName,
+		IncludeInternalKeys: opts.showInternalKeys,
+		EndInclusive:        opts.endInclusive,
 	}
 
 	retryCtx, cancel := context.WithTimeout(ctx, c.options.requestTimeout)
 	defer cancel()
 
-	if err := c.executor.ExecuteList(retryCtx, request, func(response *proto.ListResponse) {
-		ch <- ListResult{Keys: response.Keys}
-	}); err != nil {
-		ch <- ListResult{Err: err}
+	// Once ctx is done, the caller may have stopped reading: drop the results
+	// instead of waiting forever to send them
+	send := func(result ListResult) {
+		select {
+		case ch <- result:
+		case <-ctx.Done():
+		}
+	}
+	// Older servers ignore EndInclusive, and leave the end out: a leader that
+	// includes it says so in all its responses, and sends at least one
+	responded := false
+	err := c.executor.ExecuteList(retryCtx, request, func(response *proto.ListResponse) error {
+		if request.EndInclusive && !response.EndInclusive {
+			return ErrEndInclusiveUnsupported
+		}
+		responded = true
+		if len(response.Keys) > 0 {
+			send(ListResult{Keys: response.Keys})
+		}
+		return nil
+	})
+	if err == nil && request.EndInclusive && !responded {
+		err = ErrEndInclusiveUnsupported
+	}
+	if err != nil {
+		send(ListResult{Err: err})
 	}
 }
 
@@ -439,25 +579,24 @@ func (c *clientImpl) List(ctx context.Context, minKeyInclusive string, maxKeyExc
 		// If the partition key is specified, we only need to make the request to one shard
 		shardId := c.getShardForKey("", opts)
 		go func() {
-			c.listFromShard(ctx, minKeyInclusive, maxKeyExclusive, opts.showInternalKeys, shardId, opts.secondaryIndexName, ch)
+			c.listFromShard(ctx, minKeyInclusive, maxKeyExclusive, opts, shardId, ch)
 			close(ch)
 		}()
 	} else {
 		// Do the list on all shards and aggregate the responses
 		shardIDs := c.shardManager.GetAll()
 
-		wg := concurrent.NewWaitGroup(len(shardIDs))
+		// The channel is closed once no shard can send to it anymore
+		var wg sync.WaitGroup
 		for _, shardId := range shardIDs {
 			shardIdPtr := shardId
-			go func() {
-				defer wg.Done()
-
-				c.listFromShard(ctx, minKeyInclusive, maxKeyExclusive, opts.showInternalKeys, shardIdPtr, opts.secondaryIndexName, ch)
-			}()
+			wg.Go(func() {
+				c.listFromShard(ctx, minKeyInclusive, maxKeyExclusive, opts, shardIdPtr, ch)
+			})
 		}
 
 		go func() {
-			_ = wg.Wait(ctx)
+			wg.Wait()
 			close(ch)
 		}()
 	}
@@ -465,28 +604,40 @@ func (c *clientImpl) List(ctx context.Context, minKeyInclusive string, maxKeyExc
 	return ch
 }
 
-func (c *clientImpl) rangeScanFromShard(ctx context.Context, minKeyInclusive string, maxKeyExclusive string, includeInternalKeys bool, shardId int64, secondaryIndexName *string,
-	ch chan<- GetResult) {
+// rangeScanFromShard passes each record of the shard to onResult, with its
+// secondary key when the scan uses an index, or the error of the scan.
+func (c *clientImpl) rangeScanFromShard(ctx context.Context, minKeyInclusive string, maxKeyExclusive string,
+	opts *listOptions, shardId int64, onResult func(result GetResult, secondaryIndexKey *string)) {
 	request := &proto.RangeScanRequest{
 		Shard:               &shardId,
 		StartInclusive:      minKeyInclusive,
 		EndExclusive:        maxKeyExclusive,
-		SecondaryIndexName:  secondaryIndexName,
-		IncludeInternalKeys: includeInternalKeys,
+		SecondaryIndexName:  opts.secondaryIndexName,
+		IncludeInternalKeys: opts.showInternalKeys,
+		EndInclusive:        opts.endInclusive,
 	}
 
 	retryCtx, cancel := context.WithTimeout(ctx, c.options.requestTimeout)
 	defer cancel()
 
-	if err := c.executor.ExecuteRangeScan(retryCtx, request, func(response *proto.RangeScanResponse) {
-		for _, record := range response.Records {
-			ch <- toGetResult(record, "", nil)
+	// As for a list, the responses say whether the leader included the end
+	responded := false
+	err := c.executor.ExecuteRangeScan(retryCtx, request, func(response *proto.RangeScanResponse) error {
+		if request.EndInclusive && !response.EndInclusive {
+			return ErrEndInclusiveUnsupported
 		}
-	}); err != nil {
-		ch <- GetResult{Err: err}
+		responded = true
+		for _, record := range response.Records {
+			onResult(toGetResult(record, "", nil), record.SecondaryIndexKey)
+		}
+		return nil
+	})
+	if err == nil && request.EndInclusive && !responded {
+		err = ErrEndInclusiveUnsupported
 	}
-
-	close(ch)
+	if err != nil {
+		onResult(GetResult{Err: err}, nil)
+	}
 }
 
 func (c *clientImpl) RangeScan(ctx context.Context, minKeyInclusive string, maxKeyExclusive string, options ...RangeScanOption) <-chan GetResult {
@@ -497,23 +648,40 @@ func (c *clientImpl) RangeScan(ctx context.Context, minKeyInclusive string, maxK
 		// If the partition key is specified, we only need to make the request to one shard
 		shardId := c.getShardForKey("", opts)
 		go func() {
-			c.rangeScanFromShard(ctx, minKeyInclusive, maxKeyExclusive, opts.showInternalKeys, shardId, opts.secondaryIndexName, outCh)
+			c.rangeScanFromShard(ctx, minKeyInclusive, maxKeyExclusive, &opts.listOptions, shardId,
+				func(result GetResult, _ *string) { outCh <- result })
+			close(outCh)
 		}()
 	} else {
 		// Do the list on all shards and aggregate the responses
 		shardIDs := c.shardManager.GetAll()
-		channels := make([]chan GetResult, len(shardIDs))
+		channels := make([]chan rangeScanResult, len(shardIDs))
+		scanCtx, cancel := context.WithCancel(ctx)
 
 		for i, shardId := range shardIDs {
 			shardIdPtr := shardId
-			ch := make(chan GetResult)
+			ch := make(chan rangeScanResult)
 			channels[i] = ch
 			go func() {
-				c.rangeScanFromShard(ctx, minKeyInclusive, maxKeyExclusive, opts.showInternalKeys, shardIdPtr, opts.secondaryIndexName, ch)
+				c.rangeScanFromShard(scanCtx, minKeyInclusive, maxKeyExclusive, &opts.listOptions, shardIdPtr,
+					func(result GetResult, secondaryIndexKey *string) {
+						ch <- rangeScanResult{result, secondaryIndexKey}
+					})
+				close(ch)
 			}()
 		}
 
-		go aggregateAndSortRangeScanAcrossShards(channels, outCh)
+		go func() {
+			aggregateAndSortRangeScanAcrossShards(c.keyOrder(), channels, outCh)
+
+			// The merge stops at the first error: cancel the scans of the other
+			// shards, and drain the results they wait to send until they end
+			cancel()
+			for _, ch := range channels {
+				for range ch {
+				}
+			}
+		}()
 	}
 
 	return outCh
@@ -525,19 +693,20 @@ func (c *clientImpl) GetSequenceUpdates(ctx context.Context, prefixKey string, o
 		return nil, errors.Wrap(ErrInvalidOptions, "partitionKey is required")
 	}
 
-	return newSequenceUpdates(ctx, prefixKey, *opts.partitionKey, c.rpcProvider, c.shardManager), nil
+	return newSequenceUpdates(ctx, c.ctx, prefixKey, *opts.partitionKey, c.rpcProvider, c.shardManager), nil
 }
 
 // We do range scan on all the shards, and we need to always pick the lowest key
-// across all the shards.
-func aggregateAndSortRangeScanAcrossShards(channels []chan GetResult, outCh chan GetResult) {
-	h := &ResultHeap{}
+// across all the shards. With an index, the shards return the records in the
+// order of their secondary keys, so we pick the lowest secondary key first.
+func aggregateAndSortRangeScanAcrossShards(order keyOrder, channels []chan rangeScanResult, outCh chan GetResult) {
+	h := &ResultHeap{order: order}
 	heap.Init(h)
 
 	// First make sure we have 1 key from each channel
 	for _, ch := range channels {
-		if gr, ok := <-ch; ok {
-			heap.Push(h, &ResultAndChannel{gr, ch})
+		if r, ok := <-ch; ok {
+			heap.Push(h, newResultAndChannel(order, r, ch))
 		}
 	}
 
@@ -545,10 +714,7 @@ func aggregateAndSortRangeScanAcrossShards(channels []chan GetResult, outCh chan
 	// result with the lowest key and then reading again from that same
 	// channel
 	for h.Len() > 0 {
-		r, ok := heap.Pop(h).(*ResultAndChannel)
-		if !ok {
-			panic("failed to cast")
-		}
+		r := h.results[0]
 
 		outCh <- r.gr
 
@@ -558,8 +724,11 @@ func aggregateAndSortRangeScanAcrossShards(channels []chan GetResult, outCh chan
 		}
 
 		// read again from same channel
-		if gr, ok := <-r.ch; ok {
-			heap.Push(h, &ResultAndChannel{gr, r.ch})
+		if next, ok := <-r.ch; ok {
+			h.results[0] = newResultAndChannel(order, next, r.ch)
+			heap.Fix(h, 0)
+		} else {
+			heap.Pop(h)
 		}
 	}
 
@@ -576,6 +745,10 @@ func (c *clientImpl) closeNotifications() error {
 	}
 
 	return err
+}
+
+func (c *clientImpl) keyOrder() keyOrder {
+	return newKeyOrder(c.shardManager.KeySorting())
 }
 
 func (c *clientImpl) getShardForKey(key string, options baseOptionsIf) int64 {

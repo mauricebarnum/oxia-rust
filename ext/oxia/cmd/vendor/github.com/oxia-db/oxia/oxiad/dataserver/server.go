@@ -16,11 +16,13 @@ package dataserver
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 
 	"go.uber.org/multierr"
 
+	"github.com/oxia-db/oxia/common/commonio"
 	"github.com/oxia-db/oxia/common/process"
 	"github.com/oxia-db/oxia/oxiad/common/logging"
 	commonwatch "github.com/oxia-db/oxia/oxiad/common/watch"
@@ -60,8 +62,33 @@ type Server struct {
 	healthServer commonrpc.HealthServer
 }
 
-func New(parent context.Context, optionsWatch *commonwatch.Watch[*option.Options]) (*Server, error) {
+// New starts a data server with the given options. Unset option values are
+// filled with their defaults, and the options are validated before the server
+// starts.
+//
+// The server keeps a reference to options: the caller must not mutate them
+// after this call.
+func New(parent context.Context, options *option.Options) (*Server, error) {
+	if options == nil {
+		return nil, errors.New("options must not be nil")
+	}
+	options.WithDefault()
+	if err := options.Validate(); err != nil {
+		return nil, err
+	}
+	return NewWithOptionsWatch(parent, commonwatch.New(options))
+}
+
+// NewWithOptionsWatch starts a data server whose options are supplied through
+// a watch, allowing the caller to publish configuration updates at runtime
+// (e.g. from a configuration file watcher). Most callers should use New
+// instead.
+func NewWithOptionsWatch(parent context.Context, optionsWatch *commonwatch.Watch[*option.Options]) (*Server, error) {
 	options := optionsWatch.Load()
+	// Validate the storage before the manifest gets written in the data dir
+	if err := options.Storage.Validate(); err != nil {
+		return nil, err
+	}
 	manifest, err := manifestpkg.NewManifest(options.Storage.Database.Dir)
 	if err != nil {
 		return nil, err
@@ -71,15 +98,27 @@ func New(parent context.Context, optionsWatch *commonwatch.Watch[*option.Options
 		return nil, err
 	}
 	grpcProvider, err := NewWithGrpcProvider(parent, optionsWatch, commonrpc.Default, provider, manifest)
-	return grpcProvider, err
+	if err != nil {
+		return nil, multierr.Append(err, provider.Close())
+	}
+	return grpcProvider, nil
 }
 
+// NewWithGrpcProvider starts a data server with the given gRPC and replication
+// providers. On an error, it releases what it started, but not
+// replicationRpcProvider: the caller closes it. Otherwise the server closes it
+// in Close.
 func NewWithGrpcProvider(parent context.Context, optionsWatch *commonwatch.Watch[*option.Options], provider commonrpc.GrpcProvider,
-	replicationRpcProvider dataserverrpc.ReplicationRpcProvider, manifest *manifestpkg.Manifest) (*Server, error) {
+	replicationRpcProvider dataserverrpc.ReplicationRpcProvider, manifest *manifestpkg.Manifest) (_ *Server, err error) {
 	options := optionsWatch.Load()
-	slog.Info("Starting Oxia dataServer", slog.Any("options", options))
+	slog.Info("Starting Oxia DATASERVER", slog.Any("options", options))
 
 	storage := &options.Storage
+	// Embedded servers can skip the validation that the server command runs,
+	// and the storage must not be opened with a wal dir that is the data dir
+	if err := storage.Validate(); err != nil {
+		return nil, err
+	}
 	kvFactory, err := kvstore.NewPebbleKVFactory(&kvstore.FactoryOptions{
 		DataDir:     storage.Database.Dir,
 		CacheSizeMB: storage.Database.ReadCacheSizeMB,
@@ -107,6 +146,27 @@ func NewWithGrpcProvider(parent context.Context, optionsWatch *commonwatch.Watch
 		kvFactory:    kvFactory,
 		healthServer: commonrpc.NewClosableHealthServer(context.Background()),
 	}
+	defer func() {
+		if err == nil {
+			return
+		}
+		// Same order as Close: stopping a gRPC server waits for its streams,
+		// which end when the health server, the dispatcher and the shards
+		// director close
+		cancel()
+		s.wg.Wait()
+		err = multierr.Append(err, s.healthServer.Close())
+		err = multierr.Append(err, commonio.CloseIfNotNil(s.shardAssignmentDispatcher))
+		err = multierr.Append(err, commonio.CloseIfNotNil(s.shardsDirector))
+		if s.publicRpcServer != nil {
+			err = multierr.Append(err, s.publicRpcServer.Close())
+		}
+		if s.internalRpcServer != nil {
+			err = multierr.Append(err, s.internalRpcServer.Close())
+		}
+		err = multierr.Append(err, s.kvFactory.Close())
+		err = multierr.Append(err, s.walFactory.Close())
+	}()
 
 	s.wg.Go(func() {
 		process.DoWithLabels(ctx, map[string]string{
@@ -150,8 +210,8 @@ func NewWithGrpcProvider(parent context.Context, optionsWatch *commonwatch.Watch
 		if err != nil {
 			return nil, err
 		}
-		s.metrics, err = metric.Start(observability.Metric.BindAddress, metricTLS) //nolint:contextcheck
-		if err != nil {
+		// The last step to fail: the release on an error has no metrics to close
+		if s.metrics, err = metric.Start(observability.Metric.BindAddress, metricTLS); err != nil { //nolint:contextcheck
 			return nil, err
 		}
 	}

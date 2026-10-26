@@ -689,6 +689,7 @@ impl Client {
                 ),
                 override_version_id: opts.override_version_id,
                 override_modifications_count: opts.override_modifications_count,
+                op_index: opts.op_index.unwrap_or(0),
             }],
             deletes: vec![],
             delete_ranges: vec![],
@@ -704,6 +705,8 @@ impl Client {
             deletes: vec![oxia_proto::DeleteRequest {
                 key: k.to_string(),
                 expected_version_id: opts.expected_version_id,
+                partition_key: opts.partition_key.clone(),
+                op_index: opts.op_index.unwrap_or(0),
             }],
             delete_ranges: vec![],
         }
@@ -712,7 +715,7 @@ impl Client {
     /// Creates a `DeleteRangeRequest` with the appropriate options
     fn make_delete_range_req(
         &self,
-        _opts: &DeleteRangeOptions,
+        opts: &DeleteRangeOptions,
         start_inclusive: &str,
         end_exclusive: &str,
     ) -> oxia_proto::WriteRequest {
@@ -724,6 +727,7 @@ impl Client {
             delete_ranges: vec![oxia_proto::DeleteRangeRequest {
                 start_inclusive: start_inclusive.to_string(),
                 end_exclusive: end_exclusive.to_string(),
+                op_index: opts.op_index.unwrap_or(0),
             }],
         }
     }
@@ -742,6 +746,7 @@ impl Client {
             end_exclusive: end_exclusive.to_string(),
             secondary_index_name: opts.secondary_index_name.clone(),
             include_internal_keys: opts.include_internal_keys,
+            end_inclusive: opts.end_inclusive,
         }
     }
 
@@ -760,6 +765,7 @@ impl Client {
             end_exclusive: end_exclusive.to_string(),
             secondary_index_name: opts.secondary_index_name.clone(),
             include_internal_keys: opts.include_internal_keys,
+            end_inclusive: opts.end_inclusive,
         }
     }
 

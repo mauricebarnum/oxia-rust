@@ -15,15 +15,21 @@
 package assignment
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"math"
+	"net"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 	pb "google.golang.org/protobuf/proto"
 
@@ -42,6 +48,25 @@ func TestUninitializedAssignmentDispatcher(t *testing.T) {
 	req := &proto.ShardAssignmentsRequest{Namespace: constant.DefaultNamespace}
 	err := dispatcher.RegisterForUpdates(req, mockClient)
 	assert.ErrorIs(t, err, constant.ErrNotInitialized)
+	assert.NoError(t, dispatcher.Close())
+}
+
+func TestShardAssignmentDispatcher_StandaloneRegisterWithoutAuthority(t *testing.T) {
+	dispatcher := NewStandaloneShardAssignmentDispatcher(1, proto.KeySortingType_UNKNOWN)
+
+	// The standalone dispatcher sends the client's own authority as the leader,
+	// so it rejects a client stream that carries no authority
+	err := dispatcher.RegisterForUpdates(&proto.ShardAssignmentsRequest{}, rpc.NewMockShardAssignmentClientStream())
+	assert.Equal(t, codes.Internal, status.Code(err))
+
+	// The rejected client must not keep the lock or stay registered
+	require.Eventually(t, dispatcher.Initialized, 10*time.Second, 10*time.Millisecond,
+		"the dispatcher lock is still held")
+	s := dispatcher.(*shardAssignmentDispatcher)
+	s.RLock()
+	assert.Empty(t, s.clients)
+	s.RUnlock()
+
 	assert.NoError(t, dispatcher.Close())
 }
 
@@ -443,6 +468,196 @@ func TestShardAssignmentDispatcher_ClientAssignmentsDoNotIncludeAuthorities(t *t
 	assert.NoError(t, dispatcher.Close())
 }
 
+func TestShardAssignmentDispatcher_BusyClientGetsLatestAssignments(t *testing.T) {
+	dispatcher := NewShardAssignmentDispatcher(oxiadcommonrpc.NewClosableHealthServer(t.Context()))
+
+	coordinatorStream := rpc.NewMockShardAssignmentControllerStream()
+	go func() {
+		err := dispatcher.PushShardAssignments(coordinatorStream)
+		assert.NoError(t, err)
+	}()
+
+	assignmentsWithLeader := func(leader string) *proto.ShardAssignments {
+		return &proto.ShardAssignments{
+			Namespaces: map[string]*proto.NamespaceShardsAssignment{
+				constant.DefaultNamespace: {
+					Assignments:    []*proto.ShardAssignment{newShardAssignment(0, leader, 0, math.MaxUint32)},
+					ShardKeyRouter: proto.ShardKeyRouter_XXHASH3,
+				},
+			},
+		}
+	}
+	// pushAssignments returns once the dispatcher has handed the update to the
+	// clients: GetLeader only sees it after that, as both happen under the lock.
+	pushAssignments := func(leader string) {
+		coordinatorStream.AddRequest(assignmentsWithLeader(leader))
+		require.Eventually(t, func() bool {
+			return dispatcher.GetLeader(0) == leader
+		}, 10*time.Second, 10*time.Millisecond)
+	}
+
+	pushAssignments("server1")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	// A client that stays busy sending each update until the test reads it
+	sending := make(chan struct{}, 10)
+	responses := make(chan *proto.ShardAssignments)
+	client := &fakeClient{ctx: ctx, send: func(assignments *proto.ShardAssignments) error {
+		sending <- struct{}{}
+		select {
+		case responses <- assignments:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}}
+	done := make(chan error, 1)
+	go func() {
+		done <- dispatcher.RegisterForUpdates(&proto.ShardAssignmentsRequest{
+			Namespace: constant.DefaultNamespace,
+		}, client)
+	}()
+
+	// Two updates arrive while the client is still busy sending the initial
+	// assignments
+	<-sending
+	pushAssignments("server2")
+	pushAssignments("server3")
+
+	receive := func() *proto.ShardAssignments {
+		select {
+		case assignments := <-responses:
+			return assignments
+		case err := <-done:
+			require.FailNow(t, "the dispatcher closed the client stream", "error: %v", err)
+		case <-time.After(10 * time.Second):
+			require.FailNow(t, "timed out waiting for the assignments")
+		}
+		return nil
+	}
+	assert.True(t, pb.Equal(assignmentsWithLeader("server1"), receive()))
+	// The client is not cut off: once done with the initial assignments, it
+	// sends the latest ones
+	assert.True(t, pb.Equal(assignmentsWithLeader("server3"), receive()))
+
+	cancel()
+	assert.NoError(t, <-done)
+	assert.NoError(t, dispatcher.Close())
+}
+
+func TestShardAssignmentDispatcherRegisterForUpdatesInvalidAuthority(t *testing.T) {
+	dispatcher := NewStandaloneShardAssignmentDispatcher(1, proto.KeySortingType_UNKNOWN)
+	defer dispatcher.Close()
+
+	ctx := metadata.NewIncomingContext(t.Context(), metadata.Pairs(":authority", "http://server1:6648"))
+	err := dispatcher.RegisterForUpdates(&proto.ShardAssignmentsRequest{}, &fakeClient{ctx: ctx})
+	assert.Equal(t, codes.InvalidArgument, status.Code(err))
+}
+
+func TestShardAssignmentDispatcherRegisterForUpdatesInitialSendError(t *testing.T) {
+	dispatcher := NewShardAssignmentDispatcher(oxiadcommonrpc.NewClosableHealthServer(t.Context()))
+	defer dispatcher.Close()
+	s := dispatcher.(*shardAssignmentDispatcher)
+	s.updateShardAssignment(singleShardAssignments("server1"))
+
+	sendErr := status.Error(codes.Unavailable, "client gone")
+	client := &fakeClient{ctx: t.Context(), send: func(*proto.ShardAssignments) error { return sendErr }}
+
+	err := dispatcher.RegisterForUpdates(&proto.ShardAssignmentsRequest{}, client)
+	assert.ErrorIs(t, err, sendErr)
+	s.RLock()
+	assert.Empty(t, s.clients)
+	s.RUnlock()
+}
+
+func TestShardAssignmentDispatcherRegisterForUpdatesUpdateSendError(t *testing.T) {
+	for _, sendErr := range []error{
+		status.Error(codes.Unavailable, "client gone"),
+		status.Error(codes.Canceled, "client canceled"),
+	} {
+		t.Run(status.Code(sendErr).String(), func(t *testing.T) {
+			dispatcher := NewShardAssignmentDispatcher(oxiadcommonrpc.NewClosableHealthServer(t.Context()))
+			defer dispatcher.Close()
+			s := dispatcher.(*shardAssignmentDispatcher)
+			s.updateShardAssignment(singleShardAssignments("server1"))
+
+			// gRPC puts the address of the client in the context of its stream
+			ctx := peer.NewContext(t.Context(), &peer.Peer{Addr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}})
+			sent := make(chan *proto.ShardAssignments, 2)
+			sends := 0
+			client := &fakeClient{ctx: ctx, send: func(assignments *proto.ShardAssignments) error {
+				sent <- assignments
+				sends++
+				if sends > 1 {
+					return sendErr
+				}
+				return nil
+			}}
+			done := make(chan error, 1)
+			go func() {
+				done <- dispatcher.RegisterForUpdates(&proto.ShardAssignmentsRequest{}, client)
+			}()
+
+			assert.True(t, pb.Equal(singleShardAssignments("server1"), <-sent))
+			s.updateShardAssignment(singleShardAssignments("server2"))
+
+			assert.ErrorIs(t, <-done, sendErr)
+			assert.True(t, pb.Equal(singleShardAssignments("server2"), <-sent))
+			s.RLock()
+			assert.Empty(t, s.clients)
+			s.RUnlock()
+		})
+	}
+}
+
+func TestShardAssignmentDispatcherRegisterForUpdatesReturnsOnClose(t *testing.T) {
+	dispatcher := NewShardAssignmentDispatcher(oxiadcommonrpc.NewClosableHealthServer(t.Context()))
+	s := dispatcher.(*shardAssignmentDispatcher)
+	s.updateShardAssignment(singleShardAssignments("server1"))
+
+	sent := make(chan struct{}, 1)
+	client := &fakeClient{ctx: t.Context(), send: func(*proto.ShardAssignments) error {
+		sent <- struct{}{}
+		return nil
+	}}
+	done := make(chan error, 1)
+	go func() {
+		done <- dispatcher.RegisterForUpdates(&proto.ShardAssignmentsRequest{}, client)
+	}()
+	<-sent
+
+	assert.NoError(t, dispatcher.Close())
+	assert.NoError(t, <-done)
+}
+
+func TestShardAssignmentDispatcherUpdateShardAssignmentDebugLog(t *testing.T) {
+	dispatcher := NewShardAssignmentDispatcher(oxiadcommonrpc.NewClosableHealthServer(t.Context()))
+	defer dispatcher.Close()
+	s := dispatcher.(*shardAssignmentDispatcher)
+	logs := &bytes.Buffer{}
+	s.log = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	s.updateShardAssignment(singleShardAssignments("server1"))
+
+	// At debug level, the update logs the previous and the current assignments
+	assert.Contains(t, logs.String(), "level=DEBUG")
+	assert.Contains(t, logs.String(), "previous=")
+	assert.Contains(t, logs.String(), "server1")
+	assert.Equal(t, "server1", dispatcher.GetLeader(0))
+}
+
+func singleShardAssignments(leader string) *proto.ShardAssignments {
+	return &proto.ShardAssignments{
+		Namespaces: map[string]*proto.NamespaceShardsAssignment{
+			constant.DefaultNamespace: {
+				Assignments:    []*proto.ShardAssignment{newShardAssignment(0, leader, 0, math.MaxUint32)},
+				ShardKeyRouter: proto.ShardKeyRouter_XXHASH3,
+			},
+		},
+	}
+}
+
 func newShardAssignment(id int64, leader string, minHashInclusive uint32, maxHashInclusive uint32) *proto.ShardAssignment {
 	return &proto.ShardAssignment{
 		Shard:  id,
@@ -454,4 +669,17 @@ func newShardAssignment(id int64, leader string, minHashInclusive uint32, maxHas
 			},
 		},
 	}
+}
+
+type fakeClient struct {
+	ctx  context.Context
+	send func(assignments *proto.ShardAssignments) error
+}
+
+func (c *fakeClient) Send(assignments *proto.ShardAssignments) error {
+	return c.send(assignments)
+}
+
+func (c *fakeClient) Context() context.Context {
+	return c.ctx
 }

@@ -64,17 +64,13 @@ The client records semantic latency, size, and request count measurements as Ope
 
 # TODO
 
-1. Add robustness for transient errors
-   1. don't fail assignment processing if unable to connect to a shard
-   1. reconnect client when remote fails
+1. add batch write support
 1. Command-client client
    1. pretty output, configurable formats: JSON, raw, tabular
    1. additional commands:
       1. `shell`: add tab completion
       1. create, stop, list
       1. `put`: support secondary index
-1. instrument client library
-1. collect metrics
 1. add more tracing
 
 # Copying

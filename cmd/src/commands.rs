@@ -40,6 +40,7 @@ pub use sequence_updates::SequenceUpdatesCommand;
 pub use shell::ShellCommand;
 
 #[async_trait]
+#[allow(clippy::double_must_use)]
 pub trait CommandRunnable {
     async fn run(self, ctx: crate::Context) -> anyhow::Result<()>;
 }

@@ -3,7 +3,7 @@
 set -euo pipefail
 set -x
 
-DEFAULT_VERSION=v0.17.1
+DEFAULT_VERSION=v0.18.0
 VERSION="${1-${DEFAULT_VERSION}}"
 
 DEFAULT_REPO=https://github.com/oxia-db/oxia
@@ -34,6 +34,7 @@ git -C "${OXIA_TMP}" checkout -q "${VERSION}"
 git -C "${OXIA_TMP}" sparse-checkout set ${OXIA_SUBDIRS}
 (
     cd "${OXIA_TMP}/cmd"
+    go mod tidy
     go mod vendor -v
     GOPROXY=off go test -mod=vendor -v
     go clean

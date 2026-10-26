@@ -17,6 +17,7 @@ package single
 import (
 	"testing"
 
+	"github.com/emirpasic/gods/v2/sets/linkedhashset"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/oxia-db/oxia/common/proto"
@@ -63,35 +64,52 @@ func TestDefaultShardsRank(t *testing.T) {
 	assert.True(t, nodeIter.Last())
 	nodeRatio := nodeIter.Value()
 	assert.Equal(t, "sv-1", nodeRatio.NodeID)
-	assert.Equal(t, 0.3333333333333333, nodeRatio.Ratio)
+	assert.Equal(t, 5.0, nodeRatio.Ratio)
 	shardRatios := nodeRatio.ShardRatios
 	assert.Equal(t, 5, shardRatios.Size())
 
 	assert.True(t, nodeIter.Prev())
 	nodeRatio = nodeIter.Value()
 	assert.Equal(t, "sv-3", nodeRatio.NodeID)
-	assert.Equal(t, 0.26666666666666666, nodeRatio.Ratio)
+	assert.Equal(t, 4.0, nodeRatio.Ratio)
 	shardRatios = nodeRatio.ShardRatios
 	assert.Equal(t, 4, shardRatios.Size())
 
 	assert.True(t, nodeIter.Prev())
 	nodeRatio = nodeIter.Value()
 	assert.Equal(t, "sv-2", nodeRatio.NodeID)
-	assert.Equal(t, 0.2, nodeRatio.Ratio)
+	assert.Equal(t, 3.0, nodeRatio.Ratio)
 	shardRatios = nodeRatio.ShardRatios
 	assert.Equal(t, 3, shardRatios.Size())
 
 	assert.True(t, nodeIter.Prev())
 	nodeRatio = nodeIter.Value()
 	assert.Equal(t, "sv-4", nodeRatio.NodeID)
-	assert.Equal(t, 0.13333333333333333, nodeRatio.Ratio)
+	assert.Equal(t, 2.0, nodeRatio.Ratio)
 	shardRatios = nodeRatio.ShardRatios
 	assert.Equal(t, 2, shardRatios.Size())
 
 	assert.True(t, nodeIter.Prev())
 	nodeRatio = nodeIter.Value()
 	assert.Equal(t, "sv-5", nodeRatio.NodeID)
-	assert.Equal(t, 0.06666666666666667, nodeRatio.Ratio)
+	assert.Equal(t, 1.0, nodeRatio.Ratio)
 	shardRatios = nodeRatio.ShardRatios
 	assert.Equal(t, 1, shardRatios.Size())
+}
+
+func TestDefaultShardsRankSkipsQuarantineNodes(t *testing.T) {
+	ratioSnapshot := DefaultShardsRank(&model.RatioParams{
+		NodeShardsInfos: map[string][]model.ShardInfo{
+			"sv-1": {{Namespace: "ns-1", ShardID: 1}, {Namespace: "ns-1", ShardID: 2}},
+			"sv-2": {{Namespace: "ns-1", ShardID: 3}},
+		},
+		QuarantineNodes: linkedhashset.New("sv-1"),
+	})
+
+	var nodes []string
+	for iter := ratioSnapshot.NodeIterator(); iter.Next(); {
+		nodes = append(nodes, iter.Value().NodeID)
+	}
+	assert.Equal(t, []string{"sv-2"}, nodes)
+	assert.Equal(t, 1.0, ratioSnapshot.MaxNodeLoadRatio())
 }

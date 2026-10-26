@@ -21,7 +21,10 @@ import (
 
 	"github.com/pkg/errors"
 
+	"github.com/oxia-db/oxia/common/failpoint"
 	"github.com/oxia-db/oxia/common/proto"
+	time2 "github.com/oxia-db/oxia/common/time"
+	"github.com/oxia-db/oxia/oxiad/common/vfs"
 )
 
 var (
@@ -30,6 +33,7 @@ var (
 	ErrInvalidNextOffset = errors.New("oxia: invalid next offset in wal")
 	ErrSegmentFull       = errors.New("oxia: current segment is full")
 	ErrEmptySegment      = errors.New("oxia: segment has no entries")
+	ErrSegmentClosed     = errors.New("oxia: segment is closed")
 
 	InvalidTerm   int64 = -1
 	InvalidOffset int64 = -1
@@ -40,6 +44,19 @@ type FactoryOptions struct {
 	Retention   time.Duration
 	SegmentSize int32
 	SyncData    bool
+
+	// The trimming checks the retention against Clock, every
+	// TrimmerCheckInterval: the system clock and DefaultCheckInterval when not
+	// set
+	Clock                time2.Clock
+	TrimmerCheckInterval time.Duration
+
+	// The files of the wal, the ones of the operating system when not set:
+	// the tests make its operations fail
+	fs vfs.FS
+
+	// Failpoints injects failures into the wal, for the tests: none when nil.
+	Failpoints *failpoint.Failpoints
 }
 
 var DefaultFactoryOptions = &FactoryOptions{
@@ -84,8 +101,9 @@ type Wal interface {
 
 	// AppendAsyncWithPreviousCrc appends an entry without syncing, using the given
 	// previousCrc to seed the CRC chain when the WAL is empty (e.g. after snapshot install).
-	// Pass nil when no CRC seed is needed.
-	AppendAsyncWithPreviousCrc(entry *proto.LogEntry, previousCrc *uint32) error
+	// Pass nil when no CRC seed is needed. The returned entryCrc is the chained
+	// CRC of the WAL after appending this entry.
+	AppendAsyncWithPreviousCrc(entry *proto.LogEntry, previousCrc *uint32) (entryCrc uint32, err error)
 
 	// AppendAndSync an entry and forces the sync on the WAL
 	// The operation is perfomed in background and the callback is

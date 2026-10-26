@@ -15,6 +15,7 @@
 package option
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -74,6 +75,28 @@ func (*ClusterOptions) Validate() error {
 type ServerOptions struct {
 	Public   PublicServerOptions   `yaml:"public" json:"public" jsonschema:"description=Public server configuration for management API endpoints"`
 	Internal InternalServerOptions `yaml:"internal" json:"internal" jsonschema:"description=Internal server configuration for cluster communication"`
+}
+
+func (so *ServerOptions) UnmarshalYAML(value *yaml.Node) error {
+	type Fields ServerOptions
+	decoded := struct {
+		Fields `yaml:",inline"`
+		Admin  *PublicServerOptions `yaml:"admin"`
+	}{Fields: Fields(*so)}
+	if err := value.Decode(&decoded); err != nil {
+		return err
+	}
+	*so = ServerOptions(decoded.Fields)
+	if decoded.Admin == nil {
+		return nil
+	}
+	for i := 0; i < len(value.Content); i += 2 {
+		if value.Content[i].Value == "public" {
+			return errors.New("server.public and deprecated server.admin are both set")
+		}
+	}
+	so.Public = *decoded.Admin
+	return nil
 }
 
 func (so *ServerOptions) WithDefault() {
@@ -149,6 +172,14 @@ func (co *ControllerOptions) WithDefault() {
 func (co *ControllerOptions) Validate() error {
 	return co.TLS.Validate()
 }
+
+// Valid MetadataOptions.ProviderName values.
+const (
+	ProviderMemory    = metadataconstant.NameMemory
+	ProviderFile      = metadataconstant.NameFile
+	ProviderConfigMap = metadataconstant.NameConfigMap
+	ProviderRaft      = metadataconstant.NameRaft
+)
 
 type ProviderOptions struct {
 	ProviderName string       `yaml:"providerName" json:"providerName" jsonschema:"description=Metadata provider type. Valid values: memory/configmap/file/raft,example=configmap"`
@@ -234,11 +265,7 @@ func (mpo ProviderOptions) Validate() error {
 		if mpo.Raft.Address == "" {
 			return errors.New("raft-address must be set with metadata=raft")
 		}
-	case metadataconstant.NameFile:
-		if mpo.File.StatusPath() == "" {
-			return errors.New("metadata.file status path must be set with metadata=file")
-		}
-	case metadataconstant.NameMemory:
+	case metadataconstant.NameFile, metadataconstant.NameMemory:
 	default:
 		return errors.New(`must be one of "memory", "configmap", "raft" or "file"`)
 	}
@@ -394,20 +421,14 @@ func (fm *FileMetadata) applyLegacyConfigPath(configPath string) error {
 }
 
 func (fm FileMetadata) StatusPath() string {
-	return filePath(fm.Dir, fm.StatusName, DefaultFileStatusName)
+	return filePath(fm.Dir, cmp.Or(fm.StatusName, DefaultFileStatusName))
 }
 
 func (fm FileMetadata) ConfigPath() string {
-	return filePath(fm.Dir, fm.ConfigName, DefaultFileConfigName)
+	return filePath(fm.Dir, cmp.Or(fm.ConfigName, DefaultFileConfigName))
 }
 
-func filePath(dir, name, defaultName string) string {
-	if name == "" {
-		name = defaultName
-	}
-	if name == "" {
-		return ""
-	}
+func filePath(dir, name string) string {
 	if dir == "" {
 		return name
 	}

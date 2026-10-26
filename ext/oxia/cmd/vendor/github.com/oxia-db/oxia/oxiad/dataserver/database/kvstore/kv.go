@@ -18,8 +18,10 @@ import (
 	"io"
 	"testing"
 
+	"github.com/cockroachdb/pebble/v2/vfs"
 	"github.com/pkg/errors"
 
+	"github.com/oxia-db/oxia/common/failpoint"
 	"github.com/oxia-db/oxia/oxiad/common/crc"
 
 	"github.com/oxia-db/oxia/common/proto"
@@ -48,12 +50,22 @@ type WriteBatch interface {
 	// committing.
 	PutMarshalable(key string, m ProtoMarshalable) error
 	Delete(key string) error
+	// Get returns the value of key with the mutations of the batch applied.
+	// The value is only valid until the closer is closed, and until the next
+	// Get of the batch, which holds a db iterator from its second Get until
+	// it is committed or closed.
 	Get(key string) ([]byte, io.Closer, error)
 	FindLower(key string) (lowerKey string, err error)
 
 	DeleteRange(lowerBound, upperBound string) error
 	KeyRangeScan(lowerBound, upperBound string) (KeyIterator, error)
 	RangeScan(lowerBound, upperBound string) (KeyValueIterator, error)
+
+	// RangeOverlaps reports whether the range [lowerBound, upperBound), with
+	// the bounds read as RangeScan reads them, overlaps the region of the
+	// internal keys, and the regular keys outside of it. The answer depends
+	// only on the bounds, not on the keys stored.
+	RangeOverlaps(lowerBound, upperBound string) (internalKeys, regularKeys bool)
 
 	// Count is the number of transactions that are currently in the batch
 	Count() int
@@ -76,6 +88,11 @@ type KeyIterator interface {
 
 	SeekGE(key string) bool
 	SeekLT(key string) bool
+
+	// Error returns the error of a failed read. The iterator becomes invalid
+	// both at the end of the range and when a read fails, so a scan must check
+	// Error before taking what it read as the complete range.
+	Error() error
 }
 
 type ReverseKeyIterator interface {
@@ -90,6 +107,18 @@ type KeyValueIterator interface {
 	KeyIterator
 
 	Value() ([]byte, error)
+}
+
+// PrefixIterator is the iterator of KV.KeyPrefixIterator, which also reads the
+// other keys of the store as they were when it was created.
+type PrefixIterator interface {
+	KeyIterator
+
+	// Lookup returns the value of key, wherever it sorts, at the point in time
+	// of the iterator, or ErrKeyNotFound. It doesn't move the iterator. The
+	// value is only valid until the next Lookup, and until the iterator is
+	// closed.
+	Lookup(key string) ([]byte, error)
 }
 
 type SnapshotChunk interface {
@@ -114,8 +143,8 @@ type SnapshotLoader interface {
 
 	AddChunk(fileName string, chunkIndex int32, chunkCount int32, content []byte) error
 
-	// Complete signals that the snapshot is now complete
-	Complete()
+	// Complete signals that the snapshot is now complete, and makes it durable
+	Complete() error
 }
 
 type ComparisonType proto.KeyComparisonType
@@ -137,9 +166,31 @@ type KV interface {
 
 	KeyRangeScan(lowerBound, upperBound string, opts IteratorOpts) (KeyIterator, error)
 	KeyRangeScanReverse(lowerBound, upperBound string, opts IteratorOpts) (ReverseKeyIterator, error)
-	KeyIterator(opts IteratorOpts) (KeyIterator, error)
+
+	// KeyPrefixIterator returns an iterator over the keys that start with
+	// prefix and sort before end, or all of them if end is empty, internal
+	// keys included, to position with SeekGE or SeekLT
+	KeyPrefixIterator(prefix, end string) (PrefixIterator, error)
 
 	RangeScan(lowerBound, upperBound string, opts IteratorOpts) (KeyValueIterator, error)
+
+	// Seek returns an iterator over the regular keys, positioned on the key
+	// that Get finds with the comparison, but EQUAL, if any. The iterator moves
+	// away from key: with Next for CEILING and HIGHER, and with Prev for FLOOR
+	// and LOWER.
+	Seek(key string, comparisonType ComparisonType) (KeyValueIterator, error)
+
+	// Scan visits the regular keys, with their values, in order from the
+	// stored key start on, or from the first key if start is nil, until visit
+	// returns false. It returns the stored key to start the next scan from,
+	// right after the last key visited, or nil if that was the last key. A
+	// stored key keeps its position, which the key decoded from it can lose
+	// (see compare.Encoder.Decode).
+	Scan(start []byte, visit func(key string, value []byte) (bool, error)) (next []byte, err error)
+
+	// CompareKeys compares two keys in the order the store sorts them, which
+	// depends on the key sorting
+	CompareKeys(a, b string) int
 
 	Snapshot() (Snapshot, error)
 
@@ -154,7 +205,9 @@ type FactoryOptions struct {
 	CacheSizeMB int64
 	UseWAL      bool
 	SyncData    bool
-	KvTrap      *KvTrap
+	Failpoints  *failpoint.Failpoints
+	// FS holds the databases and the snapshots. Nil is vfs.Default.
+	FS vfs.FS
 }
 
 var DefaultFactoryOptions = &FactoryOptions{
@@ -162,7 +215,8 @@ var DefaultFactoryOptions = &FactoryOptions{
 	CacheSizeMB: 100,
 	UseWAL:      true,
 	SyncData:    true,
-	KvTrap:      nil,
+	Failpoints:  nil,
+	FS:          vfs.Default,
 }
 
 func (fo *FactoryOptions) EnsureDefaults() {
@@ -172,6 +226,10 @@ func (fo *FactoryOptions) EnsureDefaults() {
 
 	if fo.CacheSizeMB == 0 {
 		fo.CacheSizeMB = DefaultFactoryOptions.CacheSizeMB
+	}
+
+	if fo.FS == nil {
+		fo.FS = DefaultFactoryOptions.FS
 	}
 }
 
@@ -191,10 +249,25 @@ type Factory interface {
 	NewKV(namespace string, shardId int64, keySorting proto.KeySortingType) (KV, error)
 
 	NewSnapshotLoader(namespace string, shardId int64) (SnapshotLoader, error)
+
+	// DatabaseDir returns the directory that holds the database of a shard,
+	// which NewSnapshotLoader replaces as a whole. The files kept next to the
+	// database, e.g. the backup record of the shard, go with it.
+	DatabaseDir(namespace string, shardId int64) string
+
+	// DatabaseGeneration counts the replacements of the database of a shard
+	// since the factory opened: a snapshot loader created for it, or its
+	// deletion. A caller that took a checkpoint compares it to tell whether
+	// the database on disk is still the one it checkpointed.
+	DatabaseGeneration(namespace string, shardId int64) uint64
 }
 
 type IteratorOpts struct {
 	IncludeInternalKeys bool
+	// IncludeUpperBound makes RangeScan and KeyRangeScan include the key of
+	// their upper bound. An empty upper bound is then the empty key, rather
+	// than no bound.
+	IncludeUpperBound bool
 }
 
 var (

@@ -16,22 +16,22 @@ package file
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
-	"github.com/cenkalti/backoff/v4"
-	"github.com/fsnotify/fsnotify"
-	"github.com/juju/fslock"
+	"github.com/gofrs/flock"
 	"github.com/pkg/errors"
+	"go.uber.org/multierr"
 	gproto "google.golang.org/protobuf/proto"
 
-	"github.com/oxia-db/oxia/common/process"
+	"github.com/oxia-db/oxia/common/failpoint"
 	commonproto "github.com/oxia-db/oxia/common/proto"
-	oxiatime "github.com/oxia-db/oxia/common/time"
-	commonwatch "github.com/oxia-db/oxia/oxiad/common/watch"
+	"github.com/oxia-db/oxia/oxiad/common/cache"
+	commonfile "github.com/oxia-db/oxia/oxiad/common/file"
 	metadatacommon "github.com/oxia-db/oxia/oxiad/coordinator/metadata/common"
 	metadatacodec "github.com/oxia-db/oxia/oxiad/coordinator/metadata/common/codec"
 	"github.com/oxia-db/oxia/oxiad/coordinator/metadata/provider"
@@ -42,22 +42,29 @@ var _ provider.Provider[*commonproto.ClusterConfiguration] = (*Provider[*commonp
 
 const parentDirectoryMode = 0o755
 
+// lockRetryDelay is how often a coordinator waiting for the leadership retries
+// taking the file lock.
+const lockRetryDelay = 100 * time.Millisecond
+
 type Provider[T gproto.Message] struct {
 	mu           sync.Mutex
 	path         string
 	codec        metadatacodec.Codec[T]
-	fileLock     *fslock.Lock
+	fileLock     *flock.Flock
 	lockAcquired bool
 	watchEnabled metadatacommon.WatchMode
 	version      metadatacommon.Version
 	name         string
+	// hasDocument is set once this provider read a document from the file, or
+	// wrote one, and is never reset. Guarded by mu.
+	hasDocument bool
 
 	ctx       context.Context
 	ctxCancel context.CancelFunc
-	wg        sync.WaitGroup
 
-	watcher *commonwatch.Watch[provider.Versioned[T]]
-	logger  *slog.Logger
+	cache      *cache.Cache[provider.Versioned[T]]
+	logger     *slog.Logger
+	failpoints *failpoint.Failpoints
 }
 
 func NewProvider[T gproto.Message](
@@ -67,14 +74,29 @@ func NewProvider[T gproto.Message](
 	watchEnabled metadatacommon.WatchMode,
 	name string,
 ) (provider.Provider[T], error) {
+	return newProvider(ctx, path, codec, watchEnabled, name, nil)
+}
+
+func newProvider[T gproto.Message](
+	ctx context.Context,
+	path string,
+	codec metadatacodec.Codec[T],
+	watchEnabled metadatacommon.WatchMode,
+	name string,
+	failpoints *failpoint.Failpoints,
+) (*Provider[T], error) {
 	p := &Provider[T]{
 		path:         path,
 		codec:        codec,
-		fileLock:     fslock.New(path),
+		fileLock:     flock.New(path),
 		watchEnabled: watchEnabled,
-		version:      metadatacommon.NotExists,
-		name:         name,
-		logger:       slog.With(slog.String("component", "metadata-file-provider"), slog.String("path", path)),
+		// The file does not hold the version: a document that this provider
+		// has not written yet, e.g. one written before a restart, has the
+		// first version, because NotExists means that there is no document.
+		version:    metadatacommon.NextVersion(metadatacommon.NotExists),
+		name:       name,
+		logger:     slog.With(slog.String("component", "metadata-file-provider"), slog.String("path", path)),
+		failpoints: failpoints,
 	}
 	p.ctx, p.ctxCancel = context.WithCancel(ctx)
 	parentDir := filepath.Dir(path)
@@ -86,29 +108,28 @@ func NewProvider[T gproto.Message](
 			return nil, err
 		}
 	}
-	initialSnapshot, err := p.loadLatest()
-	if err != nil {
-		return nil, err
-	}
-	p.watcher = commonwatch.New(initialSnapshot)
+	var watch cache.WatchFunc
 	if watchEnabled.Enabled() {
-		p.wg.Go(func() {
-			process.DoWithLabels(p.ctx, map[string]string{
-				"component":     "metadata-provider",
-				"sub-component": "file-watch",
-			}, p.watchLoop)
-		})
+		watch = func(ctx context.Context) (<-chan struct{}, error) {
+			return commonfile.WatchFile(ctx, p.path)
+		}
 	}
+	p.cache = cache.New(p.ctx, p.load, watch)
 	return p, nil
 }
 
 func (m *Provider[T]) Close() error {
+	// Cancelling first ends a pending WaitToBecomeLeader: a wait that takes
+	// the lock after this point releases it by itself.
 	m.ctxCancel()
-	m.wg.Wait()
+	_ = m.cache.Close()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if !m.lockAcquired {
 		return nil
 	}
-	if err := m.fileLock.Unlock(); err != nil {
+	m.lockAcquired = false
+	if err := m.failpoints.Fail("close.unlock", m.fileLock.Unlock()); err != nil {
 		m.logger.Warn(
 			"Failed to release file lock on metadata",
 			slog.Any("error", err),
@@ -119,8 +140,19 @@ func (m *Provider[T]) Close() error {
 }
 
 func (m *Provider[T]) WaitToBecomeLeader() (<-chan struct{}, error) {
-	if err := m.fileLock.Lock(); err != nil {
+	// Another coordinator may hold the lock indefinitely: poll it under the
+	// provider context, so that closing the provider ends the wait.
+	if _, err := m.fileLock.TryLockContext(m.ctx, lockRetryDelay); err != nil {
 		return nil, errors.Wrapf(err, "failed to acquire lock on %s", m.path)
+	}
+	failpointErr := m.failpoints.Trigger("waitToBecomeLeader.locked")
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := multierr.Append(failpointErr, m.ctx.Err()); err != nil {
+		// Closed while the lock was being taken: Close found no lock to
+		// release, so release it here.
+		_ = m.fileLock.Unlock()
+		return nil, errors.Wrapf(err, "provider closed while acquiring lock on %s", m.path)
 	}
 	m.lockAcquired = true
 
@@ -132,17 +164,12 @@ func (m *Provider[T]) GetLeaderName() (string, error) {
 	return m.name, nil
 }
 
-func (m *Provider[T]) loadLatest() (snapshot provider.Versioned[T], err error) {
-	err = backoff.RetryNotify(func() error {
-		var readErr error
-		snapshot, readErr = m.loadLatestOnceLocked()
-		return readErr
-	}, oxiatime.NewBackOff(m.ctx), func(err error, duration time.Duration) {
-		m.logger.Warn("Failed to read file metadata, retrying",
-			slog.Any("error", err),
-			slog.Duration("retry-after", duration))
-	})
-	return snapshot, err
+func (m *Provider[T]) load(context.Context) (*provider.Versioned[T], error) {
+	snapshot, err := m.loadLatestOnceLocked()
+	if err != nil {
+		return nil, err
+	}
+	return &snapshot, nil
 }
 
 func (m *Provider[T]) loadLatestOnceLocked() (snapshot provider.Versioned[T], err error) {
@@ -154,17 +181,20 @@ func (m *Provider[T]) loadLatestOnceLocked() (snapshot provider.Versioned[T], er
 
 func (m *Provider[T]) loadLatestOnceWithoutLock() (snapshot provider.Versioned[T], err error) {
 	content, err := os.ReadFile(m.path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return provider.Versioned[T]{
-				Value:   m.codec.NewZero(),
-				Version: metadatacommon.NotExists,
-			}, nil
-		}
+	if err != nil && !os.IsNotExist(err) {
 		return snapshot, err
 	}
 
 	if len(content) == 0 {
+		// The file holds no document until the first write, and the leadership
+		// lock creates it empty. Once it held one, an empty or missing file is
+		// being rewritten: a writer truncates it, or removes it, before it
+		// writes the new content. Loading an empty document would drain every
+		// data server and delete every namespace, so the load fails, and a
+		// reload keeps the cached document until the new content is there.
+		if m.hasDocument {
+			return snapshot, fmt.Errorf("%s no longer holds a document, waiting for it to be rewritten", m.path)
+		}
 		return provider.Versioned[T]{
 			Value:   m.codec.NewZero(),
 			Version: metadatacommon.NotExists,
@@ -174,101 +204,65 @@ func (m *Provider[T]) loadLatestOnceWithoutLock() (snapshot provider.Versioned[T
 	if err != nil {
 		panic(err)
 	}
+	m.hasDocument = true
 	return provider.Versioned[T]{
 		Value:   value,
 		Version: m.version,
 	}, nil
 }
 
-func (m *Provider[T]) Store(snapshot provider.Versioned[T]) (newVersion metadatacommon.Version, err error) {
+func (m *Provider[T]) write(snapshot provider.Versioned[T]) (*provider.Versioned[T], error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	existingSnapshot, err := m.loadLatestOnceWithoutLock()
 	if err != nil {
-		return metadatacommon.NotExists, err
+		return nil, err
 	}
 	existingVersion := existingSnapshot.Version
 
 	if snapshot.Version != existingVersion {
-		return metadatacommon.NotExists, metadatacommon.ErrBadVersion
+		return nil, metadatacommon.ErrBadVersion
 	}
 
-	newVersion = metadatacommon.NextVersion(existingVersion)
+	newVersion := metadatacommon.NextVersion(existingVersion)
 	newContent, err := m.codec.MarshalYAML(snapshot.Value)
 	if err != nil {
-		return metadatacommon.NotExists, err
+		return nil, err
 	}
 
 	if err := os.WriteFile(m.path, newContent, 0600); err != nil {
-		return metadatacommon.NotExists, err
+		return nil, err
 	}
 	m.version = newVersion
-	m.watcher.Publish(provider.Versioned[T]{
+	m.hasDocument = true
+	return &provider.Versioned[T]{
 		Value:   m.codec.Clone(snapshot.Value),
 		Version: newVersion,
+	}, nil
+}
+
+func (m *Provider[T]) Load() (*provider.Versioned[T], error) {
+	return m.cache.Get()
+}
+
+func (m *Provider[T]) Subscribe() *cache.Subscription[provider.Versioned[T]] {
+	return m.cache.Subscribe()
+}
+
+// Store writes the snapshot through the cache, so that no load of the cache
+// stores a snapshot read before the write. When the write fails, which it may
+// do after being applied, the next Load or Store reads the stored snapshot.
+func (m *Provider[T]) Store(snapshot provider.Versioned[T]) (metadatacommon.Version, error) {
+	stored, err := m.cache.Compute(func(*provider.Versioned[T]) (*provider.Versioned[T], error) {
+		return m.write(snapshot)
 	})
-
-	return newVersion, nil
-}
-
-func (m *Provider[T]) Watch() *commonwatch.Watch[provider.Versioned[T]] {
-	return m.watcher
-}
-
-func (m *Provider[T]) watchLoop() {
-	_ = backoff.RetryNotify(func() error {
-		snapshot, err := m.loadLatest()
-		if err != nil {
-			return err
-		}
-		m.watcher.Publish(snapshot)
-		return m.watchOnce()
-	}, oxiatime.NewBackOffWithInitialInterval(m.ctx, time.Second), func(err error, duration time.Duration) {
-		m.logger.Warn("File metadata watch failed, reconnecting",
-			slog.String("path", m.path),
-			slog.Any("error", err),
-			slog.Duration("retry-after", duration))
-	})
-}
-
-func (m *Provider[T]) watchOnce() error {
-	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		return err
+		return metadatacommon.NotExists, err
 	}
-	defer func() {
-		if err := watcher.Close(); err != nil {
-			m.logger.Warn("Failed to close file metadata watcher", slog.Any("error", err))
-		}
-	}()
+	return stored.Version, nil
+}
 
-	if err := watcher.Add(filepath.Dir(m.path)); err != nil {
-		return err
-	}
-
-	watchedPath := filepath.Clean(m.path)
-	for {
-		select {
-		case <-m.ctx.Done():
-			return nil
-		case err, ok := <-watcher.Errors:
-			if !ok {
-				return errors.New("file metadata watcher errors channel closed")
-			}
-			return err
-		case event, ok := <-watcher.Events:
-			if !ok {
-				return errors.New("file metadata watcher events channel closed")
-			}
-			if filepath.Clean(event.Name) == watchedPath &&
-				event.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Rename|fsnotify.Remove) != 0 {
-				snapshot, err := m.loadLatest()
-				if err != nil {
-					return err
-				}
-				m.watcher.Publish(snapshot)
-			}
-		}
-	}
+func (m *Provider[T]) Reload() error {
+	return m.cache.Reload()
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/emirpasic/gods/v2/trees/redblacktree"
 	"go.uber.org/multierr"
 
+	"github.com/oxia-db/oxia/oxiad/common/vfs"
 	"github.com/oxia-db/oxia/oxiad/dataserver/wal/codec"
 
 	"github.com/oxia-db/oxia/common/object"
@@ -32,7 +33,12 @@ type ReadOnlySegmentsGroup interface {
 
 	Get(offset int64) (object.RefCount[ReadOnlySegment], error)
 
-	TrimSegments(offset int64) error
+	// TrimSegments deletes the segments that end before the one holding offset.
+	// currentSegment is the base offset of the read-write segment: once offset
+	// reaches it, all the segments before it get deleted, and the ones that a
+	// rollover adds after the caller read it are kept. When there are any to
+	// delete, it calls beforeDelete first, and deletes none if it fails.
+	TrimSegments(offset int64, currentSegment int64, beforeDelete func() error) error
 
 	GetLastCrc(baseOffset int64) (uint32, error)
 
@@ -44,19 +50,21 @@ type ReadOnlySegmentsGroup interface {
 type readOnlySegmentsGroup struct {
 	sync.Mutex
 
+	fs           vfs.FS
 	basePath     string
 	allSegments  *redblacktree.Tree[int64, bool]
 	openSegments *redblacktree.Tree[int64, object.RefCount[ReadOnlySegment]]
 }
 
-func newReadOnlySegmentsGroup(basePath string) (ReadOnlySegmentsGroup, error) {
+func newReadOnlySegmentsGroup(fs vfs.FS, basePath string) (ReadOnlySegmentsGroup, error) {
 	g := &readOnlySegmentsGroup{
+		fs:           fs,
 		basePath:     basePath,
 		allSegments:  redblacktree.New[int64, bool](),
 		openSegments: redblacktree.New[int64, object.RefCount[ReadOnlySegment]](),
 	}
 
-	segments, err := listAllSegments(basePath)
+	segments, err := listAllSegments(fs, basePath)
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +127,7 @@ func (r *readOnlySegmentsGroup) Get(offset int64) (object.RefCount[ReadOnlySegme
 		return nil, codec.ErrOffsetOutOfBounds
 	}
 
-	rosegment, err := newReadOnlySegment(r.basePath, baseOffset.Key)
+	rosegment, err := newReadOnlySegment(r.fs, r.basePath, baseOffset.Key)
 	if err != nil {
 		return nil, err
 	}
@@ -129,29 +137,26 @@ func (r *readOnlySegmentsGroup) Get(offset int64) (object.RefCount[ReadOnlySegme
 
 	r.openSegments.Put(rosegment.BaseOffset(), rc)
 	if err := r.cleanSegmentsCache(); err != nil {
-		return nil, err
+		return nil, multierr.Append(err, res.Close())
 	}
 	return res, nil
 }
 
-func (r *readOnlySegmentsGroup) TrimSegments(offset int64) error {
-	r.Lock()
-	defer r.Unlock()
-
-	// Find the segment that ends before the trim offset
-	segmentToKeep := offset
-	if node, found := r.allSegments.Floor(offset); found {
-		segmentToKeep = node.Key
-	}
-
-	var cutoffSegment int64
-	var node *redblacktree.Node[int64, bool]
-	var found bool
-	if node, found = r.allSegments.Floor(segmentToKeep - 1); !found {
+func (r *readOnlySegmentsGroup) TrimSegments(offset int64, currentSegment int64, beforeDelete func() error) error {
+	cutoffSegment, found := r.cutoffSegment(offset, currentSegment)
+	if !found {
 		return nil
 	}
 
-	cutoffSegment = node.Key
+	// Without holding the lock, so that the readers of the segments don't wait
+	// for beforeDelete
+	if err := beforeDelete(); err != nil {
+		return err
+	}
+
+	r.Lock()
+	defer r.Unlock()
+
 	var err error
 	for _, s := range r.allSegments.Keys() {
 		if s > cutoffSegment {
@@ -160,20 +165,22 @@ func (r *readOnlySegmentsGroup) TrimSegments(offset int64) error {
 
 		r.allSegments.Remove(s)
 		if segment, ok := r.openSegments.Get(s); ok {
-			err = multierr.Append(err, segment.Get().Delete())
+			// Release only the cache reference: the readers holding one keep
+			// the segment mapped until they close it, and a mapped file stays
+			// readable after its removal below
+			err = multierr.Append(err, segment.Close())
 			r.openSegments.Remove(s)
-			continue
 		}
 
-		c, err2 := newSegmentConfig(r.basePath, s)
+		c, err2 := newSegmentConfig(r.fs, r.basePath, s)
 		if err2 != nil {
 			err = multierr.Append(err, err2)
 			continue
 		}
 
 		err2 = multierr.Combine(
-			codec.RemoveFileIfExists(c.idxPath),
-			codec.RemoveFileIfExists(c.txnPath),
+			vfs.RemoveFileIfExists(r.fs, c.idxPath),
+			vfs.RemoveFileIfExists(r.fs, c.txnPath),
 		)
 		if err2 != nil {
 			err = multierr.Append(err, err2)
@@ -181,6 +188,27 @@ func (r *readOnlySegmentsGroup) TrimSegments(offset int64) error {
 	}
 
 	return err
+}
+
+// cutoffSegment returns the base offset of the last segment that ends before
+// the one holding offset.
+func (r *readOnlySegmentsGroup) cutoffSegment(offset int64, currentSegment int64) (int64, bool) {
+	r.Lock()
+	defer r.Unlock()
+
+	// Find the segment that ends before the trim offset
+	segmentToKeep := offset
+	if offset >= currentSegment {
+		segmentToKeep = currentSegment
+	} else if node, found := r.allSegments.Floor(offset); found {
+		segmentToKeep = node.Key
+	}
+
+	node, found := r.allSegments.Floor(segmentToKeep - 1)
+	if !found {
+		return 0, false
+	}
+	return node.Key, true
 }
 
 func (r *readOnlySegmentsGroup) PollHighestSegment() (object.RefCount[ReadOnlySegment], error) {
@@ -196,10 +224,14 @@ func (r *readOnlySegmentsGroup) PollHighestSegment() (object.RefCount[ReadOnlySe
 	r.allSegments.Remove(offset)
 	segment, found := r.openSegments.Get(offset)
 	if found {
-		return segment.Acquire(), nil
+		// Hand the cache reference over to the caller: the truncation deletes
+		// or rewrites the segment, and a cached object would keep serving the
+		// offsets appended again afterwards, closed or through its stale index
+		r.openSegments.Remove(offset)
+		return segment, nil
 	}
 
-	roSegment, err := newReadOnlySegment(r.basePath, offset)
+	roSegment, err := newReadOnlySegment(r.fs, r.basePath, offset)
 	if err != nil {
 		return nil, err
 	}

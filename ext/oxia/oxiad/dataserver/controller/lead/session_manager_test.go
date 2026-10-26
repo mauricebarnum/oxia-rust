@@ -15,20 +15,31 @@
 package lead
 
 import (
+	"container/heap"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"math"
+	"net/url"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	pb "google.golang.org/protobuf/proto"
 
+	"github.com/oxia-db/oxia/common/compare"
+	"github.com/oxia-db/oxia/common/hash"
 	"github.com/oxia-db/oxia/common/metric"
 	"github.com/oxia-db/oxia/oxiad/common/crc"
+	"github.com/oxia-db/oxia/oxiad/dataserver/controller/statemachine"
+	"github.com/oxia-db/oxia/oxiad/dataserver/database"
 
 	commonoption "github.com/oxia-db/oxia/oxiad/common/option"
 
@@ -40,6 +51,7 @@ import (
 	"github.com/oxia-db/oxia/oxiad/dataserver/wal"
 
 	"github.com/oxia-db/oxia/common/constant"
+	time2 "github.com/oxia-db/oxia/common/time"
 
 	"github.com/oxia-db/oxia/common/proto"
 )
@@ -108,6 +120,9 @@ func (m mockWriteBatch) Put(key string, value []byte) error {
 }
 
 func (m mockWriteBatch) Delete(key string) error {
+	if err, wasError := m[key].(error); wasError {
+		return err
+	}
 	delete(m, key)
 	return nil
 }
@@ -117,9 +132,11 @@ func (m mockWriteBatch) Get(key string) ([]byte, io.Closer, error) {
 	if !found {
 		return nil, nil, kvstore.ErrKeyNotFound
 	}
-	err, wasError := val.(error)
-	if wasError {
-		return nil, nil, err
+	switch v := val.(type) {
+	case error:
+		return nil, nil, v
+	case sessionManagerCloseFailure:
+		return []byte{}, v, nil
 	}
 	return val.([]byte), &mockCloser{}, nil
 }
@@ -132,12 +149,28 @@ func (m mockWriteBatch) DeleteRange(_, _ string) error {
 	return nil
 }
 
-func (m mockWriteBatch) KeyRangeScan(_, _ string) (kvstore.KeyIterator, error) {
-	return nil, kvstore.ErrKeyNotFound
+// KeyRangeScan lists the keys of the batch in the range, and fails with the
+// error stored at the lower bound, if any.
+func (m mockWriteBatch) KeyRangeScan(lowerBound, upperBound string) (kvstore.KeyIterator, error) {
+	if err, wasError := m[lowerBound].(error); wasError {
+		return nil, err
+	}
+	var keys []string
+	for key := range m {
+		if key >= lowerBound && key < upperBound {
+			keys = append(keys, key)
+		}
+	}
+	slices.Sort(keys)
+	return &sessionManagerKeysIterator{keys: keys}, nil
 }
 
 func (m mockWriteBatch) RangeScan(_, _ string) (kvstore.KeyValueIterator, error) {
 	return nil, kvstore.ErrKeyNotFound
+}
+
+func (m mockWriteBatch) RangeOverlaps(_, _ string) (internalKeys, regularKeys bool) {
+	return false, false
 }
 
 func (m mockWriteBatch) Commit() error {
@@ -161,7 +194,8 @@ func TestSessionUpdateOperationCallback_OnPut(t *testing.T) {
 
 	writeBatch := mockWriteBatch{}
 
-	status, err := sessionManagerUpdateOperationCallback.OnPut(writeBatch, nil, noSessionPutRequest, nil)
+	status, err := sessionManagerUpdateOperationCallback.OnPut(writeBatch, nil, noSessionPutRequest, nil,
+		testFeatureChecker{})
 	assert.NoError(t, err)
 	assert.Equal(t, proto.Status_OK, status)
 	assert.Equal(t, len(writeBatch), 0)
@@ -179,7 +213,8 @@ func TestSessionUpdateOperationCallback_OnPut(t *testing.T) {
 		SessionId:             &sessionId,
 	}
 
-	status, err = sessionManagerUpdateOperationCallback.OnPut(writeBatch, nil, noSessionPutRequest, se)
+	status, err = sessionManagerUpdateOperationCallback.OnPut(writeBatch, nil, noSessionPutRequest, se,
+		testFeatureChecker{})
 	assert.NoError(t, err)
 	assert.Equal(t, proto.Status_OK, status)
 	_, oldKeyFound := writeBatch[SessionKey(SessionId(sessionId))+"a"]
@@ -192,7 +227,7 @@ func TestSessionUpdateOperationCallback_OnPut(t *testing.T) {
 		SessionKey(SessionId(sessionId)):           []byte{},
 	}
 
-	status, err = sessionManagerUpdateOperationCallback.OnPut(writeBatch, nil, sessionPutRequest, se)
+	status, err = sessionManagerUpdateOperationCallback.OnPut(writeBatch, nil, sessionPutRequest, se, testFeatureChecker{})
 	assert.NoError(t, err)
 	assert.Equal(t, proto.Status_OK, status)
 	_, oldKeyFound = writeBatch[SessionKey(SessionId(sessionId-1))+"a"]
@@ -201,7 +236,8 @@ func TestSessionUpdateOperationCallback_OnPut(t *testing.T) {
 	assert.False(t, newKeyFound)
 
 	writeBatch = mockWriteBatch{}
-	status, err = sessionManagerUpdateOperationCallback.OnPut(writeBatch, nil, sessionPutRequest, nil)
+	status, err = sessionManagerUpdateOperationCallback.OnPut(writeBatch, nil, sessionPutRequest, nil,
+		testFeatureChecker{})
 	assert.NoError(t, err)
 	assert.Equal(t, proto.Status_SESSION_DOES_NOT_EXIST, status)
 
@@ -227,7 +263,7 @@ func TestSessionUpdateOperationCallback_OnPut(t *testing.T) {
 		SessionId: &sessionId,
 	}
 
-	status, err = sessionManagerUpdateOperationCallback.OnPut(writeBatch, nil, sessionPutRequest, se)
+	status, err = sessionManagerUpdateOperationCallback.OnPut(writeBatch, nil, sessionPutRequest, se, testFeatureChecker{})
 	assert.NoError(t, err)
 	assert.Equal(t, proto.Status_SESSION_DOES_NOT_EXIST, status)
 	_, closer, err := writeBatch.Get(ShadowKey(SessionId(sessionId-1), "a/b/c"))
@@ -238,13 +274,14 @@ func TestSessionUpdateOperationCallback_OnPut(t *testing.T) {
 	writeBatch = mockWriteBatch{
 		SessionKey(SessionId(sessionId)): expectedErr,
 	}
-	_, err = sessionManagerUpdateOperationCallback.OnPut(writeBatch, nil, sessionPutRequest, nil)
+	_, err = sessionManagerUpdateOperationCallback.OnPut(writeBatch, nil, sessionPutRequest, nil, testFeatureChecker{})
 	assert.ErrorIs(t, err, expectedErr)
 
 	writeBatch = mockWriteBatch{
 		SessionKey(SessionId(sessionId)): []byte{},
 	}
-	status, err = sessionManagerUpdateOperationCallback.OnPut(writeBatch, nil, sessionPutRequest, nil)
+	status, err = sessionManagerUpdateOperationCallback.OnPut(writeBatch, nil, sessionPutRequest, nil,
+		testFeatureChecker{})
 	assert.NoError(t, err)
 	assert.Equal(t, proto.Status_OK, status)
 	sessionShadowKey := ShadowKey(SessionId(sessionId), "a/b/c")
@@ -256,37 +293,178 @@ func TestSessionUpdateOperationCallback_OnPut(t *testing.T) {
 		SessionKey(SessionId(sessionId)): []byte{},
 		sessionShadowKey:                 expectedErr,
 	}
-	_, err = sessionManagerUpdateOperationCallback.OnPut(writeBatch, nil, sessionPutRequest, nil)
+	_, err = sessionManagerUpdateOperationCallback.OnPut(writeBatch, nil, sessionPutRequest, nil, testFeatureChecker{})
 	assert.ErrorIs(t, err, expectedErr)
 }
 
-func storageEntry(t *testing.T, sessionId int64) []byte {
-	t.Helper()
-
-	entry := &proto.StorageEntry{
-		Value:                 nil,
-		VersionId:             0,
-		CreationTimestamp:     0,
-		ModificationTimestamp: 0,
-		SessionId:             &sessionId,
-	}
-	bytes, err := pb.Marshal(entry)
-	assert.NoError(t, err)
-	return bytes
-}
-
-func TestSessionUpdateOperationCallback_OnDelete(t *testing.T) {
+func TestSessionUpdateOperationCallback_OnDeleteWithEntry(t *testing.T) {
 	sessionId := int64(12345)
 
 	writeBatch := mockWriteBatch{
-		"a/b/c": storageEntry(t, sessionId),
 		SessionKey(SessionId(sessionId)) + "/a%2Fb%2Fc": []byte{},
 	}
 
-	err := sessionManagerUpdateOperationCallback.OnDelete(writeBatch, nil, "a/b/c")
+	err := sessionManagerUpdateOperationCallback.OnDeleteWithEntry(writeBatch, nil, "a/b/c",
+		&proto.StorageEntry{SessionId: &sessionId}, testFeatureChecker{})
 	assert.NoError(t, err)
 	_, found := writeBatch[SessionKey(SessionId(sessionId))+"/a%2Fb%2Fc"]
 	assert.False(t, found)
+}
+
+func TestSessionUpdateOperationCallbackOnPutFailsWhenBatchFails(t *testing.T) {
+	sessionId := int64(12345)
+	otherSessionId := sessionId - 1
+	batchErr := errors.New("batch failed")
+	ephemeralEntry := &proto.StorageEntry{SessionId: &otherSessionId}
+
+	for _, tc := range []struct {
+		name          string
+		batch         mockWriteBatch
+		request       *proto.PutRequest
+		existingEntry *proto.StorageEntry
+	}{{
+		name: "close-session-read",
+		batch: mockWriteBatch{
+			SessionKey(SessionId(sessionId)): sessionManagerCloseFailure{err: batchErr},
+		},
+		request: &proto.PutRequest{Key: "a", SessionId: &sessionId},
+	}, {
+		name: "delete-previous-shadow-within-session",
+		batch: mockWriteBatch{
+			SessionKey(SessionId(sessionId)):          []byte{},
+			ShadowKey(SessionId(otherSessionId), "a"): batchErr,
+		},
+		request:       &proto.PutRequest{Key: "a", SessionId: &sessionId},
+		existingEntry: ephemeralEntry,
+	}, {
+		name: "delete-previous-shadow",
+		batch: mockWriteBatch{
+			ShadowKey(SessionId(otherSessionId), "a"): batchErr,
+		},
+		request:       &proto.PutRequest{Key: "a"},
+		existingEntry: ephemeralEntry,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, err := sessionManagerUpdateOperationCallback.OnPut(tc.batch, nil, tc.request, tc.existingEntry,
+				testFeatureChecker{})
+			assert.ErrorIs(t, err, batchErr)
+			assert.Equal(t, proto.Status_SESSION_DOES_NOT_EXIST, status)
+		})
+	}
+}
+
+func TestSessionUpdateOperationCallbackOnDeleteWithEntryFailsWhenBatchFails(t *testing.T) {
+	sessionId := SessionId(12345)
+	rawSessionId := int64(sessionId)
+	sessionKey := SessionKey(sessionId)
+	start, _ := shadowKeysRange(sessionKey, testFeatureChecker{})
+	batchErr := errors.New("batch failed")
+	indexedEntry, err := (&proto.StorageEntry{
+		SecondaryIndexes: []*proto.SecondaryIndex{{IndexName: "idx", SecondaryKey: "s"}},
+	}).MarshalVT()
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name     string
+		batch    mockWriteBatch
+		key      string
+		entry    *proto.StorageEntry
+		features testFeatureChecker
+	}{{
+		name:  "delete-shadow-of-record",
+		batch: mockWriteBatch{ShadowKey(sessionId, "a"): batchErr},
+		key:   "a",
+		entry: &proto.StorageEntry{SessionId: &rawSessionId},
+	}, {
+		name:  "list-shadow-keys",
+		batch: mockWriteBatch{start: batchErr},
+		key:   sessionKey,
+	}, {
+		name:  "delete-shadow-key",
+		batch: mockWriteBatch{ShadowKey(sessionId, "a"): batchErr},
+		key:   sessionKey,
+	}, {
+		name:  "read-ephemeral-record",
+		batch: mockWriteBatch{ShadowKey(sessionId, "a"): []byte{}, "a": batchErr},
+		key:   sessionKey,
+		// The index cleanup reads the record
+		features: testFeatureChecker{ephemeralSecondaryIndexCleanup: true},
+	}, {
+		name: "delete-ephemeral-record-index",
+		batch: mockWriteBatch{
+			ShadowKey(sessionId, "a"): []byte{},
+			"a":                       indexedEntry,
+			secondaryIndexKey("a", &proto.SecondaryIndex{IndexName: "idx", SecondaryKey: "s"}): batchErr,
+		},
+		key:      sessionKey,
+		features: testFeatureChecker{ephemeralSecondaryIndexCleanup: true},
+	}, {
+		name:  "delete-ephemeral-record",
+		batch: mockWriteBatch{ShadowKey(sessionId, "a"): []byte{}, "a": batchErr},
+		key:   sessionKey,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The shadow keys range of the session holds all its shadow keys
+			tc.features.ephemeralCleanupNaturalSorting = true
+			err := sessionManagerUpdateOperationCallback.OnDeleteWithEntry(tc.batch, nil, tc.key, tc.entry, tc.features)
+			assert.ErrorIs(t, err, batchErr)
+		})
+	}
+}
+
+// A shadow key whose key isn't escaped right can't name the record to delete:
+// the end of the session fails rather than leave the record behind.
+func TestSessionUpdateOperationCallbackOnDeleteWithEntryFailsOnMalformedShadowKey(t *testing.T) {
+	sessionKey := SessionKey(12345)
+	batch := mockWriteBatch{sessionKey + "/%zz": []byte{}}
+
+	err := sessionManagerUpdateOperationCallback.OnDeleteWithEntry(batch, nil, sessionKey, nil, testFeatureChecker{})
+	var escapeErr url.EscapeError
+	assert.ErrorAs(t, err, &escapeErr)
+}
+
+// Ephemeral keys whose escaped form starts with a byte below '/', and above
+// it. With the natural key sorting, the legacy shadow keys range of a session
+// only holds the shadow keys of the former.
+var (
+	ephemeralKeysBelowSlash = []string{"!bang", "$dollar", "-dash", ".dot", "/x/y", "é"}
+	ephemeralKeysAboveSlash = []string{"0eph", "9", ":colon", "@at", "A", "_under", "a", "~tilde"}
+)
+
+// The shadow keys range of a session holds all its shadow keys and nothing
+// else, with both key sortings. With the hierarchical sorting it is encoded
+// like the legacy range: the feature changes nothing there.
+func TestShadowKeysRange(t *testing.T) {
+	for _, key := range ephemeralKeysBelowSlash {
+		assert.Less(t, url.PathEscape(key)[0], byte('/'), key)
+	}
+	for _, key := range ephemeralKeysAboveSlash {
+		assert.Greater(t, url.PathEscape(key)[0], byte('/'), key)
+	}
+
+	id := SessionId(0xc0de)
+	legacyStart, legacyEnd := shadowKeysRange(SessionKey(id), testFeatureChecker{})
+	assert.Equal(t, SessionKey(id)+"/", legacyStart)
+	assert.Equal(t, SessionKey(id)+"//", legacyEnd)
+
+	start, end := shadowKeysRange(SessionKey(id), testFeatureChecker{ephemeralCleanupNaturalSorting: true})
+	assert.Equal(t, compare.EncoderHierarchical.Encode(legacyStart), compare.EncoderHierarchical.Encode(start))
+	assert.Equal(t, compare.EncoderHierarchical.Encode(legacyEnd), compare.EncoderHierarchical.Encode(end))
+
+	for _, encoder := range []compare.Encoder{compare.EncoderHierarchical, compare.EncoderNatural} {
+		inRange := func(key string) bool {
+			encodedKey := encoder.Encode(key)
+			return slices.Compare(encodedKey, encoder.Encode(start)) >= 0 && slices.Compare(encodedKey, encoder.Encode(end)) < 0
+		}
+		for _, key := range slices.Concat(ephemeralKeysBelowSlash, ephemeralKeysAboveSlash, []string{""}) {
+			assert.True(t, inRange(ShadowKey(id, key)), "%s: %q", encoder.Name(), key)
+			assert.False(t, inRange(ShadowKey(id-1, key)), "%s: %q", encoder.Name(), key)
+			assert.False(t, inRange(ShadowKey(id+1, key)), "%s: %q", encoder.Name(), key)
+		}
+		for _, key := range []string{SessionKey(id), SessionKey(id + 1), "a", "~"} {
+			assert.False(t, inRange(key), "%s: %q", encoder.Name(), key)
+		}
+	}
 }
 
 func TestSessionManager(t *testing.T) {
@@ -380,6 +558,36 @@ func TestSessionManager(t *testing.T) {
 		return getSessionMetadata(t, lc, sessionId) == nil &&
 			getData(t, lc, "a/b") == ""
 	}, 10*time.Second, 30*time.Millisecond)
+
+	assert.NoError(t, lc.Close())
+	assert.NoError(t, kvf.Close())
+	assert.NoError(t, walf.Close())
+}
+
+func TestSessionManagerCreateSessionFailsWhenRegistrationIsRejected(t *testing.T) {
+	kvf, walf, sManager, lc := createSessionManager(t)
+	replaceSessionUpdateCallback(t, func(*proto.PutRequest) proto.Status { return proto.Status_SESSION_DOES_NOT_EXIST })
+
+	_, err := sManager.CreateSession(&proto.CreateSessionRequest{Shard: 1, SessionTimeoutMs: 5000})
+	assert.ErrorContains(t, err, "failed to register session")
+	sManager.RLock()
+	assert.Empty(t, sManager.sessions)
+	sManager.RUnlock()
+
+	assert.NoError(t, lc.Close())
+	assert.NoError(t, kvf.Close())
+	assert.NoError(t, walf.Close())
+}
+
+func TestSessionManagerCreateSessionFailsWhenMetadataFailsToMarshal(t *testing.T) {
+	kvf, walf, sManager, lc := createSessionManager(t)
+	sManager.marshalMetadata = func(*proto.SessionMetadata) ([]byte, error) { return nil, errInjected }
+
+	_, err := sManager.CreateSession(&proto.CreateSessionRequest{Shard: 1, SessionTimeoutMs: 5000})
+	assert.ErrorIs(t, err, errInjected)
+	sManager.RLock()
+	assert.Empty(t, sManager.sessions)
+	sManager.RUnlock()
 
 	assert.NoError(t, lc.Close())
 	assert.NoError(t, kvf.Close())
@@ -557,6 +765,337 @@ func TestSessionManager_CloseDuringExpiry(t *testing.T) {
 	assert.NoError(t, walf.Close())
 }
 
+// expiryPauser is a log handler that parks the expiry scheduler of a session
+// manager on its "Session expired" line: the scheduler logs it after checking
+// that the manager is still open and right before proposing the deletion of
+// the expired sessions.
+type expiryPauser struct {
+	reached chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func pauseExpiry(sm *sessionManager) *expiryPauser {
+	p := &expiryPauser{reached: make(chan struct{}), release: make(chan struct{})}
+	sm.Lock()
+	sm.log = slog.New(p)
+	sm.Unlock()
+	return p
+}
+
+func (*expiryPauser) Enabled(context.Context, slog.Level) bool { return true }
+
+func (p *expiryPauser) Handle(_ context.Context, r slog.Record) error {
+	if r.Message == "Session expired" {
+		p.once.Do(func() {
+			close(p.reached)
+			<-p.release
+		})
+	}
+	return nil
+}
+
+func (p *expiryPauser) WithAttrs([]slog.Attr) slog.Handler { return p }
+
+func (p *expiryPauser) WithGroup(string) slog.Handler { return p }
+
+// expireNow makes the session due right away and nudges the expiry scheduler.
+func expireNow(sm *sessionManager, id int64) {
+	sm.Lock()
+	defer sm.Unlock()
+	s := sm.sessions[SessionId(id)]
+	s.deadline.Store(0)
+	s.heapDeadline = 0
+	heap.Fix(&sm.expiryHeap, s.heapIdx)
+	sm.wake()
+}
+
+func waitFor(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+// NewTerm, Close and DeleteShard stop the session manager while holding the
+// leader lock, which the expiry scheduler needs to propose the deletion of the
+// sessions it expired. They must not deadlock when the scheduler is about to
+// propose: it has checked that the manager is still open, but gets to the
+// leader lock only after they took it.
+func TestSessionManager_StopDuringExpiryProposal(t *testing.T) {
+	shardId := int64(1)
+	for _, tc := range []struct {
+		name string
+		stop func(lc *leaderController) error
+	}{{
+		name: "NewTerm",
+		stop: func(lc *leaderController) error {
+			_, err := lc.NewTerm(&proto.NewTermRequest{Shard: shardId, Term: 2})
+			return err
+		},
+	}, {
+		name: "Close",
+		stop: func(lc *leaderController) error { return lc.Close() },
+	}, {
+		name: "DeleteShard",
+		stop: func(lc *leaderController) error {
+			_, err := lc.DeleteShard(&proto.DeleteShardRequest{Namespace: constant.DefaultNamespace, Shard: shardId, Term: 1})
+			return err
+		},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			kvf, walf, sManager, lc := createSessionManager(t)
+			pauser := pauseExpiry(sManager)
+			createResp, err := sManager.CreateSession(&proto.CreateSessionRequest{
+				Shard:            shardId,
+				SessionTimeoutMs: uint32(time.Minute.Milliseconds()),
+			})
+			assert.NoError(t, err)
+
+			expireNow(sManager, createResp.SessionId)
+			waitFor(t, pauser.reached, "the expiry of the session")
+
+			stopDone := make(chan error, 1)
+			go func() { stopDone <- tc.stop(lc) }()
+
+			// The manager context is canceled while holding the leader lock:
+			// let the scheduler propose the deletion only then.
+			waitFor(t, sManager.ctx.Done(), "the session manager to be stopped")
+			close(pauser.release)
+
+			select {
+			case err = <-stopDone:
+				assert.NoError(t, err)
+			case <-time.After(10 * time.Second):
+				t.Fatalf("%s deadlocked with the expiry of a session", tc.name)
+			}
+
+			assert.NoError(t, lc.Close())
+			assert.NoError(t, kvf.Close())
+			assert.NoError(t, walf.Close())
+		})
+	}
+}
+
+// A session manager stopped by a new term must not write anymore, even when
+// its expiry scheduler gets to the leader lock only after the new term made
+// this node leader again: the deletion of the session it expired would land in
+// the new term, where the session is alive.
+func TestSessionManager_StoppedManagerDoesNotWrite(t *testing.T) {
+	shardId := int64(1)
+	kvf, walf, sManager, lc := createSessionManager(t)
+	pauser := pauseExpiry(sManager)
+	createResp, err := sManager.CreateSession(&proto.CreateSessionRequest{
+		Shard:            shardId,
+		SessionTimeoutMs: uint32(time.Minute.Milliseconds()),
+	})
+	assert.NoError(t, err)
+	sessionId := createResp.SessionId
+
+	expireNow(sManager, sessionId)
+	waitFor(t, pauser.reached, "the expiry of the session")
+
+	newTermDone := make(chan error, 1)
+	go func() {
+		_, err := lc.NewTerm(&proto.NewTermRequest{Shard: shardId, Term: 2})
+		newTermDone <- err
+	}()
+	waitFor(t, sManager.ctx.Done(), "the session manager to be stopped")
+
+	// Lead the new term while the stopped scheduler is still about to propose
+	becomeLeaderDone := make(chan struct{})
+	go func() {
+		_, err := lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
+			Shard:             shardId,
+			Term:              2,
+			ReplicationFactor: 1,
+		})
+		assert.NoError(t, err)
+		close(becomeLeaderDone)
+	}()
+	waitFor(t, becomeLeaderDone, "the new term to be led")
+
+	close(pauser.release)
+	select {
+	case err = <-newTermDone:
+		assert.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("new term deadlocked with the expiry of a session")
+	}
+
+	// The deletion was rejected: the session is still alive in the new term
+	assert.NotNil(t, getSessionMetadata(t, lc, sessionId))
+	newManager := lc.sessionManager.(*sessionManager)
+	newManager.RLock()
+	_, found := newManager.sessions[SessionId(sessionId)]
+	newManager.RUnlock()
+	assert.True(t, found)
+
+	assert.NoError(t, lc.Close())
+	assert.NoError(t, kvf.Close())
+	assert.NoError(t, walf.Close())
+}
+
+// The leader controller passes the session calls to the session manager of the
+// current term, which BecomeLeader replaces: the calls must get it under the
+// leader lock. A call that reaches a manager stopped by a new term fails.
+func TestSessionManager_SessionCallsDuringNewTerms(t *testing.T) {
+	shardId := int64(1)
+	kvf, walf, _, lc := createSessionManager(t)
+
+	// Every new leader restores this session
+	res, err := lc.CreateSession(&proto.CreateSessionRequest{
+		Shard:            shardId,
+		SessionTimeoutMs: uint32(time.Minute.Milliseconds()),
+	})
+	assert.NoError(t, err)
+	keptAliveId := res.SessionId
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// A session call fails when the node is fenced, when it reaches a manager
+	// stopped by a new term, or when the term ends before its write is
+	// applied. The sessions are alive: it never finds that they don't exist
+	checkError := func(err error) {
+		if !errors.Is(err, constant.ErrNodeIsNotLeader) && !errors.Is(err, constant.ErrResourceUnavailable) {
+			assert.Fail(t, "unexpected session call error", "%+v", err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	// A client creates, keeps alive and closes sessions, a call every
+	// millisecond: new terms come in between the calls
+	created := 0
+	wg.Go(func() {
+		for ctx.Err() == nil {
+			time.Sleep(time.Millisecond)
+			res, err := lc.CreateSession(&proto.CreateSessionRequest{
+				Shard:            shardId,
+				SessionTimeoutMs: uint32(constant.MinSessionTimeout.Milliseconds()),
+			})
+			if err != nil {
+				checkError(err)
+				continue
+			}
+			created++
+			time.Sleep(time.Millisecond)
+			if err = lc.KeepAlive(res.SessionId); err != nil {
+				checkError(err)
+			}
+			time.Sleep(time.Millisecond)
+			if _, err = lc.CloseSession(&proto.CloseSessionRequest{Shard: shardId, SessionId: res.SessionId}); err != nil {
+				checkError(err)
+			}
+		}
+	})
+	// Another client keeps its session alive. Unlike the session writes, a
+	// keep-alive takes the leader lock only to get the session manager
+	wg.Go(func() {
+		for ctx.Err() == nil {
+			if err := lc.KeepAlive(keptAliveId); err != nil {
+				checkError(err)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	})
+	// The node leads each new term for a millisecond at least, for the session
+	// writes to get through
+	wg.Go(func() {
+		for term := int64(2); ctx.Err() == nil; term++ {
+			_, err := lc.NewTerm(&proto.NewTermRequest{Shard: shardId, Term: term})
+			if !assert.NoError(t, err) {
+				return
+			}
+			_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
+				Shard:             shardId,
+				Term:              term,
+				ReplicationFactor: 1,
+			})
+			if !assert.NoError(t, err) {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	})
+	wg.Wait()
+	assert.Positive(t, created)
+
+	assert.NoError(t, lc.Close())
+	assert.NoError(t, kvf.Close())
+	assert.NoError(t, walf.Close())
+}
+
+// sessionCalls are the session calls of the leader controller and of the
+// session manager.
+type sessionCalls interface {
+	CreateSession(*proto.CreateSessionRequest) (*proto.CreateSessionResponse, error)
+	KeepAlive(sessionId int64) error
+	CloseSession(*proto.CloseSessionRequest) (*proto.CloseSessionResponse, error)
+}
+
+func assertNotLeader(t *testing.T, calls sessionCalls, shardId int64, sessionId int64, msg string) {
+	t.Helper()
+	assert.ErrorIs(t, calls.KeepAlive(sessionId), constant.ErrNodeIsNotLeader, "keep-alive on the %s", msg)
+	_, err := calls.CloseSession(&proto.CloseSessionRequest{Shard: shardId, SessionId: sessionId})
+	assert.ErrorIs(t, err, constant.ErrNodeIsNotLeader, "close on the %s", msg)
+	_, err = calls.CreateSession(&proto.CreateSessionRequest{
+		Shard:            shardId,
+		SessionTimeoutMs: uint32(time.Minute.Milliseconds()),
+	})
+	assert.ErrorIs(t, err, constant.ErrNodeIsNotLeader, "creation on the %s", msg)
+}
+
+// A node that doesn't lead the shard must reject the session calls with
+// ErrNodeIsNotLeader, which the clients retry on the leader of the shard. The
+// leader restores the sessions when it's elected, and expires those that are
+// not kept alive there: on ErrSessionNotFound, the client gives up the session
+// while it's alive, and so its ephemeral records get deleted.
+func TestSessionManager_SessionCallsOnNodeNotLeading(t *testing.T) {
+	shardId := int64(1)
+	kvf, walf, termOneManager, lc := createSessionManager(t)
+	res, err := lc.CreateSession(&proto.CreateSessionRequest{
+		Shard:            shardId,
+		SessionTimeoutMs: uint32(time.Minute.Milliseconds()),
+	})
+	require.NoError(t, err)
+	sessionId := res.SessionId
+
+	// A new term fences the node, like the leader election of the shard, or the
+	// end of a split for its parent. A call can also get the session manager of
+	// the node before the new term stops it.
+	_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shardId, Term: 2})
+	require.NoError(t, err)
+	assertNotLeader(t, lc, shardId, sessionId, "fenced node")
+	assertNotLeader(t, termOneManager, shardId, sessionId, "session manager of the previous term")
+
+	// Neither does a node that restarted lead the shard, until it's elected
+	require.NoError(t, lc.Close())
+	restarted, err := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shardId,
+		rpc.NewMockRpcClient(), walf, kvf, nil)
+	require.NoError(t, err)
+	assertNotLeader(t, restarted, shardId, sessionId, "restarted node")
+
+	// The leader of the next term restores the session
+	_, err = restarted.NewTerm(&proto.NewTermRequest{Shard: shardId, Term: 3})
+	require.NoError(t, err)
+	_, err = restarted.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
+		Shard:             shardId,
+		Term:              3,
+		ReplicationFactor: 1,
+	})
+	require.NoError(t, err)
+	assert.NoError(t, restarted.KeepAlive(sessionId))
+	_, err = restarted.CloseSession(&proto.CloseSessionRequest{Shard: shardId, SessionId: sessionId})
+	assert.NoError(t, err)
+
+	assert.NoError(t, restarted.Close())
+	assert.NoError(t, kvf.Close())
+	assert.NoError(t, walf.Close())
+}
+
 func TestSessionManagerReopening(t *testing.T) {
 	shardId := int64(1)
 	// Invalid session timeout
@@ -599,11 +1138,377 @@ func TestSessionManagerReopening(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "/a/b", getData(t, lc, "/a/b"))
 
-	lc = reopenLeaderController(t, walf, kvf, lc)
+	lc = reopenLeaderController(t, walf, kvf, lc, nil)
 
 	meta = getSessionMetadata(t, lc, sessionId)
 	assert.NotNil(t, meta)
 	assert.Equal(t, uint32(5000), meta.TimeoutMs)
+
+	assert.NoError(t, lc.Close())
+	assert.NoError(t, kvf.Close())
+	assert.NoError(t, walf.Close())
+}
+
+// A new leader restores the sessions whatever the key sorting of the shard.
+// With the natural sorting, '/' sorts before the hex digits of the session
+// ids, and the shadow keys of the ephemeral records sort among the session
+// keys.
+func TestSessionManagerReopening_KeySorting(t *testing.T) {
+	for _, keySorting := range []proto.KeySortingType{proto.KeySortingType_HIERARCHICAL, proto.KeySortingType_NATURAL} {
+		t.Run(keySorting.String(), func(t *testing.T) {
+			shardId := int64(1)
+			options := &proto.NewTermOptions{KeySorting: keySorting}
+			kvf, walf, sManager, lc := createSessionManagerWithOptions(t, options)
+
+			timeout := 2 * time.Second
+			var sessionIDs []int64
+			for i := 0; i < 2; i++ {
+				createResp, err := sManager.CreateSession(&proto.CreateSessionRequest{
+					Shard:            shardId,
+					SessionTimeoutMs: uint32(timeout.Milliseconds()),
+				})
+				assert.NoError(t, err)
+				sessionId := createResp.SessionId
+				sessionIDs = append(sessionIDs, sessionId)
+
+				_, err = lc.WriteBlock(context.Background(), &proto.WriteRequest{
+					Shard: &shardId,
+					Puts: []*proto.PutRequest{{
+						Key:       fmt.Sprintf("/ephemeral-%d", i),
+						Value:     []byte("a"),
+						SessionId: &sessionId,
+					}},
+				})
+				assert.NoError(t, err)
+			}
+
+			lc = reopenLeaderController(t, kvf, walf, lc, options)
+			sManager = lc.sessionManager.(*sessionManager)
+
+			// The sessions are restored with their own timeout: the empty value
+			// of a shadow key is not taken for their metadata
+			for _, sessionId := range sessionIDs {
+				assert.NoError(t, sManager.KeepAlive(sessionId))
+
+				sManager.RLock()
+				s := sManager.sessions[SessionId(sessionId)]
+				sManager.RUnlock()
+				if assert.NotNil(t, s) {
+					assert.Equal(t, timeout, s.timeout)
+				}
+			}
+
+			// Without heartbeats, the sessions expire and their ephemeral
+			// records are deleted
+			assert.Eventually(t, func() bool {
+				for i, sessionId := range sessionIDs {
+					if getSessionMetadata(t, lc, sessionId) != nil || getData(t, lc, fmt.Sprintf("/ephemeral-%d", i)) != "" {
+						return false
+					}
+				}
+				return true
+			}, 10*time.Second, 50*time.Millisecond)
+
+			assert.NoError(t, lc.Close())
+			assert.NoError(t, kvf.Close())
+			assert.NoError(t, walf.Close())
+		})
+	}
+}
+
+// A session end deletes all the ephemeral records of the session with both key
+// sortings. Until the feature is enabled, a natural-sorted shard keeps leaving
+// behind the records whose escaped key sorts after '/', so that the replicas
+// of a mixed-version ensemble apply a session end the same way.
+// A new leader restores the sessions it can read, and skips the session keys
+// and shadow keys it can't parse, rather than fail its election.
+func TestSessionManagerInitializeSkipsMalformedSessions(t *testing.T) {
+	shardId := int64(1)
+	// The natural sorting places the shadow keys among the session keys
+	options := &proto.NewTermOptions{KeySorting: proto.KeySortingType_NATURAL}
+	kvf, walf, sManager, lc := createSessionManagerWithOptions(t, options)
+
+	createResp, err := sManager.CreateSession(&proto.CreateSessionRequest{
+		Shard:            shardId,
+		SessionTimeoutMs: uint32(time.Minute.Milliseconds()),
+	})
+	require.NoError(t, err)
+
+	malformedId := sessionKeyPrefix + "/zzzzzzzzzzzzzzzz"
+	malformedMetadataId := int64(7777)
+	malformedKeys := []string{
+		malformedId,
+		SessionKey(SessionId(malformedMetadataId)),
+		// Shadow keys: no separator after the session key, a session id that
+		// isn't hex, a key that isn't escaped right, and an empty key
+		SessionKey(9) + "x",
+		sessionKeyPrefix + "/yyyyyyyyyyyyyyyy/a",
+		SessionKey(9) + "/%zz",
+		SessionKey(9) + "/",
+	}
+	var puts []*proto.PutRequest
+	for _, key := range malformedKeys {
+		puts = append(puts, &proto.PutRequest{Key: key, Value: []byte{}})
+	}
+	// Not a session metadata
+	puts[1].Value = []byte{0xff}
+	_, err = lc.WriteBlock(context.Background(), &proto.WriteRequest{Shard: &shardId, Puts: puts})
+	require.NoError(t, err)
+
+	lc = reopenLeaderController(t, kvf, walf, lc, options)
+	sManager = lc.sessionManager.(*sessionManager)
+
+	assert.NoError(t, sManager.KeepAlive(createResp.SessionId))
+	assert.ErrorIs(t, sManager.KeepAlive(malformedMetadataId), constant.ErrSessionNotFound)
+	sManager.RLock()
+	assert.Len(t, sManager.sessions, 1)
+	sManager.RUnlock()
+	for _, key := range malformedKeys {
+		assert.True(t, keyExists(t, lc, key), key)
+	}
+
+	assert.NoError(t, lc.Close())
+	assert.NoError(t, kvf.Close())
+	assert.NoError(t, walf.Close())
+}
+
+// A new leader fails its election when it can't read the sessions.
+func TestSessionManagerInitializeFailsWhenReadsFail(t *testing.T) {
+	shardId := int64(1)
+	options := &proto.NewTermOptions{KeySorting: proto.KeySortingType_NATURAL}
+	kvf, walf, sManager, lc := createSessionManagerWithOptions(t, options)
+
+	createResp, err := sManager.CreateSession(&proto.CreateSessionRequest{
+		Shard:            shardId,
+		SessionTimeoutMs: uint32(time.Minute.Milliseconds()),
+	})
+	require.NoError(t, err)
+	sessionKey := SessionKey(SessionId(createResp.SessionId))
+	// The shadow key of an ephemeral record whose session is gone
+	_, err = lc.WriteBlock(context.Background(), &proto.WriteRequest{Shard: &shardId, Puts: []*proto.PutRequest{
+		{Key: ShadowKey(99, "orphan"), Value: []byte{}},
+	}})
+	require.NoError(t, err)
+
+	readErr := errors.New("read failed")
+	failGetOf := func(key string) func(*proto.GetRequest) (*proto.GetResponse, error) {
+		return func(request *proto.GetRequest) (*proto.GetResponse, error) {
+			if request.Key == key {
+				return nil, readErr
+			}
+			return lc.db.(*hookedPrefixDB).DB.Get(request)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		db   *hookedPrefixDB
+	}{
+		{name: "list-sessions", db: &hookedPrefixDB{listErr: readErr}},
+		{name: "read-session", db: &hookedPrefixDB{get: failGetOf(sessionKey)}},
+		{name: "read-orphaned-record", db: &hookedPrefixDB{get: failGetOf("orphan")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			restore := sessionManagerReplaceDB(lc, tc.db)
+			defer restore()
+
+			deletes, err := sManager.Initialize()
+			assert.ErrorIs(t, err, readErr)
+			assert.Nil(t, deletes)
+		})
+	}
+
+	// A session whose metadata is gone by the time it's read is skipped
+	restore := sessionManagerReplaceDB(lc, &hookedPrefixDB{get: func(request *proto.GetRequest) (*proto.GetResponse, error) {
+		if request.Key == sessionKey {
+			return &proto.GetResponse{Status: proto.Status_KEY_NOT_FOUND}, nil
+		}
+		return lc.db.(*hookedPrefixDB).DB.Get(request)
+	}})
+	sManager.Lock()
+	sManager.removeSession(SessionId(createResp.SessionId))
+	sManager.Unlock()
+	deletes, err := sManager.Initialize()
+	assert.NoError(t, err)
+	assert.Empty(t, deletes)
+	sManager.RLock()
+	assert.Empty(t, sManager.sessions)
+	sManager.RUnlock()
+	restore()
+
+	assert.NoError(t, lc.Close())
+	assert.NoError(t, kvf.Close())
+	assert.NoError(t, walf.Close())
+}
+
+func TestSessionManager_CloseDeletesEphemeralRecords(t *testing.T) {
+	for _, keySorting := range []proto.KeySortingType{proto.KeySortingType_HIERARCHICAL, proto.KeySortingType_NATURAL} {
+		for _, featureEnabled := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/feature-enabled=%t", keySorting, featureEnabled), func(t *testing.T) {
+				shardId := int64(1)
+				var features []proto.Feature
+				if featureEnabled {
+					features = append(features, proto.Feature_FEATURE_EPHEMERAL_CLEANUP_NATURAL_SORTING)
+				}
+				options := &proto.NewTermOptions{KeySorting: keySorting, EnableNotifications: true}
+				kvf, walf, sManager, lc := createSessionManagerWithOptions(t, options, features...)
+
+				var sessionIDs []int64
+				for i := 0; i < 2; i++ {
+					createResp, err := sManager.CreateSession(&proto.CreateSessionRequest{
+						Shard:            shardId,
+						SessionTimeoutMs: uint32(time.Minute.Milliseconds()),
+					})
+					assert.NoError(t, err)
+					sessionIDs = append(sessionIDs, createResp.SessionId)
+				}
+				closedID, otherID := sessionIDs[0], sessionIDs[1]
+				assert.Equal(t, featureEnabled, lc.IsFeatureEnabled(proto.Feature_FEATURE_EPHEMERAL_CLEANUP_NATURAL_SORTING))
+
+				puts := []*proto.PutRequest{
+					{Key: "other", Value: []byte("other"), SessionId: &otherID},
+					{Key: "regular", Value: []byte("regular")},
+				}
+				for _, key := range slices.Concat(ephemeralKeysBelowSlash, ephemeralKeysAboveSlash) {
+					puts = append(puts, &proto.PutRequest{Key: key, Value: []byte(key), SessionId: &closedID})
+				}
+				_, err := lc.WriteBlock(context.Background(), &proto.WriteRequest{Shard: &shardId, Puts: puts})
+				assert.NoError(t, err)
+
+				_, err = sManager.CloseSession(&proto.CloseSessionRequest{Shard: shardId, SessionId: closedID})
+				assert.NoError(t, err)
+
+				for _, key := range ephemeralKeysBelowSlash {
+					assert.False(t, keyExists(t, lc, key), key)
+					assert.False(t, keyExists(t, lc, ShadowKey(SessionId(closedID), key)), key)
+				}
+				leftBehind := keySorting == proto.KeySortingType_NATURAL && !featureEnabled
+				for _, key := range ephemeralKeysAboveSlash {
+					assert.Equal(t, leftBehind, keyExists(t, lc, key), key)
+					assert.Equal(t, leftBehind, keyExists(t, lc, ShadowKey(SessionId(closedID), key)), key)
+				}
+				assert.True(t, keyExists(t, lc, "other"))
+				assert.True(t, keyExists(t, lc, ShadowKey(SessionId(otherID), "other")))
+				assert.True(t, keyExists(t, lc, "regular"))
+
+				assert.NoError(t, lc.Close())
+				assert.NoError(t, kvf.Close())
+				assert.NoError(t, walf.Close())
+			})
+		}
+	}
+}
+
+// Deleting an ephemeral record deletes its shadow key and its secondary index
+// entries, which the record's entry lists. A shadow key left behind would make
+// the session end delete a later record at the same key.
+func TestSessionManager_DeleteEphemeralRecord(t *testing.T) {
+	shardId := int64(1)
+	kvf, walf, sManager, lc := createSessionManager(t)
+
+	createResp, err := sManager.CreateSession(&proto.CreateSessionRequest{
+		Shard:            shardId,
+		SessionTimeoutMs: uint32(time.Minute.Milliseconds()),
+	})
+	assert.NoError(t, err)
+	sessionId := createResp.SessionId
+	secondaryIndex := &proto.SecondaryIndex{IndexName: "idx", SecondaryKey: "0"}
+
+	_, err = lc.WriteBlock(context.Background(), &proto.WriteRequest{Shard: &shardId, Puts: []*proto.PutRequest{{
+		Key:              "/a",
+		Value:            []byte("ephemeral"),
+		SessionId:        &sessionId,
+		SecondaryIndexes: []*proto.SecondaryIndex{secondaryIndex},
+	}}})
+	assert.NoError(t, err)
+	assert.True(t, keyExists(t, lc, ShadowKey(SessionId(sessionId), "/a")))
+	assert.True(t, keyExists(t, lc, secondaryIndexKey("/a", secondaryIndex)))
+
+	_, err = lc.WriteBlock(context.Background(), &proto.WriteRequest{
+		Shard:   &shardId,
+		Deletes: []*proto.DeleteRequest{{Key: "/a"}},
+	})
+	assert.NoError(t, err)
+	assert.False(t, keyExists(t, lc, "/a"))
+	assert.False(t, keyExists(t, lc, ShadowKey(SessionId(sessionId), "/a")))
+	assert.False(t, keyExists(t, lc, secondaryIndexKey("/a", secondaryIndex)))
+
+	_, err = lc.WriteBlock(context.Background(), &proto.WriteRequest{Shard: &shardId, Puts: []*proto.PutRequest{{
+		Key:   "/a",
+		Value: []byte("regular"),
+	}}})
+	assert.NoError(t, err)
+	_, err = sManager.CloseSession(&proto.CloseSessionRequest{Shard: shardId, SessionId: sessionId})
+	assert.NoError(t, err)
+	assert.Equal(t, "regular", getData(t, lc, "/a"))
+
+	assert.NoError(t, lc.Close())
+	assert.NoError(t, kvf.Close())
+	assert.NoError(t, walf.Close())
+}
+
+// A new leader deletes the ephemeral records whose session is gone: before the
+// feature, a session end left them behind on a natural-sorted shard.
+func TestSessionManager_DeleteOrphanedEphemeralRecords(t *testing.T) {
+	shardId := int64(1)
+	options := &proto.NewTermOptions{KeySorting: proto.KeySortingType_NATURAL, EnableNotifications: true}
+	kvf, walf, sManager, lc := createSessionManagerWithOptions(t, options)
+
+	var sessionIDs []int64
+	for i := 0; i < 2; i++ {
+		createResp, err := sManager.CreateSession(&proto.CreateSessionRequest{
+			Shard:            shardId,
+			SessionTimeoutMs: uint32(time.Minute.Milliseconds()),
+		})
+		assert.NoError(t, err)
+		sessionIDs = append(sessionIDs, createResp.SessionId)
+	}
+	closedID, liveID := sessionIDs[0], sessionIDs[1]
+
+	write := func(puts ...*proto.PutRequest) {
+		t.Helper()
+		_, err := lc.WriteBlock(context.Background(), &proto.WriteRequest{Shard: &shardId, Puts: puts})
+		assert.NoError(t, err)
+	}
+	puts := []*proto.PutRequest{{Key: "live", Value: []byte("live"), SessionId: &liveID}}
+	for _, key := range slices.Concat(ephemeralKeysBelowSlash, ephemeralKeysAboveSlash) {
+		puts = append(puts, &proto.PutRequest{Key: key, Value: []byte(key), SessionId: &closedID})
+	}
+	write(puts...)
+
+	_, err := sManager.CloseSession(&proto.CloseSessionRequest{Shard: shardId, SessionId: closedID})
+	assert.NoError(t, err)
+	for _, key := range ephemeralKeysAboveSlash {
+		assert.True(t, keyExists(t, lc, key), key)
+	}
+
+	// A record left behind can still be overwritten, and then it's no longer
+	// the ephemeral record of the session
+	write(&proto.PutRequest{Key: "a", Value: []byte("regular")},
+		&proto.PutRequest{Key: "A", Value: []byte("live"), SessionId: &liveID})
+	// A shadow key doesn't get a record deleted if the record isn't the session's
+	write(&proto.PutRequest{Key: ShadowKey(SessionId(closedID), "not-ephemeral"), Value: []byte{}},
+		&proto.PutRequest{Key: "not-ephemeral", Value: []byte("regular")})
+
+	lc = reopenLeaderController(t, kvf, walf, lc, options)
+
+	orphaned := slices.DeleteFunc(slices.Clone(ephemeralKeysAboveSlash), func(key string) bool {
+		return key == "a" || key == "A"
+	})
+	assert.Eventually(t, func() bool {
+		for _, key := range orphaned {
+			if keyExists(t, lc, key) || keyExists(t, lc, ShadowKey(SessionId(closedID), key)) {
+				return false
+			}
+		}
+		return true
+	}, 10*time.Second, 50*time.Millisecond)
+
+	assert.Equal(t, "regular", getData(t, lc, "a"))
+	assert.Equal(t, "regular", getData(t, lc, "not-ephemeral"))
+	assert.Equal(t, "live", getData(t, lc, "A"))
+	assert.True(t, keyExists(t, lc, ShadowKey(SessionId(liveID), "A")))
+	assert.Equal(t, "live", getData(t, lc, "live"))
+	assert.True(t, keyExists(t, lc, ShadowKey(SessionId(liveID), "live")))
 
 	assert.NoError(t, lc.Close())
 	assert.NoError(t, kvf.Close())
@@ -622,6 +1527,14 @@ func getData(t *testing.T, lc *leaderController, key string) string {
 		return string(resp.Value)
 	}
 	return ""
+}
+
+func keyExists(t *testing.T, lc *leaderController, key string) bool {
+	t.Helper()
+
+	resp, err := lc.db.Get(&proto.GetRequest{Key: key})
+	assert.NoError(t, err)
+	return resp.Status != proto.Status_KEY_NOT_FOUND
 }
 
 func keepAlive(t *testing.T, sManager *sessionManager, sessionId int64, err error, sleepTime time.Duration, heartbeatCount int) {
@@ -658,6 +1571,13 @@ func getSessionMetadata(t *testing.T, lc *leaderController, sessionId int64) *pr
 func createSessionManager(t *testing.T) (kvstore.Factory, wal.Factory, *sessionManager, *leaderController) {
 	t.Helper()
 
+	return createSessionManagerWithOptions(t, nil)
+}
+
+func createSessionManagerWithOptions(t *testing.T, options *proto.NewTermOptions,
+	features ...proto.Feature) (kvstore.Factory, wal.Factory, *sessionManager, *leaderController) {
+	t.Helper()
+
 	var shard int64 = 1
 
 	kvFactory, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
@@ -667,15 +1587,16 @@ func createSessionManager(t *testing.T) (kvstore.Factory, wal.Factory, *sessionM
 		Notification: option.NotificationOptions{
 			Retention: commonoption.Duration(10 * time.Second),
 		},
-	}, constant.DefaultNamespace, shard, rpc.NewMockRpcClient(), walFactory, kvFactory, nil)
+	}, constant.DefaultNamespace, shard, rpc.NewMockRpcClient(), walFactory, kvFactory, options)
 	assert.NoError(t, err)
-	_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 1})
+	_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 1, Options: options})
 	assert.NoError(t, err)
 	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
 		Shard:             shard,
 		Term:              1,
 		ReplicationFactor: 1,
 		FollowerMaps:      nil,
+		FeaturesSupported: features,
 	})
 	assert.NoError(t, err)
 
@@ -684,7 +1605,8 @@ func createSessionManager(t *testing.T) (kvstore.Factory, wal.Factory, *sessionM
 	return kvFactory, walFactory, sessionManager, lc.(*leaderController)
 }
 
-func reopenLeaderController(t *testing.T, kvFactory kvstore.Factory, walFactory wal.Factory, oldlc *leaderController) *leaderController {
+func reopenLeaderController(t *testing.T, kvFactory kvstore.Factory, walFactory wal.Factory, oldlc *leaderController,
+	options *proto.NewTermOptions) *leaderController {
 	t.Helper()
 
 	var shard int64 = 1
@@ -692,9 +1614,9 @@ func reopenLeaderController(t *testing.T, kvFactory kvstore.Factory, walFactory 
 	assert.NoError(t, oldlc.Close())
 
 	var err error
-	lc, err := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard, rpc.NewMockRpcClient(), walFactory, kvFactory, nil)
+	lc, err := NewLeaderController(&option.StorageOptions{}, constant.DefaultNamespace, shard, rpc.NewMockRpcClient(), walFactory, kvFactory, options)
 	assert.NoError(t, err)
-	_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 1})
+	_, err = lc.NewTerm(&proto.NewTermRequest{Shard: shard, Term: 1, Options: options})
 	assert.NoError(t, err)
 	_, err = lc.BecomeLeader(context.Background(), &proto.BecomeLeaderRequest{
 		Shard:             shard,
@@ -731,7 +1653,8 @@ func TestSession_PutWithExpiredSession(t *testing.T) {
 		SessionId: &newSessionId,
 	}
 
-	status, err := sessionManagerUpdateOperationCallback.OnPut(writeBatch, nil, sessionPutRequest, se)
+	status, err := sessionManagerUpdateOperationCallback.OnPut(writeBatch, nil, sessionPutRequest, se,
+		testFeatureChecker{})
 	assert.NoError(t, err)
 	assert.Equal(t, proto.Status_SESSION_DOES_NOT_EXIST, status)
 
@@ -739,6 +1662,107 @@ func TestSession_PutWithExpiredSession(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NoError(t, closer.Close())
 }
+
+// A split child catching up from its parent's log applies the creation of a
+// session as a put of the session metadata key. It must keep it whatever the
+// hash of that key: an ephemeral record of the session placed in the child is
+// otherwise rejected there for an unknown session, and lost although the
+// parent acknowledged it.
+func TestSplitChild_SessionCreatedDuringCatchUp(t *testing.T) {
+	kvf, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+	assert.NoError(t, err)
+	defer kvf.Close()
+	db, err := database.NewDB(constant.DefaultNamespace, 1, kvf, proto.KeySortingType_HIERARCHICAL, 1*time.Hour, time2.SystemClock)
+	assert.NoError(t, err)
+	defer db.Close()
+
+	// The child is the half of the hash space without the session key, and
+	// the ephemeral record is in it. The session id is the offset of its
+	// creation.
+	sessionId := SessionId(10)
+	mid := uint32(math.MaxUint32 / 2)
+	childRange := &proto.HashRange{Min: 0, Max: mid}
+	if hash.Xxh332(SessionKey(sessionId)) <= mid {
+		childRange = &proto.HashRange{Min: mid + 1, Max: math.MaxUint32}
+	}
+	var key string
+	for i := 0; key == "" && i < 1000; i++ {
+		if k := fmt.Sprintf("ephemeral-%d", i); hash.Xxh332(k) >= childRange.Min && hash.Xxh332(k) <= childRange.Max {
+			key = k
+		}
+	}
+	assert.NotEmpty(t, key)
+
+	apply := func(offset int64, request *proto.WriteRequest) {
+		value, err := pb.Marshal(&proto.LogEntryValue{Value: &proto.LogEntryValue_Requests{
+			Requests: &proto.WriteRequests{Writes: []*proto.WriteRequest{request}},
+		}})
+		assert.NoError(t, err)
+		_, err = statemachine.ApplyLogEntryWithSplitFilter(db, &proto.LogEntry{Term: 1, Offset: offset, Value: value},
+			WrapperUpdateOperationCallback, childRange)
+		assert.NoError(t, err)
+	}
+	metadata, err := (&proto.SessionMetadata{TimeoutMs: 5000}).MarshalVT()
+	assert.NoError(t, err)
+	apply(int64(sessionId), &proto.WriteRequest{Puts: []*proto.PutRequest{
+		{Key: SessionKey(sessionId), Value: metadata},
+	}})
+	apply(int64(sessionId)+1, &proto.WriteRequest{Puts: []*proto.PutRequest{
+		{Key: key, Value: []byte("v"), SessionId: new(int64(sessionId))},
+	}})
+
+	res, err := db.Get(&proto.GetRequest{Key: key})
+	assert.NoError(t, err)
+	assert.Equal(t, proto.Status_OK, res.Status)
+	assert.EqualValues(t, sessionId, res.GetVersion().GetSessionId())
+}
+
+// The split filter deletes, with each record that goes to the other child, the
+// index entries and the session shadow key the leader wrote for it: they
+// follow the record's partition key, whatever the hash of the record key.
+func TestSplitChild_RecordInternalKeysFollowPartitionKey(t *testing.T) {
+	mid := uint32(math.MaxUint32 / 2)
+	partitionKey := "pk-7"
+	sessionId := SessionId(1)
+	index := &proto.SecondaryIndex{IndexName: "pk", SecondaryKey: partitionKey}
+	var records []string
+	for i := 0; i < 20; i++ {
+		records = append(records, fmt.Sprintf("%s/rec-%06d", partitionKey, i))
+	}
+
+	for _, child := range []*proto.HashRange{{Min: 0, Max: mid}, {Min: mid + 1, Max: math.MaxUint32}} {
+		kvf, err := kvstore.NewPebbleKVFactory(kvstore.NewFactoryOptionsForTest(t))
+		assert.NoError(t, err)
+		db, err := database.NewDB(constant.DefaultNamespace, 1, kvf, proto.KeySortingType_HIERARCHICAL, 1*time.Hour, time2.SystemClock)
+		assert.NoError(t, err)
+
+		write := &proto.WriteRequest{Puts: []*proto.PutRequest{{Key: SessionKey(sessionId), Value: []byte{}}}}
+		for _, key := range records {
+			write.Puts = append(write.Puts, &proto.PutRequest{
+				Key: key, Value: []byte("v"), PartitionKey: &partitionKey,
+				SessionId: new(int64(sessionId)), SecondaryIndexes: []*proto.SecondaryIndex{index},
+			})
+		}
+		_, err = db.ProcessWrite(write, int64(sessionId), 0, WrapperUpdateOperationCallback)
+		assert.NoError(t, err)
+
+		assert.NoError(t, database.FilterDBForSplit(db.RawKV(), child))
+
+		owner := hash.Xxh332(partitionKey) >= child.Min && hash.Xxh332(partitionKey) <= child.Max
+		for _, record := range records {
+			for _, key := range []string{record, secondaryIndexKey(record, index), ShadowKey(sessionId, record)} {
+				_, _, closer, err := db.RawKV().Get(key, kvstore.ComparisonEqual, kvstore.ShowInternalKeys)
+				if assert.Equal(t, owner, err == nil, "key %q, child %v", key, child) && err == nil {
+					assert.NoError(t, closer.Close())
+				}
+			}
+		}
+
+		assert.NoError(t, db.Close())
+		assert.NoError(t, kvf.Close())
+	}
+}
+
 func TestIsSessionKey(t *testing.T) {
 	tests := []struct {
 		name string
@@ -834,7 +1858,7 @@ func TestSessionManager_CloseWithInFlightExpiry(t *testing.T) {
 
 	closeDone := make(chan struct{})
 	go func() {
-		assert.NoError(t, sm.Close())
+		sm.Close()
 		close(closeDone)
 	}()
 
@@ -845,12 +1869,13 @@ func TestSessionManager_CloseWithInFlightExpiry(t *testing.T) {
 	}
 }
 
-// The active-sessions metric is a synchronous up-down counter, maintained at
-// the map insert/remove sites, instead of an observable gauge: gauge callbacks
-// run under the metrics SDK's collection lock, which is how the #597 deadlock
-// happened. The counter must move exactly once per insert and remove —
-// CloseSession and session expiry can race on the same id, and the losing
-// remove must not decrement it a second time.
+// The active-sessions metric is an up-down counter, maintained at the map
+// insert/remove sites, instead of a gauge whose callback reads the sessions
+// map: gauge callbacks run under the metrics SDK's collection lock, so taking
+// the session manager lock there is how the #597 deadlock happened. The
+// counter must move exactly once per insert and remove — CloseSession and
+// session expiry can race on the same id, and the losing remove must not
+// decrement it a second time.
 func TestSessionManager_ActiveSessionsMetric(t *testing.T) {
 	// Swap in an SDK meter so the counter value can be read back.
 	previous := metric.GetMeter()
@@ -900,6 +1925,55 @@ func TestSessionManager_ActiveSessionsMetric(t *testing.T) {
 	sm.Unlock()
 	assert.EqualValues(t, 1, readCounter())
 
-	assert.NoError(t, sm.Close())
+	sm.Close()
 	assert.EqualValues(t, 0, readCounter())
 }
+
+// sessionManagerReplaceDB makes the leader controller use db, over its
+// database, and returns the function that restores it.
+func sessionManagerReplaceDB(lc *leaderController, db *hookedPrefixDB) (restore func()) {
+	lc.Lock()
+	defer lc.Unlock()
+	original := lc.db
+	db.DB = original
+	lc.db = db
+	return func() {
+		lc.Lock()
+		defer lc.Unlock()
+		lc.db = original
+	}
+}
+
+// sessionManagerCloseFailure is a value of a mockWriteBatch that Get returns
+// with a closer that fails with err.
+type sessionManagerCloseFailure struct {
+	err error
+}
+
+func (f sessionManagerCloseFailure) Close() error {
+	return f.err
+}
+
+// sessionManagerKeysIterator iterates over the keys of a mockWriteBatch.
+type sessionManagerKeysIterator struct {
+	keys []string
+}
+
+func (*sessionManagerKeysIterator) Close() error { return nil }
+
+func (it *sessionManagerKeysIterator) Valid() bool { return len(it.keys) > 0 }
+
+func (it *sessionManagerKeysIterator) Key() string { return it.keys[0] }
+
+func (it *sessionManagerKeysIterator) Next() bool {
+	it.keys = it.keys[1:]
+	return it.Valid()
+}
+
+func (*sessionManagerKeysIterator) Prev() bool { panic("not supported") }
+
+func (*sessionManagerKeysIterator) SeekGE(string) bool { panic("not supported") }
+
+func (*sessionManagerKeysIterator) SeekLT(string) bool { panic("not supported") }
+
+func (*sessionManagerKeysIterator) Error() error { return nil }

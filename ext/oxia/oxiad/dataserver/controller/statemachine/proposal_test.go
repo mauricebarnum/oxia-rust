@@ -15,11 +15,16 @@
 package statemachine
 
 import (
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	pb "google.golang.org/protobuf/proto"
 
+	"github.com/oxia-db/oxia/common/constant"
 	"github.com/oxia-db/oxia/common/proto"
+	"github.com/oxia-db/oxia/oxiad/dataserver/database"
 )
 
 func TestNewWriteProposal(t *testing.T) {
@@ -91,4 +96,63 @@ func TestControlProposal_ToLogEntry(t *testing.T) {
 	assert.NotNil(t, featureEnable)
 	assert.Equal(t, 1, len(featureEnable.Features))
 	assert.Equal(t, proto.Feature_FEATURE_DB_CHECKSUM, featureEnable.Features[0])
+}
+
+func TestControlProposalApplyReturnsDBError(t *testing.T) {
+	db := newTestDB(t)
+
+	proposal := NewControlProposal(0, &proto.ControlRequest{
+		Value: &proto.ControlRequest_FeatureEnable{
+			FeatureEnable: &proto.FeatureEnableRequest{Features: []proto.Feature{proto.Feature(math.MaxInt32)}},
+		},
+	})
+
+	_, err := proposal.Apply(db, database.NoOpCallback)
+	assert.ErrorIs(t, err, constant.ErrUnsupportedFeatures)
+}
+
+func TestNewProposalFromLogEntry(t *testing.T) {
+	for _, proposal := range []Proposal{
+		NewWriteProposal(3, &proto.WriteRequest{Puts: []*proto.PutRequest{{Key: "a", Value: []byte("v")}}}),
+		NewControlProposal(4, &proto.ControlRequest{
+			Value: &proto.ControlRequest_RecordChecksum{RecordChecksum: &proto.RecordChecksumRequest{}},
+		}),
+	} {
+		entryValue := &proto.LogEntryValue{}
+		proposal.ToLogEntry(entryValue)
+		value, err := entryValue.MarshalVT()
+		require.NoError(t, err)
+
+		rebuilt, err := NewProposalFromLogEntry(&proto.LogEntry{
+			Offset:    proposal.GetOffset(),
+			Timestamp: proposal.GetTimestamp(),
+			Value:     value,
+		})
+		require.NoError(t, err)
+		assert.IsType(t, proposal, rebuilt)
+		assert.Equal(t, proposal.GetOffset(), rebuilt.GetOffset())
+		assert.Equal(t, proposal.GetTimestamp(), rebuilt.GetTimestamp())
+		rebuiltValue := &proto.LogEntryValue{}
+		rebuilt.ToLogEntry(rebuiltValue)
+		assert.True(t, pb.Equal(entryValue, rebuiltValue))
+	}
+
+	// A leader appends a single write request per entry
+	value, err := (&proto.LogEntryValue{Value: &proto.LogEntryValue_Requests{Requests: &proto.WriteRequests{
+		Writes: []*proto.WriteRequest{{}, {}},
+	}}}).MarshalVT()
+	require.NoError(t, err)
+	_, err = NewProposalFromLogEntry(&proto.LogEntry{Value: value})
+	assert.Error(t, err)
+}
+
+func TestNewProposalFromLogEntryInvalidBytes(t *testing.T) {
+	_, err := NewProposalFromLogEntry(&proto.LogEntry{Value: []byte("invalid-protobuf-bytes")})
+	assert.Error(t, err)
+}
+
+func TestNewProposalFromLogEntryUnknownType(t *testing.T) {
+	// An entry value without any request
+	_, err := NewProposalFromLogEntry(&proto.LogEntry{Value: []byte{}})
+	assert.ErrorContains(t, err, "unknown proposal type")
 }

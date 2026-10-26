@@ -16,6 +16,7 @@ package proto
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 
 	"github.com/planetscale/vtprotobuf/codec/grpc"
@@ -74,6 +75,42 @@ func TestVtprotoCodec_UnmarshalMultiBuffer(t *testing.T) {
 	assert.Equal(t, entry.Value, decoded.Value)
 }
 
+// scribblingPool overwrites the buffers it gets back, as the next messages
+// received in a buffer reused from the gRPC pool would.
+type scribblingPool struct{}
+
+func (scribblingPool) Get(length int) *[]byte {
+	buf := make([]byte, length)
+	return &buf
+}
+
+func (scribblingPool) Put(buf *[]byte) {
+	for i := range *buf {
+		(*buf)[i] = 0xff
+	}
+}
+
+// A follower keeps the log entries it receives until it applies them, decoding
+// their values without copying: they must not alias the received buffer, which
+// gRPC frees right after unmarshaling.
+func TestVtprotoCodec_UnmarshalOwnsTheBytes(t *testing.T) {
+	codec := vtprotoCodec{}
+
+	msg := &Append{Term: 1, Entry: &LogEntry{Term: 1, Offset: 42, Value: bytes.Repeat([]byte("x"), 64*1024)}}
+	raw, err := msg.MarshalVT()
+	require.NoError(t, err)
+	pool := scribblingPool{}
+	buf := pool.Get(len(raw))
+	copy(*buf, raw)
+	data := mem.BufferSlice{mem.NewBuffer(buf, pool)}
+
+	decoded := &Append{}
+	require.NoError(t, codec.Unmarshal(data, decoded))
+	data.Free()
+	assert.True(t, bytes.Equal(msg.Entry.Value, decoded.Entry.Value),
+		"the decoded value changed along with the received buffer")
+}
+
 func TestVtprotoCodec_StandardProtoFallback(t *testing.T) {
 	codec := vtprotoCodec{}
 
@@ -89,12 +126,47 @@ func TestVtprotoCodec_StandardProtoFallback(t *testing.T) {
 	assert.Equal(t, "oxia", decoded.Service)
 }
 
+func TestVtprotoCodec_EncodedNotificationBatch(t *testing.T) {
+	codec := vtprotoCodec{}
+
+	key := "a"
+	nb := &NotificationBatch{Shard: 1, Offset: 42, Timestamp: 123, Notifications: []*NotificationEntry{
+		{Key: &key, Value: &Notification{Type: NotificationType_KEY_DELETED}},
+	}}
+	raw, err := nb.MarshalVT()
+	require.NoError(t, err)
+
+	// The bytes go out as they are, and decode as the batch on the other side
+	data, err := codec.Marshal(&EncodedNotificationBatch{Offset: 42, Data: raw})
+	require.NoError(t, err)
+	assert.Equal(t, raw, data.Materialize())
+
+	decoded := &NotificationBatch{}
+	require.NoError(t, codec.Unmarshal(data, decoded))
+	data.Free()
+	assert.True(t, nb.EqualVT(decoded))
+}
+
 func TestVtprotoCodec_InvalidMessage(t *testing.T) {
 	codec := vtprotoCodec{}
 
 	_, err := codec.Marshal(struct{}{})
 	assert.Error(t, err)
 	assert.Error(t, codec.Unmarshal(mem.BufferSlice{}, struct{}{}))
+}
+
+func TestVtprotoCodecMarshalReturnsSerializationError(t *testing.T) {
+	codec := vtprotoCodec{}
+
+	// Below and above the buffer-pooling threshold
+	for _, size := range []int{16, 64 * 1024} {
+		_, err := codec.Marshal(&failingMarshaler{size: size})
+		assert.ErrorIs(t, err, errTestMarshal)
+	}
+
+	// A message without the vtproto methods: proto3 strings must be valid UTF-8
+	_, err := codec.Marshal(&grpc_health_v1.HealthCheckRequest{Service: "\xff"})
+	assert.Error(t, err)
 }
 
 func BenchmarkCodecUnmarshal(b *testing.B) {
@@ -155,4 +227,23 @@ func BenchmarkCodecMarshal(b *testing.B) {
 			data.Free()
 		}
 	})
+}
+
+var errTestMarshal = errors.New("marshal failed")
+
+// failingMarshaler is a vtproto message whose serialization fails.
+type failingMarshaler struct {
+	size int
+}
+
+func (f *failingMarshaler) SizeVT() int {
+	return f.size
+}
+
+func (*failingMarshaler) MarshalToSizedBufferVT([]byte) (int, error) {
+	return 0, errTestMarshal
+}
+
+func (*failingMarshaler) UnmarshalVT([]byte) error {
+	return nil
 }

@@ -15,18 +15,24 @@
 package wal
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
+	"os"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/oxia-db/oxia/common/constant"
+	"github.com/oxia-db/oxia/common/object"
 	time2 "github.com/oxia-db/oxia/common/time"
 	"github.com/oxia-db/oxia/oxiad/common/logging"
+	"github.com/oxia-db/oxia/oxiad/common/vfs"
 
 	"github.com/oxia-db/oxia/common/proto"
 )
@@ -41,6 +47,230 @@ type mockedCommitOffsetProvider struct {
 
 func (p *mockedCommitOffsetProvider) CommitOffset() int64 {
 	return p.commitOffset.Load()
+}
+
+func (*mockedCommitOffsetProvider) FlushDatabase() error {
+	return nil
+}
+
+type flushingCommitOffsetProvider struct {
+	mockedCommitOffsetProvider
+	flush func() error
+}
+
+func (p *flushingCommitOffsetProvider) FlushDatabase() error {
+	return p.flush()
+}
+
+// The database can hold the entries of the segments to delete in memory only:
+// the trimming flushes it first, and deletes no segment when the flush fails.
+func TestWalTrimmerFlushesDatabaseBeforeDeletingSegments(t *testing.T) {
+	options := &FactoryOptions{
+		BaseWalDir:  t.TempDir(),
+		Retention:   2 * time.Millisecond,
+		SegmentSize: 1024,
+	}
+	segmentsPath := walPath(options.BaseWalDir, constant.DefaultNamespace, 1)
+
+	clock := &time2.MockedClock{}
+	commitOffsetProvider := &flushingCommitOffsetProvider{}
+	commitOffsetProvider.commitOffset.Store(math.MaxInt64)
+	flushes := atomic.Int64{}
+	failFlush := atomic.Bool{}
+	commitOffsetProvider.flush = func() error {
+		flushes.Add(1)
+		segments, err := listAllSegments(vfs.OSFS{}, segmentsPath)
+		assert.NoError(t, err)
+		assert.Contains(t, segments, int64(0))
+		if failFlush.Load() {
+			return errors.New("failed to flush")
+		}
+		return nil
+	}
+
+	w, err := newWal(constant.DefaultNamespace, 1, options, commitOffsetProvider, clock, 10*time.Millisecond)
+	require.NoError(t, err)
+
+	for i := int64(0); i < 100; i++ {
+		require.NoError(t, w.Append(&proto.LogEntry{
+			Term:      0,
+			Offset:    i,
+			Value:     []byte(fmt.Sprintf("%d", i)),
+			Timestamp: uint64(i),
+		}))
+	}
+	segments, err := listAllSegments(vfs.OSFS{}, segmentsPath)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(segments), 3)
+	secondSegment := segments[1]
+
+	// Trimming the first segment partially deletes none, and doesn't flush
+	clock.Set(secondSegment + 1)
+	assert.Eventually(t, func() bool {
+		return w.FirstOffset() == secondSegment-1
+	}, 10*time.Second, 10*time.Millisecond)
+	assert.Zero(t, flushes.Load())
+
+	// Trimming past it deletes it once the flush succeeds
+	failFlush.Store(true)
+	clock.Set(secondSegment + 2)
+	assert.Eventually(t, func() bool {
+		return flushes.Load() > 1
+	}, 10*time.Second, 10*time.Millisecond)
+	assert.EqualValues(t, secondSegment-1, w.FirstOffset())
+	segments, err = listAllSegments(vfs.OSFS{}, segmentsPath)
+	require.NoError(t, err)
+	assert.Contains(t, segments, int64(0))
+
+	failFlush.Store(false)
+	assert.Eventually(t, func() bool {
+		return w.FirstOffset() == secondSegment
+	}, 10*time.Second, 10*time.Millisecond)
+	segments, err = listAllSegments(vfs.OSFS{}, segmentsPath)
+	require.NoError(t, err)
+	assert.NotContains(t, segments, int64(0))
+
+	assert.NoError(t, w.Close())
+}
+
+// hookedCommitOffsetProvider runs a hook from the next CommitOffset call: the
+// trimming makes it once it computed the trim offset on the wal entries.
+type hookedCommitOffsetProvider struct {
+	mockedCommitOffsetProvider
+	hook atomic.Pointer[func()]
+}
+
+func (p *hookedCommitOffsetProvider) CommitOffset() int64 {
+	if hook := p.hook.Swap(nil); hook != nil {
+		(*hook)()
+	}
+	return p.mockedCommitOffsetProvider.CommitOffset()
+}
+
+// hookedSegmentsGroup runs hook when the trimming deletes its segments, and
+// getHook when a read looks a segment up. A truncation gets the segments it
+// polls through pollHook.
+type hookedSegmentsGroup struct {
+	ReadOnlySegmentsGroup
+	hook     func()
+	getHook  func()
+	pollHook func(segment object.RefCount[ReadOnlySegment]) object.RefCount[ReadOnlySegment]
+}
+
+func (g *hookedSegmentsGroup) PollHighestSegment() (object.RefCount[ReadOnlySegment], error) {
+	segment, err := g.ReadOnlySegmentsGroup.PollHighestSegment()
+	if err != nil || segment == nil || g.pollHook == nil {
+		return segment, err
+	}
+	return g.pollHook(segment), nil
+}
+
+func (g *hookedSegmentsGroup) Get(offset int64) (object.RefCount[ReadOnlySegment], error) {
+	if g.getHook != nil {
+		g.getHook()
+	}
+	return g.ReadOnlySegmentsGroup.Get(offset)
+}
+
+func (g *hookedSegmentsGroup) TrimSegments(offset int64, currentSegment int64, beforeDelete func() error) error {
+	if g.hook != nil {
+		g.hook()
+	}
+	return g.ReadOnlySegmentsGroup.TrimSegments(offset, currentSegment, beforeDelete)
+}
+
+// A follower clears its wal when it installs a snapshot, and truncates it for a
+// new leader, while the trimming runs without holding the wal lock. The trim
+// offset computed on the entries they drop must not apply to the entries that
+// the wal gets after them.
+func TestWalTrimmerDroppedEntries(t *testing.T) {
+	clearWal := func(w Wal) error { return w.Clear() }
+	truncateWal := func(lastSafeOffset int64) func(w Wal) error {
+		return func(w Wal) error {
+			_, err := w.TruncateLog(lastSafeOffset)
+			return err
+		}
+	}
+	for _, test := range []struct {
+		name string
+		drop func(w Wal) error
+		// Drop the entries while the trimming deletes the segments, instead
+		// of before it starts trimming the wal
+		whileDeletingSegments bool
+		// The offset of the entry the wal gets after the drop
+		nextOffset int64
+		// The first offset of the wal after it gets that entry
+		firstOffset int64
+	}{
+		{name: "clear", drop: clearWal, nextOffset: 200, firstOffset: 200},
+		{name: "clear-while-deleting-segments", drop: clearWal, whileDeletingSegments: true,
+			nextOffset: 200, firstOffset: 200},
+		{name: "truncate-all", drop: truncateWal(InvalidOffset), nextOffset: 200, firstOffset: 200},
+		{name: "truncate", drop: truncateWal(98), nextOffset: 99, firstOffset: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			options := &FactoryOptions{
+				BaseWalDir:  t.TempDir(),
+				Retention:   2 * time.Millisecond,
+				SegmentSize: 1024,
+			}
+			clock := &time2.MockedClock{}
+			commitOffsetProvider := &hookedCommitOffsetProvider{}
+			commitOffsetProvider.commitOffset.Store(math.MaxInt64)
+
+			// The trimming only runs when the test calls it
+			w, err := newWal(constant.DefaultNamespace, 1, options, commitOffsetProvider, clock, time.Hour)
+			require.NoError(t, err)
+			impl := w.(*wal)
+			trimmer := impl.trimmer.(*trimmer)
+			appendEntries := func(firstOffset, lastOffset int64) {
+				for i := firstOffset; i <= lastOffset; i++ {
+					require.NoError(t, w.Append(&proto.LogEntry{
+						Offset:    i,
+						Value:     []byte(fmt.Sprintf("%d", i)),
+						Timestamp: uint64(i),
+					}))
+				}
+			}
+			appendEntries(0, 99)
+
+			drop := func() { require.NoError(t, test.drop(w)) }
+			if test.whileDeletingSegments {
+				impl.Lock()
+				impl.readOnlySegments = &hookedSegmentsGroup{ReadOnlySegmentsGroup: impl.readOnlySegments, hook: drop}
+				impl.Unlock()
+			} else {
+				commitOffsetProvider.hook.Store(&drop)
+			}
+
+			// The trimming computes the trim offset 99, on the entries before
+			// the drop
+			clock.Set(101)
+			require.NoError(t, trimmer.doTrim())
+
+			appendEntries(test.nextOffset, test.nextOffset+99)
+			assert.EqualValues(t, test.firstOffset, w.FirstOffset())
+
+			// The wal holds the entries from its first offset
+			_, err = w.NewReader(test.firstOffset - 2)
+			assert.ErrorIs(t, err, ErrEntryNotFound)
+			r, err := w.NewReader(test.firstOffset - 1)
+			require.NoError(t, err)
+			for offset := test.firstOffset; offset <= w.LastOffset(); offset++ {
+				entry, _, _, err := r.ReadNext()
+				require.NoError(t, err)
+				assert.EqualValues(t, offset, entry.Offset)
+			}
+			assert.NoError(t, r.Close())
+
+			// And the next trimming trims them
+			clock.Set(test.nextOffset + 52)
+			require.NoError(t, trimmer.doTrim())
+			assert.EqualValues(t, test.nextOffset+50, w.FirstOffset())
+
+			assert.NoError(t, w.Close())
+		})
+	}
 }
 
 func TestWalTrimmer(t *testing.T) {
@@ -168,4 +398,133 @@ func TestWalTrimUpToCommitOffset(t *testing.T) {
 			assert.NoError(t, w.Close())
 		})
 	}
+}
+
+func TestTrimmerDoTrimSkipsEmptyWal(t *testing.T) {
+	options := &FactoryOptions{
+		BaseWalDir:  t.TempDir(),
+		Retention:   1 * time.Millisecond,
+		SegmentSize: 128,
+	}
+	clock := &time2.MockedClock{}
+	clock.Set(1000)
+	commitOffsetProvider := &mockedCommitOffsetProvider{}
+	commitOffsetProvider.commitOffset.Store(math.MaxInt64)
+	w, err := newWal(constant.DefaultNamespace, 1, options, commitOffsetProvider, clock, time.Hour)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, w.Close()) })
+	impl := w.(*wal)
+
+	require.NoError(t, impl.trimmer.(*trimmer).doTrim())
+	assert.EqualValues(t, InvalidOffset, w.FirstOffset())
+	assert.EqualValues(t, InvalidOffset, w.LastOffset())
+}
+
+// The trimming deletes the last read-only segment once the trim offset reaches
+// the current segment, but not past the commit offset. The next trimming reads
+// the first entry from the current segment.
+func TestTrimmerDoTrimDeletesLastReadOnlySegmentUpToCommitOffset(t *testing.T) {
+	w, tr, segments := newWalWithExpiredSegments(t)
+	current := segments[len(segments)-1]
+	commitOffsetProvider := tr.commitOffsetProvider.(*mockedCommitOffsetProvider)
+
+	commitOffsetProvider.commitOffset.Store(current - 1)
+	require.NoError(t, tr.doTrim())
+	assert.EqualValues(t, current-1, w.FirstOffset())
+	remaining, err := listAllSegments(vfs.OSFS{}, w.walPath)
+	require.NoError(t, err)
+	assert.Equal(t, segments[len(segments)-2:], remaining)
+
+	commitOffsetProvider.commitOffset.Store(math.MaxInt64)
+	require.NoError(t, tr.doTrim())
+	assert.EqualValues(t, 19, w.FirstOffset())
+	remaining, err = listAllSegments(vfs.OSFS{}, w.walPath)
+	require.NoError(t, err)
+	assert.Equal(t, []int64{current}, remaining)
+
+	require.NoError(t, tr.doTrim())
+	assert.EqualValues(t, 19, w.FirstOffset())
+}
+
+func TestTrimmerDoTrimFailsWhenFirstEntryIsUnreadable(t *testing.T) {
+	w, tr, segments := newWalWithExpiredSegments(t)
+	c, err := newSegmentConfig(vfs.OSFS{}, w.walPath, segments[0])
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(c.txnPath))
+
+	err = tr.doTrim()
+	assert.ErrorContains(t, err, "failed to read from wal at offset 0")
+	assert.EqualValues(t, 0, w.FirstOffset())
+}
+
+func TestTrimmerDoTrimFailsWhenBinarySearchHitsUnreadableEntry(t *testing.T) {
+	w, tr, segments := newWalWithExpiredSegments(t)
+	// The first probe of the binary search over [0, 19]
+	med := int64(10)
+	i, _ := slices.BinarySearch(segments, med+1)
+	holding := segments[i-1]
+	require.NotEqual(t, segments[0], holding)
+	require.NotEqual(t, segments[len(segments)-1], holding)
+	c, err := newSegmentConfig(vfs.OSFS{}, w.walPath, holding)
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(c.txnPath))
+
+	err = tr.doTrim()
+	assert.ErrorContains(t, err, "failed to perform binary search")
+	assert.EqualValues(t, 0, w.FirstOffset())
+}
+
+// The binary search fails when the wal gets trimmed past the entries it
+// still has to probe.
+func TestTrimmerDoTrimFailsWhenBinarySearchEntryIsTrimmed(t *testing.T) {
+	w, tr, _ := newWalWithExpiredSegments(t)
+	// Only the entries before 5 expired: the search probes 10, then 5
+	tr.clock.(*time2.MockedClock).Set(6)
+	var lookups atomic.Int32
+	trimDuringProbe := func() {
+		if lookups.Add(1) == 2 {
+			require.NoError(t, w.trim(10, w.generation.Load(), func() error { return nil }))
+		}
+	}
+	w.Lock()
+	w.readOnlySegments = &hookedSegmentsGroup{ReadOnlySegmentsGroup: w.readOnlySegments, getHook: trimDuringProbe}
+	w.Unlock()
+
+	err := tr.doTrim()
+	assert.ErrorIs(t, err, ErrEntryNotFound)
+	assert.ErrorContains(t, err, "failed to create reader")
+	assert.EqualValues(t, 10, w.FirstOffset())
+}
+
+// newWalWithExpiredSegments returns a wal holding the entries 0..19 across
+// several segments, all past their retention, and its trimmer, which runs
+// only when the test calls it.
+func newWalWithExpiredSegments(t *testing.T) (*wal, *trimmer, []int64) {
+	t.Helper()
+	options := &FactoryOptions{
+		BaseWalDir:  t.TempDir(),
+		Retention:   1 * time.Millisecond,
+		SegmentSize: 128,
+	}
+	clock := &time2.MockedClock{}
+	commitOffsetProvider := &mockedCommitOffsetProvider{}
+	commitOffsetProvider.commitOffset.Store(math.MaxInt64)
+
+	w, err := newWal(constant.DefaultNamespace, 1, options, commitOffsetProvider, clock, time.Hour)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, w.Close()) })
+	for i := int64(0); i < 20; i++ {
+		require.NoError(t, w.Append(&proto.LogEntry{
+			Offset:    i,
+			Value:     []byte(fmt.Sprintf("%d", i)),
+			Timestamp: uint64(i),
+		}))
+	}
+	clock.Set(1000)
+
+	impl := w.(*wal)
+	segments, err := listAllSegments(vfs.OSFS{}, impl.walPath)
+	require.NoError(t, err)
+	require.Greater(t, len(segments), 3)
+	return impl, impl.trimmer.(*trimmer), segments
 }
