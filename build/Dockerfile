@@ -116,7 +116,7 @@ RUN --mount=type=cache,target=/root/.cache/sccache,sharing=locked \
 
 # ===== 5c. Parallel Builder: Miri Targets =====
 FROM source-context AS build-miri
-RUN RUSTC_WRAPPER= \
+RUN env -u RUSTC_WRAPPER \
     MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-disable-isolation" \
     cargo +nightly miri nextest run --package mauricebarnum-oxia-client --features metrics --frozen --no-run
 
