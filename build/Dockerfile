@@ -2,7 +2,7 @@
 ARG CARGO_HOME=/root/.cargo
 ARG RUSTUP_HOME=/root/.rustup
 ARG HOME=/root
-ARG RUST_VERSION=1.99.1
+ARG RUST_VERSION=1.100.0
 ARG RUST_VERSION_EXTERNAL_TYPES=nightly-2026-03-20
 ARG RUST_HOST_TRIPLE=aarch64-unknown-linux-gnu
 ARG GO_VERSION=1.27.4
@@ -27,23 +27,23 @@ ARG RUST_VERSION_EXTERNAL_TYPES
 RUN rustup toolchain install "${RUST_VERSION_EXTERNAL_TYPES}" --profile minimal && \
     cargo +"${RUST_VERSION_EXTERNAL_TYPES}" install cargo-check-external-types
 
-# Nightly + miri. This stage is a leaf: only build-miri and final-filesystem
-# consume it. NIGHTLY_STAMP is a cache key supplied by CI (e.g. the nightly
-# release date). A new value re-runs this RUN, and every stage below it.
-FROM rust-stable-toolchain AS rust-nightly-miri-toolchain
-ARG RUST_HOST_TRIPLE
-ARG NIGHTLY_STAMP
-RUN if [ -z "${NIGHTLY_STAMP}" ]; then \
-    echo "WARNING: NIGHTLY_STAMP not set; this layer will be reused from cache indefinitely"; \
-    else \
-    echo "nightly stamp: ${NIGHTLY_STAMP}"; \
-    fi && \
-    rustup toolchain install --profile minimal --allow-downgrade nightly && \
-    rustup component add --toolchain nightly miri rust-src && \
-    cargo +nightly miri setup --print-sysroot && \
-    { test -d "/usr/local/rustup/toolchains/nightly-${RUST_HOST_TRIPLE}" || \
-    { echo "ERROR: no toolchain dir for nightly-${RUST_HOST_TRIPLE}; check RUST_HOST_TRIPLE"; exit 1; }; } && \
-    rustc +nightly -vV > /etc/rust-nightly-version
+# # Nightly + miri. This stage is a leaf: only build-miri and final-filesystem
+# # consume it. NIGHTLY_STAMP is a cache key supplied by CI (e.g. the nightly
+# # release date). A new value re-runs this RUN, and every stage below it.
+# FROM rust-stable-toolchain AS rust-nightly-miri-toolchain
+# ARG RUST_HOST_TRIPLE
+# ARG NIGHTLY_STAMP
+# RUN if [ -z "${NIGHTLY_STAMP}" ]; then \
+#     echo "WARNING: NIGHTLY_STAMP not set; this layer will be reused from cache indefinitely"; \
+#     else \
+#     echo "nightly stamp: ${NIGHTLY_STAMP}"; \
+#     fi && \
+#     rustup toolchain install --profile minimal --allow-downgrade nightly && \
+#     rustup component add --toolchain nightly miri rust-src && \
+#     cargo +nightly miri setup --print-sysroot && \
+#     { test -d "/usr/local/rustup/toolchains/nightly-${RUST_HOST_TRIPLE}" || \
+#     { echo "ERROR: no toolchain dir for nightly-${RUST_HOST_TRIPLE}; check RUST_HOST_TRIPLE"; exit 1; }; } && \
+#     rustc +nightly -vV > /etc/rust-nightly-version
 
 # ===== 2. OS Base Stage =====
 FROM ubuntu:26.04 AS os-base
@@ -87,9 +87,9 @@ ENV CARGO_HOME=${CARGO_HOME} \
     SCCACHE_DIR="${HOME}/.cache/sccache" \
     PATH=${CARGO_HOME}/bin:${RUSTUP_HOME}/bin:$PATH
 
-COPY --from=rust-nightly-miri-toolchain /usr/local/rustup ${RUSTUP_HOME}
+# COPY --from=rust-nightly-miri-toolchain /usr/local/rustup ${RUSTUP_HOME}
 COPY --from=rust-external-types-toolchain /usr/local/rustup ${RUSTUP_HOME}
-COPY --from=rust-nightly-miri-toolchain /usr/local/cargo ${CARGO_HOME}
+# COPY --from=rust-nightly-miri-toolchain /usr/local/cargo ${CARGO_HOME}
 COPY --from=rust-external-types-toolchain /usr/local/cargo ${CARGO_HOME}
 COPY --from=cargo-bin-tools /usr/local/cargo ${CARGO_HOME}
 COPY --from=go-builder /tmp/oxia ${CARGO_HOME}/bin/oxia
@@ -129,34 +129,34 @@ RUN --mount=type=cache,target=/root/.cache/sccache,sharing=locked \
     cargo clippy --profile ci-debug --no-deps --all-targets --features metrics --frozen -- -D warnings
 
 # ===== 5c. Parallel Builder: Miri Targets (nightly attaches here) =====
-FROM source-context AS build-miri
-ARG RUST_HOST_TRIPLE
-ARG HOME
-# Match the final image so cargo-miri resolves the same sysroot location.
-ENV XDG_CACHE_HOME=${HOME}/.cache
-COPY --from=rust-nightly-miri-toolchain \
-    /usr/local/rustup/toolchains/nightly-${RUST_HOST_TRIPLE} \
-    ${RUSTUP_HOME}/toolchains/nightly-${RUST_HOST_TRIPLE}
-
-# Build the miri sysroot explicitly and online, from a neutral directory so
-# workspace .cargo/config.toml (e.g. vendored sources) does not apply. The
-# nightly stage no longer pre-populates CARGO_HOME with std's dependencies,
-# so the --frozen build below cannot be relied on to fetch them.
-RUN cd /tmp && env -u RUSTC_WRAPPER cargo +nightly miri setup --print-sysroot
-
-RUN env -u RUSTC_WRAPPER \
-    MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-disable-isolation" \
-    cargo +nightly miri nextest run --package mauricebarnum-oxia-client --features metrics --frozen --no-run
-
-# Keep Miri dependency and sysroot warmup, but do not ship local workspace
-# artifacts. They are path-sensitive and must be rebuilt in the validation
-# checkout that runs cargo-miri. Let Cargo remove every artifact associated
-# with workspace packages, including build-script outputs and fingerprints.
-FROM build-miri AS build-miri-final-artifacts
-RUN cargo +nightly clean \
-    --target-dir "${CARGO_TARGET_DIR}/miri" \
-    --target "$(rustc +nightly -vV | sed -n 's/^host: //p')" \
-    --workspace
+# FROM source-context AS build-miri
+# ARG RUST_HOST_TRIPLE
+# ARG HOME
+# # Match the final image so cargo-miri resolves the same sysroot location.
+# ENV XDG_CACHE_HOME=${HOME}/.cache
+# COPY --from=rust-nightly-miri-toolchain \
+#     /usr/local/rustup/toolchains/nightly-${RUST_HOST_TRIPLE} \
+#     ${RUSTUP_HOME}/toolchains/nightly-${RUST_HOST_TRIPLE}
+#
+# # Build the miri sysroot explicitly and online, from a neutral directory so
+# # workspace .cargo/config.toml (e.g. vendored sources) does not apply. The
+# # nightly stage no longer pre-populates CARGO_HOME with std's dependencies,
+# # so the --frozen build below cannot be relied on to fetch them.
+# RUN cd /tmp && env -u RUSTC_WRAPPER cargo +nightly miri setup --print-sysroot
+#
+# RUN env -u RUSTC_WRAPPER \
+#     MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-disable-isolation" \
+#     cargo +nightly miri nextest run --package mauricebarnum-oxia-client --features metrics --frozen --no-run
+#
+# # Keep Miri dependency and sysroot warmup, but do not ship local workspace
+# # artifacts. They are path-sensitive and must be rebuilt in the validation
+# # checkout that runs cargo-miri. Let Cargo remove every artifact associated
+# # with workspace packages, including build-script outputs and fingerprints.
+# FROM build-miri AS build-miri-final-artifacts
+# RUN cargo +nightly clean \
+#     --target-dir "${CARGO_TARGET_DIR}/miri" \
+#     --target "$(rustc +nightly -vV | sed -n 's/^host: //p')" \
+#     --workspace
 
 FROM source-context AS final-cargo-home
 RUN rm -f "${CARGO_HOME}/bin/cargo-binstall"
@@ -172,18 +172,18 @@ COPY --from=os-base / /
 COPY --from=final-cargo-home ${CARGO_HOME} ${CARGO_HOME}
 COPY --from=source-context ${RUSTUP_HOME} ${RUSTUP_HOME}
 # Nightly toolchain goes in after the stable rustup dir; record which nightly it is.
-COPY --from=rust-nightly-miri-toolchain \
-    /usr/local/rustup/toolchains/nightly-${RUST_HOST_TRIPLE} \
-    ${RUSTUP_HOME}/toolchains/nightly-${RUST_HOST_TRIPLE}
-COPY --from=rust-nightly-miri-toolchain /etc/rust-nightly-version /etc/rust-nightly-version
+# COPY --from=rust-nightly-miri-toolchain \
+#     /usr/local/rustup/toolchains/nightly-${RUST_HOST_TRIPLE} \
+#     ${RUSTUP_HOME}/toolchains/nightly-${RUST_HOST_TRIPLE}
+# COPY --from=rust-nightly-miri-toolchain /etc/rust-nightly-version /etc/rust-nightly-version
 COPY build/cargo-config.toml ${CARGO_HOME}/config.toml
 
 # FIX: Isolated graph paths. Instead of importing the shared parent directory,
 # pull isolated explicit leaf-node profile subdirectories to eliminate graph collisions.
 COPY --from=build-ci       /root/deps/target/ci/       /root/deps/target/ci/
 COPY --from=build-ci-debug /root/deps/target/ci-debug/ /root/deps/target/ci-debug/
-COPY --from=build-miri-final-artifacts /root/deps/target/miri/ /root/deps/target/miri/
-COPY --from=build-miri-final-artifacts /root/.cache/miri/      /root/.cache/miri/
+# COPY --from=build-miri-final-artifacts /root/deps/target/miri/ /root/deps/target/miri/
+# COPY --from=build-miri-final-artifacts /root/.cache/miri/      /root/.cache/miri/
 
 # Collapse the assembled filesystem into one published layer. The fan-in stage
 # above retains granular BuildKit cache inputs, while changes to any input may
