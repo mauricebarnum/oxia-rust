@@ -146,19 +146,9 @@ RUN cd /tmp && env -u RUSTC_WRAPPER cargo +nightly miri setup --print-sysroot
 
 RUN env -u RUSTC_WRAPPER \
     MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-disable-isolation" \
-    cargo +nightly miri nextest run --package mauricebarnum-oxia-client --features metrics --frozen --no-run
+    cargo +nightly-aarch64-unknown-linux-gnu miri nextest run --package mauricebarnum-oxia-client --features metrics --frozen --no-run --target aarch64-unknown-linux-gnu
 
-# Keep Miri dependency and sysroot warmup, but do not ship local workspace
-# artifacts. They are path-sensitive and must be rebuilt in the validation
-# checkout that runs cargo-miri. Let Cargo remove every artifact associated
-# with workspace packages, including build-script outputs and fingerprints.
-FROM build-miri AS build-miri-final-artifacts
-RUN cargo +nightly clean \
-    --target-dir "${CARGO_TARGET_DIR}/miri" \
-    --target "$(rustc +nightly -vV | sed -n 's/^host: //p')" \
-    --workspace
-
-FROM source-context AS final-cargo-home
+FROM build-miri-context AS final-cargo-home
 RUN rm -f "${CARGO_HOME}/bin/cargo-binstall"
 
 #
@@ -182,8 +172,8 @@ COPY build/cargo-config.toml ${CARGO_HOME}/config.toml
 # pull isolated explicit leaf-node profile subdirectories to eliminate graph collisions.
 COPY --from=build-ci       /root/deps/target/ci/       /root/deps/target/ci/
 COPY --from=build-ci-debug /root/deps/target/ci-debug/ /root/deps/target/ci-debug/
-COPY --from=build-miri-final-artifacts /root/deps/target/miri/ /root/deps/target/miri/
-COPY --from=build-miri-final-artifacts /root/.cache/miri/      /root/.cache/miri/
+COPY --from=build-miri /root/deps/target/miri/ /root/deps/target/miri/
+COPY --from=build-miri /root/.cache/miri/      /root/.cache/miri/
 
 # Collapse the assembled filesystem into one published layer. The fan-in stage
 # above retains granular BuildKit cache inputs, while changes to any input may
