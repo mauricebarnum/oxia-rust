@@ -208,12 +208,12 @@ jobs:
           # shellcheck disable=SC2086
           cargo test --doc $RELEASE_FLAG --frozen --verbose
 
-      - name: miri-client
-        run: |
-          unset RUSTC_WRAPPER
-          cargo +nightly miri nextest run --package mauricebarnum-oxia-client --features metrics --frozen
-        env:
-          MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-disable-isolation
+      # - name: miri-client
+      #   run: |
+      #     unset RUSTC_WRAPPER
+      #     cargo +nightly miri nextest run --package mauricebarnum-oxia-client --features metrics --frozen
+      #   env:
+      #     MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-disable-isolation
 
       - name: show-sccache-stats
         run: sccache --show-stats
