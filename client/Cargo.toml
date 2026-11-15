@@ -46,7 +46,7 @@ oxia-bin-util = { path = "../oxia-bin-util" }
 tempfile = "3.27.0"
 anyhow = "1.0.104"
 itertools = "0.15.0"
-nix = { version = "0.31", default-features = false, features = ["signal"] }
+nix = { version = "0.32", default-features = false, features = ["signal"] }
 opentelemetry_sdk = { version = "0.33.1", default-features = false, features = [
     "metrics",
     "testing",
