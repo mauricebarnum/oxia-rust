@@ -1,0 +1,9 @@
+# actionlint's bundled runner-label database (v1.7.12, the latest release)
+# predates the ubuntu-26.04 GitHub-hosted runner images and therefore
+# reports them as unknown labels. The runner-label rule has no way to
+# whitelist hosted labels except through this config file, so declare the
+# labels used by our workflows here. Remove entries once actionlint ships
+# them in its database.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04-arm
