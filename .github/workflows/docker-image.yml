@@ -46,6 +46,11 @@ jobs:
 
           git restore-mtime -q
 
+      - name: Resolve nightly release date
+        id: nightly
+        run: |
+          echo "date=$(curl -fsSL https://static.rust-lang.org/dist/channel-rust-nightly-date.txt)" >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
@@ -75,7 +80,9 @@ jobs:
           context: .
           file: build/Dockerfile
           outputs: type=registry,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }},compression=zstd,compression-level=9,oci-mediatypes=true
-          build-args: REPO_NAME=${{ github.event.repository.name }}
+          build-args: |
+            REPO_NAME=${{ github.event.repository.name }}
+            NIGHTLY_STAMP=${{ steps.nightly.outputs.date }}
           cache-from: type=registry,ref=ghcr.io/${{ github.repository }}/rust-build:cache
           cache-to: type=registry,ref=ghcr.io/${{ github.repository }}/rust-build:cache,mode=max,compression=zstd,compression-level=9,oci-mediatypes=true
           no-cache-filters: ${{ github.event.schedule == '13 3 6 * *' && 'os-base' || '' }}

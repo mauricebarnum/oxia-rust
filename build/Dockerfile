@@ -30,6 +30,26 @@ RUN rustup toolchain install "${RUST_VERSION_EXTERNAL_TYPES}" --profile minimal 
 # Nightly + miri. This stage is a leaf: only build-miri and final-filesystem
 # consume it. NIGHTLY_STAMP is a cache key supplied by CI (e.g. the nightly
 # release date). A new value re-runs this RUN, and every stage below it.
+#
+# The miri sysroot cache shipped in the final image is validated by cargo-miri
+# (rustc-build-sysroot) against a hash that includes the mtime of every file in
+# the rust-src tree (directories are currently skipped, but we normalize them
+# too in case that changes). rustup stamps those mtimes at extraction time with
+# nanosecond precision, but some image exporters (e.g. build-push-action to a
+# registry) truncate mtimes to whole seconds, which invalidates the hash and
+# forces a sysroot rebuild at test time. So we normalize every rust-src entry's
+# mtime to a fixed whole-second timestamp derived from NIGHTLY_STAMP before the
+# sysroot is built: truncation then becomes a no-op and the hash matches in the
+# published image. The timestamp must be deterministic (not wall-clock) so the
+# layer stays byte-identical for a given stamp, and it is applied here — in the
+# stage the final image copies the toolchain from — not in build-miri.
+#
+# The toolchain directory is derived from `rustc --print sysroot` (exactly what
+# rustc-build-sysroot's rustc_sysroot_src() does: sysroot + the
+# lib/rustlib/src/rust/library suffix, canonicalized), so it survives rustup
+# layout or RUSTUP_HOME changes. The literal nightly-${RUST_HOST_TRIPLE} path
+# is still asserted below because the downstream COPY --from stages need it as
+# a literal.
 FROM rust-stable-toolchain AS rust-nightly-miri-toolchain
 ARG RUST_HOST_TRIPLE
 ARG NIGHTLY_STAMP
@@ -40,6 +60,13 @@ RUN if [ -z "${NIGHTLY_STAMP}" ]; then \
     fi && \
     rustup toolchain install --profile minimal --allow-downgrade nightly && \
     rustup component add --toolchain nightly miri rust-src && \
+    rustc_src_dir="$(rustc +nightly --print sysroot)/lib/rustlib/src/rust/library" && \
+    rustc_src_dir="$(readlink -f "${rustc_src_dir}" || echo "${rustc_src_dir}")" && \
+    test -d "${rustc_src_dir}" || { echo "ERROR: no rust-src library dir at ${rustc_src_dir}"; exit 1; } && \
+    sysroot_mtime="$(date -u -d "${NIGHTLY_STAMP:-1970-01-01T00:00:00Z}" +%s 2>/dev/null || true)" && \
+    sysroot_mtime="${sysroot_mtime:-0}" && \
+    echo "normalizing rust-src mtimes in ${rustc_src_dir} to epoch ${sysroot_mtime}" && \
+    find "${rustc_src_dir}" -exec touch -d "@${sysroot_mtime}" {} + && \
     cargo +nightly miri setup --print-sysroot && \
     { test -d "/usr/local/rustup/toolchains/nightly-${RUST_HOST_TRIPLE}" || \
     { echo "ERROR: no toolchain dir for nightly-${RUST_HOST_TRIPLE}; check RUST_HOST_TRIPLE"; exit 1; }; } && \
