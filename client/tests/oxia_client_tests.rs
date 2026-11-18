@@ -66,7 +66,7 @@ async fn create_test_client() -> Result<(common::TestServer, Client)> {
 
 /// Helper function to create a unique test key
 fn test_key(suffix: &str) -> String {
-    let ts = jiff::Timestamp::now();
+    let ts = jiff::Timestamp::now().as_nanosecond();
     format!("test-{ts}-{suffix}")
 }
 
