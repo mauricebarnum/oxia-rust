@@ -66,11 +66,8 @@ async fn create_test_client() -> Result<(common::TestServer, Client)> {
 
 /// Helper function to create a unique test key
 fn test_key(suffix: &str) -> String {
-    format!(
-        "test-{}-{}",
-        chrono::Utc::now().timestamp_nanos_opt().unwrap(),
-        suffix
-    )
+    let ts = jiff::Timestamp::now();
+    format!("test-{ts}-{suffix}")
 }
 
 fn shard_for_key(key: &str, shard_count: u64) -> i64 {

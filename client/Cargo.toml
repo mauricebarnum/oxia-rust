@@ -39,7 +39,6 @@ metrics = ["dep:opentelemetry"]
 dashmap = "6"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
-chrono = "0.4.45"
 socket2 = "0.6.5"
 test-log = { version = "0.2.21", features = ["trace", "color"] }
 oxia-bin-util = { path = "../oxia-bin-util" }
@@ -51,6 +50,7 @@ opentelemetry_sdk = { version = "0.33.1", default-features = false, features = [
     "metrics",
     "testing",
 ] }
+jiff = "1.0.1"
 
 [[bench]]
 name = "shard_lookup"

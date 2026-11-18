@@ -22,6 +22,7 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 
 use anyhow::Context as _;
+use jiff::Timestamp;
 use opentelemetry::KeyValue;
 use opentelemetry_sdk::error::OTelSdkError;
 use opentelemetry_sdk::error::OTelSdkResult;
@@ -474,11 +475,9 @@ fn format_sum_data_points<'a, T: Copy + Debug + 'a>(
 }
 
 fn format_time(writer: &mut dyn io::Write, label: &str, time: SystemTime) -> io::Result<()> {
-    writeln!(
-        writer,
-        "\t\t\t{label:<13}: {}",
-        humantime::format_rfc3339_micros(time)
-    )
+    let ts =
+        Timestamp::try_from(time).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    writeln!(writer, "\t\t\t{label:<13}: {ts:.6}")
 }
 
 fn format_attributes<'a>(

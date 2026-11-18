@@ -14,7 +14,6 @@
 
 use std::time::Duration;
 
-use chrono::Utc;
 use mauricebarnum_oxia_client::Client;
 use mauricebarnum_oxia_client::Error;
 use mauricebarnum_oxia_client::PutOptions;
@@ -80,7 +79,7 @@ async fn main() -> Result<()> {
     let result = client
         .put_with_options(
             "ephemeral_key",
-            Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            jiff::Timestamp::now().to_string(),
             PutOptions::builder().ephemeral(true).build(),
         )
         .await?;

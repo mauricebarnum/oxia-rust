@@ -34,6 +34,13 @@ use metrics::MetricsOutput;
 
 mod utils;
 
+fn parse_duration(
+    s: &str,
+) -> Result<std::time::Duration, Box<dyn std::error::Error + Send + Sync>> {
+    let signed: jiff::SignedDuration = s.parse()?;
+    Ok(std::time::Duration::try_from(signed)?)
+}
+
 #[derive(Parser)]
 #[command(name = "oxia-cmd", version, about = "oxia client")]
 pub struct Cli {
@@ -49,10 +56,10 @@ pub struct Cli {
     #[arg(long, default_value_t = 16 * num_cpus::get() as usize)]
     max_parallel_requests: usize,
 
-    #[arg(long, default_value = "2000ms", value_parser = humantime::parse_duration)]
+    #[arg(long, default_value = "2000ms", value_parser = parse_duration)]
     session_timeout: Duration,
 
-    #[arg(long, default_value = "100ms", value_parser = humantime::parse_duration)]
+    #[arg(long, default_value = "100ms", value_parser = parse_duration)]
     request_timeout: Duration,
 
     #[arg(long, default_value_t = false)]

@@ -15,7 +15,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
 use mauricebarnum_oxia_client::Client;
 use mauricebarnum_oxia_client::PutOptions;
 use mauricebarnum_oxia_client::Result;
@@ -44,7 +43,7 @@ fn main() -> Result<()> {
         let mut client = Client::new(Arc::clone(&config));
         client.connect().await?;
 
-        let now_str = Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+        let now_str = jiff::Timestamp::now().to_string();
         let key = format!("{}-{}", "ephemeral_key", now_str);
         let result = client
             .put_with_options(
