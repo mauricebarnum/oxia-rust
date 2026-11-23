@@ -135,8 +135,6 @@ pub fn select_response(
 mod tests {
     use std::cmp::Ordering;
 
-    use itertools::Itertools;
-
     use super::*;
 
     #[tokio::test]
@@ -288,7 +286,11 @@ mod tests {
             println!(
                 "--- Comparison: {:?}\n    Responses: [{}]\n    Expected: {}\n    Actual:   {}\n",
                 tc.comparison,
-                tc.responses.iter().map(format_response).join(", "),
+                tc.responses
+                    .iter()
+                    .map(format_response)
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 format_response(&tc.expected),
                 format_response(selected.as_ref().unwrap())
             );
