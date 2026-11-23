@@ -39,6 +39,21 @@ impl RetryConfig {
             max_delay: initial_delay.saturating_mul(10),
         }
     }
+
+    #[inline]
+    pub const fn attempts(&self) -> usize {
+        self.attempts
+    }
+
+    #[inline]
+    pub const fn initial_delay(&self) -> Duration {
+        self.initial_delay
+    }
+
+    #[inline]
+    pub const fn max_delay(&self) -> Duration {
+        self.max_delay
+    }
 }
 
 #[derive(Builder, Clone)]
