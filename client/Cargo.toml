@@ -8,9 +8,11 @@ license = "Apache-2.0"
 [dependencies]
 mauricebarnum-oxia-common = { path = "../common" }
 http = "1"
-tokio = { version = "1.54.1", features = ["sync", "rt", "time"] }
+tokio = { version = "1.54.1", features = ["sync", "rt", "time", "macros"] }
 tokio-stream = "0.1.19"
-tonic = { version = "0.14.9", features = ["gzip", "channel", "zstd"] }
+tonic = { version = "0.14.9", default-features = false, features = [
+    "channel",
+] }
 thiserror = "2.0.21"
 bytes = "1.12.1"
 tracing = "0.1.44"

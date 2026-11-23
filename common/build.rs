@@ -27,6 +27,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Configure tonic to use Bytes for all protobuf bytes fields
     let mut prost_config = prost_build::Config::new();
     prost_config.enable_type_names();
+    // google.rpc proto comments contain untagged JSON/proto snippets that fail
+    // `cargo test --doc` when `prost-build/cleanup-markdown` is disabled.
+    prost_config.disable_comments([".google.rpc"]);
 
     tonic_prost_build::configure()
         .bytes(".")
