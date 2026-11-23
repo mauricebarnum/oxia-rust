@@ -41,6 +41,10 @@ fn parse_duration(
     Ok(std::time::Duration::try_from(signed)?)
 }
 
+fn default_max_parallel_requests() -> usize {
+    16 * std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+}
+
 #[derive(Parser)]
 #[command(name = "oxia-cmd", version, about = "oxia client")]
 pub struct Cli {
@@ -53,7 +57,7 @@ pub struct Cli {
     #[arg(long, default_value = "localhost:6648")]
     service_address: String,
 
-    #[arg(long, default_value_t = 16 * num_cpus::get() as usize)]
+    #[arg(long, default_value_t = default_max_parallel_requests())]
     max_parallel_requests: usize,
 
     #[arg(long, default_value = "2000ms", value_parser = parse_duration)]
