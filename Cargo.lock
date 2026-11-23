@@ -847,7 +847,6 @@ dependencies = [
  "prost",
  "prost-types",
  "rand 0.10.4",
- "socket2",
  "tempfile",
  "test-log",
  "thiserror",

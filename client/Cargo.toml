@@ -54,7 +54,6 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
     "env-filter",
     "fmt",
 ] }
-socket2 = "0.6.5"
 test-log = { version = "0.2.21", default-features = false, features = [
     "color",
     "trace",
