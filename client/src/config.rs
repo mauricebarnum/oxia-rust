@@ -22,8 +22,6 @@ use crate::discovery::ServiceDiscovery;
 
 #[cfg(feature = "metrics")]
 pub type MeterProviderHandle = Arc<dyn opentelemetry::metrics::MeterProvider + Send + Sync>;
-#[cfg(not(feature = "metrics"))]
-pub type MeterProviderHandle = ();
 
 #[derive(Clone, Copy, Debug)]
 pub struct RetryConfig {
@@ -111,13 +109,6 @@ impl Config {
     #[inline]
     pub const fn meter_provider(&self) -> Option<&MeterProviderHandle> {
         self.meter_provider.as_ref()
-    }
-
-    #[cfg(not(feature = "metrics"))]
-    #[inline]
-    #[expect(clippy::unused_self)]
-    pub(crate) const fn meter_provider(&self) -> Option<&MeterProviderHandle> {
-        None
     }
 }
 

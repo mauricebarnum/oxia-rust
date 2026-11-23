@@ -417,7 +417,14 @@ mod imp {
     }
 
     impl Metrics {
-        pub(crate) fn new(provider: Option<&MeterProviderHandle>, namespace: &str) -> Self {
+        pub(crate) fn new(config: &crate::config::Config) -> Self {
+            Self::from_provider(config.meter_provider(), config.namespace())
+        }
+
+        pub(crate) fn from_provider(
+            provider: Option<&MeterProviderHandle>,
+            namespace: &str,
+        ) -> Self {
             let provider = provider.cloned().unwrap_or_else(global::meter_provider);
             let meter = provider.meter(SCOPE_NAME);
 
@@ -527,13 +534,11 @@ mod imp {
 
 #[cfg(not(feature = "metrics"))]
 mod imp {
-    pub(crate) type MeterProviderHandle = ();
-
     #[derive(Clone, Debug)]
     pub(crate) struct Metrics;
 
     impl Metrics {
-        pub(crate) const fn new(_provider: Option<&MeterProviderHandle>, _namespace: &str) -> Self {
+        pub(crate) const fn new(_: &crate::config::Config) -> Self {
             Self
         }
     }
@@ -704,7 +709,7 @@ mod sdk_tests {
             .with_view(exponential_histogram_view)
             .build();
         let provider_handle: crate::config::MeterProviderHandle = Arc::new(provider.clone());
-        let metrics = Metrics::new(Some(&provider_handle), "default");
+        let metrics = Metrics::from_provider(Some(&provider_handle), "default");
         (exporter, provider, metrics)
     }
 
