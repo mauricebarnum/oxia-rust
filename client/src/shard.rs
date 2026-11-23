@@ -314,7 +314,7 @@ impl ClientData {
         meta: tonic::metadata::MetadataMap,
         cancel_token: CancellationToken,
     ) -> Self {
-        let metrics = metrics::Metrics::new(config.meter_provider(), config.namespace());
+        let metrics = metrics::Metrics::new(&config);
         Self {
             config,
             metrics,

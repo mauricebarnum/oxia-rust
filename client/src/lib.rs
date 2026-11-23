@@ -878,7 +878,7 @@ pub struct Client {
 impl Client {
     #[inline]
     pub fn new(config: Arc<config::Config>) -> Self {
-        let metrics = metrics::Metrics::new(config.meter_provider(), config.namespace());
+        let metrics = metrics::Metrics::new(&config);
         Self {
             shard_manager: None,
             config,
