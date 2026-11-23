@@ -832,8 +832,10 @@ impl TestCluster {
             .process
             .take()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "server already stopped"))?;
-        let pid = nix::unistd::Pid::from_raw(i32::try_from(p.id()).expect("pid does not fit i32"));
-        nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM).map_err(io::Error::other)?;
+        let raw_pid = i32::try_from(p.id()).expect("pid does not fit i32");
+        let pid = rustix::process::Pid::from_raw(raw_pid).expect("child pid should be positive");
+        rustix::process::kill_process(pid, rustix::process::Signal::TERM)
+            .map_err(io::Error::other)?;
         p.wait()?;
         Ok(())
     }
