@@ -838,7 +838,6 @@ dependencies = [
  "futures-core",
  "futures-util",
  "getrandom 0.4.3",
- "itertools",
  "jiff",
  "mauricebarnum-oxia-common",
  "nix 0.32.0",
