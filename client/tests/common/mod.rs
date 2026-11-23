@@ -20,6 +20,7 @@ use std::io;
 use std::io::Write;
 use std::net::Ipv4Addr;
 use std::net::SocketAddrV4;
+use std::net::TcpListener;
 use std::net::TcpStream;
 use std::num::NonZeroU32;
 use std::path::Path;
@@ -112,26 +113,17 @@ fn test_tempdir() -> anyhow::Result<TempDir> {
 // Attempt to find `n` unallocated ports.  This function is racy:
 // by the time it returns, the ports may be re-allocated.
 pub fn find_free_ports(n: usize) -> anyhow::Result<Vec<u16>> {
-    let sockets: Vec<socket2::Socket> = (0..n)
-        .map(|_| -> anyhow::Result<socket2::Socket> {
-            let s = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)?;
-            s.set_reuse_address(true)?;
-            s.bind(&socket2::SockAddr::from(SocketAddrV4::new(
-                Ipv4Addr::LOCALHOST,
-                0,
-            )))?;
-            Ok(s)
-        })
-        .collect::<anyhow::Result<Vec<_>>>()
+    let listeners: Vec<TcpListener> = (0..n)
+        .map(|_| TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)))
+        .collect::<io::Result<Vec<_>>>()
         .context("Failed to bind test sockets")?;
 
-    let ports = sockets
+    let ports = listeners
         .iter()
-        .map(|s| {
-            s.local_addr()
-                .context("Failed to get local address")?
-                .as_socket_ipv4()
-                .context("Not an IPv4 address")
+        .map(|listener| {
+            listener
+                .local_addr()
+                .context("Failed to get local address")
                 .map(|addr| addr.port())
         })
         .collect::<anyhow::Result<Vec<u16>>>()?;
