@@ -702,12 +702,12 @@ fn validate_dest(dest: &str) -> Result<()> {
     }
     // To properly validate, we need a scheme.
     let url = format!("http://{dest}");
-    let uri = url
-        .parse::<http::Uri>()
-        .map_err(|e| ClientError::InvalidDestinationFormat {
+    let uri = url.parse::<tonic::transport::Uri>().map_err(|e| {
+        ClientError::InvalidDestinationFormat {
             dest: dest.to_string(),
             reason: e.to_string(),
-        })?;
+        }
+    })?;
 
     if let Some(auth) = uri.authority() {
         if auth.as_str().contains('@') {
