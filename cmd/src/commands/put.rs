@@ -43,7 +43,7 @@ fn decode(enc: ValueEncoding, s: String) -> anyhow::Result<Bytes> {
             .decode(s)
             .map(Bytes::from)
             .map_err(Into::into),
-        ValueEncoding::Hex => hex::decode(s).map(Bytes::from).map_err(Into::into),
+        ValueEncoding::Hex => const_hex::decode(s).map(Bytes::from).map_err(Into::into),
         ValueEncoding::UnicodeEscape => unicode::decode_escapes(s).map_err(Into::into),
     }
 }
