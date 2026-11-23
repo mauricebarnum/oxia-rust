@@ -68,8 +68,8 @@ pub struct Config {
 
 impl Config {
     #[inline]
-    pub fn service_discovery(&self) -> Arc<dyn ServiceDiscovery> {
-        Arc::clone(&self.service_discovery)
+    pub fn service_discovery(&self) -> &Arc<dyn ServiceDiscovery> {
+        &self.service_discovery
     }
 
     #[inline]
