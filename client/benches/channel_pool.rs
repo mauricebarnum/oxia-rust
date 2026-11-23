@@ -15,11 +15,14 @@
 // Benchmark comparing ChannelPool data structure alternatives.
 //
 // Measures cache-hit reads, invalidation, cross-client sharing semantics,
-// and mixed workloads for four pool implementations:
+// and mixed workloads for three pool implementations:
 //   1. RwLock<HashMap<String, Channel>>  (current production code)
-//   2. DashMap<String, Channel>          (lock-free concurrent map)
-//   3. ArcSwap<HashMap<String, Channel>> (lock-free snapshot reads)
-//   4. ArcSwap<Vec<(Arc<str>, Channel)>> (lock-free linear scan, small N)
+//   2. ArcSwap<HashMap<String, Channel>> (lock-free snapshot reads)
+//   3. ArcSwap<Vec<(Arc<str>, Channel)>> (lock-free linear scan, small N)
+//
+// Note: A `DashMap<String, Channel>` variant (previously gated behind the
+// `bench-dashmap` feature) also existed and was removed to avoid carrying
+// `dashmap` as an unconditional dev-dependency; see git history if needed.
 //
 // Each benchmark runs at two scales:
 //   - Small:  3 leaders  (typical deployment)
@@ -29,7 +32,6 @@
 // funnel through dozens of leaders, so the pool size tracks leader count.
 //
 // Run with: cargo bench --package mauricebarnum-oxia-client --bench channel_pool
-// Include DashMap: cargo bench --package mauricebarnum-oxia-client --bench channel_pool --features bench-dashmap
 
 #![allow(dead_code)]
 
@@ -41,8 +43,6 @@ use std::time::Duration;
 use std::time::Instant;
 
 use arc_swap::ArcSwap;
-#[cfg(feature = "bench-dashmap")]
-use dashmap::DashMap;
 use futures_util::FutureExt;
 use tokio::sync::RwLock;
 
@@ -111,41 +111,7 @@ impl RwLockPool {
 }
 
 // ---------------------------------------------------------------------------
-// Pool variant 2: DashMap (lock-free concurrent map)
-// Gated behind the "bench-dashmap" feature to avoid pulling in dashmap
-// when not needed.
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "bench-dashmap")]
-struct DashMapPool {
-    clients: DashMap<String, MockChannel>,
-}
-
-#[cfg(feature = "bench-dashmap")]
-impl DashMapPool {
-    fn populated(leaders: &[String]) -> Self {
-        let map = DashMap::new();
-        for url in leaders {
-            map.insert(url.clone(), MockChannel::new());
-        }
-        Self { clients: map }
-    }
-
-    fn get(&self, target: &str) -> Option<MockChannel> {
-        self.clients.get(target).map(|r| r.value().clone())
-    }
-
-    fn remove(&self, target: &str) -> Option<MockChannel> {
-        self.clients.remove(target).map(|(_, v)| v)
-    }
-
-    fn insert(&self, target: &str, ch: MockChannel) {
-        self.clients.insert(target.to_string(), ch);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Pool variant 3: ArcSwap<HashMap> (lock-free snapshot reads)
+// Pool variant 2: ArcSwap<HashMap> (lock-free snapshot reads)
 // ---------------------------------------------------------------------------
 
 struct ArcSwapHashMapPool {
@@ -184,7 +150,7 @@ impl ArcSwapHashMapPool {
 }
 
 // ---------------------------------------------------------------------------
-// Pool variant 4: ArcSwap<Vec<(Arc<str>, Channel)>> (lock-free, adaptive)
+// Pool variant 3: ArcSwap<Vec<(Arc<str>, Channel)>> (lock-free, adaptive)
 //
 // Below LINEAR_SCAN_THRESHOLD: unsorted, plain linear scan, append on insert.
 // At or above: sorted, binary search, sorted insert.
@@ -340,20 +306,6 @@ async fn bench_read_single(leaders: &[String]) {
     }
     let rwlock_time = start.elapsed();
 
-    // DashMap
-    #[cfg(feature = "bench-dashmap")]
-    let dashmap_time = {
-        let pool = DashMapPool::populated(leaders);
-        for _ in 0..1000 {
-            std::hint::black_box(pool.get(target));
-        }
-        let start = Instant::now();
-        for _ in 0..ITERATIONS {
-            std::hint::black_box(pool.get(target));
-        }
-        start.elapsed()
-    };
-
     // ArcSwap<HashMap>
     let pool = ArcSwapHashMapPool::populated(leaders);
     for _ in 0..1000 {
@@ -377,8 +329,6 @@ async fn bench_read_single(leaders: &[String]) {
     let arcswap_vec_time = start.elapsed();
 
     print_result("RwLock<HashMap> (current)", rwlock_time, ITERATIONS);
-    #[cfg(feature = "bench-dashmap")]
-    print_result("DashMap", dashmap_time, ITERATIONS);
     print_result("ArcSwap<HashMap>", arcswap_hm_time, ITERATIONS);
     print_result(&vec_label, arcswap_vec_time, ITERATIONS);
     println!();
@@ -417,28 +367,6 @@ async fn bench_read_concurrent(leaders: &[String]) {
         h.await.unwrap();
     }
     let rwlock_time = start.elapsed();
-
-    // DashMap
-    #[cfg(feature = "bench-dashmap")]
-    let dashmap_time = {
-        let pool = Arc::new(DashMapPool::populated(leaders));
-        let start = Instant::now();
-        let handles: Vec<_> = (0..CONCURRENT_TASKS)
-            .map(|_| {
-                let p = Arc::clone(&pool);
-                let t = target.clone();
-                tokio::spawn(async move {
-                    for _ in 0..per_task {
-                        std::hint::black_box(p.get(&t));
-                    }
-                })
-            })
-            .collect();
-        for h in handles {
-            h.await.unwrap();
-        }
-        start.elapsed()
-    };
 
     // ArcSwap<HashMap>
     let pool = Arc::new(ArcSwapHashMapPool::populated(leaders));
@@ -479,8 +407,6 @@ async fn bench_read_concurrent(leaders: &[String]) {
     let arcswap_vec_time = start.elapsed();
 
     print_result("RwLock<HashMap> (current)", rwlock_time, ITERATIONS);
-    #[cfg(feature = "bench-dashmap")]
-    print_result("DashMap", dashmap_time, ITERATIONS);
     print_result("ArcSwap<HashMap>", arcswap_hm_time, ITERATIONS);
     print_result(&vec_label, arcswap_vec_time, ITERATIONS);
     println!();
@@ -509,18 +435,6 @@ async fn bench_invalidation(leaders: &[String]) {
     }
     let rwlock_time = start.elapsed();
 
-    // DashMap
-    #[cfg(feature = "bench-dashmap")]
-    let dashmap_time = {
-        let pool = DashMapPool::populated(leaders);
-        let start = Instant::now();
-        for _ in 0..INVAL_ITERS {
-            std::hint::black_box(pool.remove(target));
-            pool.insert(target, MockChannel::new());
-        }
-        start.elapsed()
-    };
-
     // ArcSwap<HashMap> — remove clones the entire map (O(N) in leader count)
     let pool = ArcSwapHashMapPool::populated(leaders);
     let start = Instant::now();
@@ -540,8 +454,6 @@ async fn bench_invalidation(leaders: &[String]) {
     let arcswap_vec_time = start.elapsed();
 
     print_result("RwLock<HashMap> (current)", rwlock_time, INVAL_ITERS);
-    #[cfg(feature = "bench-dashmap")]
-    print_result("DashMap", dashmap_time, INVAL_ITERS);
     print_result(
         &format!("ArcSwap<HashMap> (clone {n})"),
         arcswap_hm_time,
@@ -589,21 +501,6 @@ async fn bench_sharing_semantics(leaders: &[String]) {
         assert!(pool.get(other).await.is_some(), "other leader unaffected");
 
         println!("  RwLock<HashMap>:  PASS — invalidation affects all sharing clients");
-    }
-
-    // --- DashMap ---
-    #[cfg(feature = "bench-dashmap")]
-    {
-        let pool = DashMapPool::populated(leaders);
-        let ch0 = pool.get(shared);
-        let ch1 = pool.get(shared);
-        assert!(ch0.is_some() && ch1.is_some());
-        assert_eq!(ch0.unwrap().id, ch1.unwrap().id);
-        pool.remove(shared);
-        assert!(pool.get(shared).is_none(), "shard 0 miss");
-        assert!(pool.get(shared).is_none(), "shard 1 miss");
-        assert!(pool.get(other).is_some(), "other unaffected");
-        println!("  DashMap:          PASS — invalidation affects all sharing clients");
     }
 
     // --- ArcSwap<HashMap> ---
@@ -684,33 +581,6 @@ async fn bench_mixed_workload(leaders: &[String], inval_every: u64) {
     }
     let rwlock_time = start.elapsed();
 
-    // DashMap
-    #[cfg(feature = "bench-dashmap")]
-    let dashmap_time = {
-        let pool = Arc::new(DashMapPool::populated(leaders));
-        let start = Instant::now();
-        let handles: Vec<_> = (0..CONCURRENT_TASKS)
-            .map(|_| {
-                let p = Arc::clone(&pool);
-                let t = target.clone();
-                tokio::spawn(async move {
-                    for i in 0..per_task {
-                        if i % inval_every == (inval_every - 1) {
-                            p.remove(&t);
-                            p.insert(&t, MockChannel::new());
-                        } else {
-                            std::hint::black_box(p.get(&t));
-                        }
-                    }
-                })
-            })
-            .collect();
-        for h in handles {
-            h.await.unwrap();
-        }
-        start.elapsed()
-    };
-
     // ArcSwap<HashMap>
     let pool = Arc::new(ArcSwapHashMapPool::populated(leaders));
     let start = Instant::now();
@@ -759,8 +629,6 @@ async fn bench_mixed_workload(leaders: &[String], inval_every: u64) {
     let arcswap_vec_time = start.elapsed();
 
     print_result("RwLock<HashMap> (current)", rwlock_time, MIXED_ITERS);
-    #[cfg(feature = "bench-dashmap")]
-    print_result("DashMap", dashmap_time, MIXED_ITERS);
     print_result("ArcSwap<HashMap>", arcswap_hm_time, MIXED_ITERS);
     print_result(&vec_label, arcswap_vec_time, MIXED_ITERS);
     println!();
