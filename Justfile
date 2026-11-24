@@ -9,21 +9,26 @@ build-all:
     cargo build --all-targets
     cargo build --all-targets --features metrics
     cargo build --all-targets --features go-metrics-compat
+    cargo build --all-targets --features gzip
 
 test:
     cargo nextest run --all-features
 
 test-all:
     cargo nextest run
+    cargo nextest run --all-features
     cargo nextest run --features metrics
     cargo nextest run --features go-metrics-compat
+    cargo nextest run --features gzip
 
 check:
     cargo check --all-targets --all-features
+    cargo check --all-targets --features gzip
 
 lint:
     CARGO_BUILD_WARNINGS=deny cargo clippy --all-targets
     CARGO_BUILD_WARNINGS=deny cargo clippy --all-targets --all-features
+    CARGO_BUILD_WARNINGS=deny cargo clippy --all-targets --features gzip
     cd client && cargo +{{rust_version_external_types}} check-external-types --all-features
 
 install-check-external-types:

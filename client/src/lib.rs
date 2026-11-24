@@ -698,12 +698,32 @@ type GrpcClient = oxia_proto::OxiaClientClient<Channel>;
 /// allows up to 256 MB per frame).
 pub(crate) const MAX_GRPC_DECODING_SIZE: usize = 64 * 1024 * 1024;
 
+pub(crate) fn grpc_client_from_channel(config: &config::Config, channel: Channel) -> GrpcClient {
+    let _ = config;
+    let grpc = GrpcClient::new(channel).max_decoding_message_size(MAX_GRPC_DECODING_SIZE);
+    #[cfg(feature = "_compression_enabled")]
+    let mut grpc = grpc;
+    #[cfg(feature = "_compression_enabled")]
+    {
+        for c in config.accept_compression().iter() {
+            grpc = grpc.accept_compressed(c.to_proto());
+        }
+
+        if let Some(c) = config.send_compressed() {
+            grpc = grpc.send_compressed(c.to_proto());
+        }
+    }
+
+    grpc
+}
+
 pub(crate) async fn create_grpc_client(
+    config: &config::Config,
     dest: &str,
     channel_pool: &ChannelPool,
 ) -> Result<GrpcClient> {
     let channel = channel_pool.get(dest).await?;
-    Ok(GrpcClient::new(channel).max_decoding_message_size(MAX_GRPC_DECODING_SIZE))
+    Ok(grpc_client_from_channel(config, channel))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

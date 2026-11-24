@@ -32,16 +32,25 @@ pub struct Context {
 
 impl Context {
     pub(super) fn new(cli: &crate::Cli, metrics: Option<&crate::metrics::MetricsOutput>) -> Self {
-        let config = config::Config::builder()
+        let builder = config::Config::builder()
             .service_addr(cli.service_address.clone())
             .max_parallel_requests(cli.max_parallel_requests)
             .session_timeout(cli.session_timeout)
             .request_timeout(cli.request_timeout)
             .retry_on_stale_shard_map(cli.retry_on_stale_shard_map)
-            .maybe_meter_provider(metrics.map(crate::metrics::MetricsOutput::meter_provider))
-            .build();
+            .maybe_meter_provider(metrics.map(crate::metrics::MetricsOutput::meter_provider));
 
-        let client = Client::new(config);
+        #[cfg(feature = "_compression_enabled")]
+        let builder = builder
+            .maybe_send_compressed(
+                cli.compress_send
+                    .and_then(crate::compress::ArgValue::to_codec),
+            )
+            .accept_compression(crate::compress::ArgValue::to_codec_set(
+                &cli.compress_accept,
+            ));
+
+        let client = Client::new(builder.build());
         Self {
             state: Arc::new(Mutex::new(State { client })),
         }
@@ -62,5 +71,127 @@ impl Context {
         Self {
             state: Arc::new(Mutex::new(State { client })),
         }
+    }
+}
+
+#[cfg(all(test, feature = "_compression_enabled"))]
+mod tests {
+    use clap::Parser as _;
+
+    use super::*;
+    use crate::client_lib::config::CompressionCodec;
+    use crate::client_lib::config::CompressionCodecSet;
+
+    fn config_for_args(args: &[&str]) -> Arc<config::Config> {
+        let cli = crate::Cli::try_parse_from(args).expect("CLI args should parse");
+        let ctx = Context::new(&cli, None);
+        let state = ctx.state.try_lock().expect("uncontended context state");
+        Arc::clone(state.client.config())
+    }
+
+    #[test]
+    fn default_cli_enables_all_accept_compression_and_no_send_compression() {
+        let cfg = config_for_args(&["oxia-cmd", "get", "key"]);
+        assert_eq!(cfg.accept_compression(), CompressionCodecSet::ALL);
+        assert_eq!(cfg.send_compressed(), None);
+    }
+
+    #[test]
+    fn cli_compress_accept_none_disables_accept_compression() {
+        let cfg = config_for_args(&["oxia-cmd", "--compress-accept", "none", "get", "key"]);
+        assert_eq!(cfg.accept_compression(), CompressionCodecSet::EMPTY);
+    }
+
+    #[test]
+    fn cli_explicit_compression_flags_propagate_to_config() {
+        #[cfg(feature = "deflate")]
+        {
+            let cfg = config_for_args(&[
+                "oxia-cmd",
+                "--compress-send",
+                "deflate",
+                "--compress-accept",
+                "deflate",
+                "get",
+                "key",
+            ]);
+            assert_eq!(cfg.send_compressed(), Some(CompressionCodec::Deflate));
+            assert_eq!(
+                cfg.accept_compression(),
+                CompressionCodecSet::from(CompressionCodec::Deflate)
+            );
+        }
+
+        #[cfg(feature = "gzip")]
+        {
+            let cfg = config_for_args(&[
+                "oxia-cmd",
+                "--compress-send",
+                "gzip",
+                "--compress-accept",
+                "gzip",
+                "get",
+                "key",
+            ]);
+            assert_eq!(cfg.send_compressed(), Some(CompressionCodec::Gzip));
+            assert_eq!(
+                cfg.accept_compression(),
+                CompressionCodecSet::from(CompressionCodec::Gzip)
+            );
+        }
+
+        #[cfg(feature = "zstd")]
+        {
+            let cfg = config_for_args(&[
+                "oxia-cmd",
+                "--compress-send",
+                "zstd",
+                "--compress-accept",
+                "zstd",
+                "get",
+                "key",
+            ]);
+            assert_eq!(cfg.send_compressed(), Some(CompressionCodec::Zstd));
+            assert_eq!(
+                cfg.accept_compression(),
+                CompressionCodecSet::from(CompressionCodec::Zstd)
+            );
+        }
+
+        #[cfg(all(feature = "deflate", feature = "zstd"))]
+        {
+            let cfg = config_for_args(&[
+                "oxia-cmd",
+                "--compress-accept",
+                "deflate",
+                "--compress-accept",
+                "zstd",
+                "get",
+                "key",
+            ]);
+            assert_eq!(
+                cfg.accept_compression(),
+                CompressionCodecSet::from([CompressionCodec::Deflate, CompressionCodec::Zstd])
+            );
+            #[cfg(feature = "gzip")]
+            assert!(!cfg.accept_compression().contains(CompressionCodec::Gzip));
+        }
+
+        let cfg_override = config_for_args(&[
+            "oxia-cmd",
+            "--compress-send",
+            "none",
+            "--compress-accept",
+            "auto",
+            "--compress-accept",
+            "none",
+            "get",
+            "key",
+        ]);
+        assert_eq!(cfg_override.send_compressed(), None);
+        assert_eq!(
+            cfg_override.accept_compression(),
+            CompressionCodecSet::EMPTY
+        );
     }
 }

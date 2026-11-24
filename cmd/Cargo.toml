@@ -9,6 +9,14 @@ license = "Apache-2.0"
 default = ["otlp-json-compat"]
 otlp-json-compat = []
 
+compression = ["deflate", "gzip", "zstd"]
+deflate = ["mauricebarnum-oxia-client/deflate", "_compression_enabled"]
+gzip = ["mauricebarnum-oxia-client/gzip", "_compression_enabled"]
+zstd = ["mauricebarnum-oxia-client/zstd", "_compression_enabled"]
+
+# Internal feature, don't set
+_compression_enabled = []
+
 [[bin]]
 name = "oxia-cmd"
 path = "src/main.rs"

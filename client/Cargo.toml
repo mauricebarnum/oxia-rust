@@ -9,9 +9,7 @@ license = "Apache-2.0"
 mauricebarnum-oxia-common = { path = "../common" }
 tokio = { version = "1.54.1", features = ["sync", "rt", "time", "macros"] }
 tokio-stream = { version = "0.1.19", default-features = false }
-tonic = { version = "0.14.9", default-features = false, features = [
-    "channel",
-] }
+tonic = { version = "0.14.9", default-features = false, features = ["channel"] }
 thiserror = "2.0.21"
 bytes = "1.12.1"
 tracing = "0.1.44"
@@ -44,6 +42,17 @@ opentelemetry = { version = "0.33.1", default-features = false, features = [
 [features]
 go-metrics-compat = ["metrics"]
 metrics = ["dep:opentelemetry"]
+compression = ["deflate", "gzip", "zstd"]
+deflate = [
+    "tonic/deflate",
+    "mauricebarnum-oxia-common/deflate",
+    "_compression_enabled",
+]
+gzip = ["tonic/gzip", "mauricebarnum-oxia-common/gzip", "_compression_enabled"]
+zstd = ["tonic/zstd", "mauricebarnum-oxia-common/zstd", "_compression_enabled"]
+
+# Internal feature, don't set
+_compression_enabled = []
 
 [dev-dependencies]
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }
@@ -84,13 +93,13 @@ workspace = true
 
 [package.metadata.cargo_check_external_types]
 allowed_external_types = [
+    "bon::builder_state::IsSet",
+    "bon::builder_state::IsUnset",
     "bytes::bytes::Bytes",
-    "tonic::status::Status",
-    "tonic::transport::error::Error",
     "futures_core::future::BoxFuture",
     "futures_core::stream::BoxStream",
     "futures_core::stream::Stream",
-    "bon::builder_state::IsSet",
-    "bon::builder_state::IsUnset",
     "opentelemetry::metrics::meter::MeterProvider",
+    "tonic::status::Status",
+    "tonic::transport::error::Error",
 ]

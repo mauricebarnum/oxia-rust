@@ -26,6 +26,8 @@ use commands::Commands;
 mod context;
 use context::Context;
 
+mod compress;
+
 mod log;
 use log::LogArgs;
 
@@ -83,6 +85,12 @@ pub struct Cli {
     /// Metrics destination: stderr by default, stdout for '-', or a file path.
     #[arg(long, requires = "metrics")]
     metrics_output: Option<PathBuf>,
+
+    #[arg(long, value_enum, value_parser = compress::argvalue_parser())]
+    compress_send: Option<compress::ArgValue>,
+
+    #[arg(long, value_enum, default_value = "auto")]
+    compress_accept: Vec<compress::ArgValue>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -165,5 +173,97 @@ mod tests {
     #[test]
     fn metrics_output_requires_metrics() {
         assert!(Cli::try_parse_from(["oxia-cmd", "--metrics-output", "-", "get", "key"]).is_err());
+    }
+
+    #[test]
+    fn compress_send_accepts_none_auto_and_enabled_codecs() {
+        let cli_none = Cli::try_parse_from(["oxia-cmd", "--compress-send", "none", "get", "key"])
+            .expect("none is always accepted");
+        assert_eq!(cli_none.compress_send, Some(compress::ArgValue::None));
+
+        let cli_auto = Cli::try_parse_from(["oxia-cmd", "--compress-send", "auto", "get", "key"])
+            .expect("auto is always accepted");
+        assert_eq!(cli_auto.compress_send, Some(compress::ArgValue::Auto));
+
+        #[cfg(feature = "deflate")]
+        {
+            let cli = Cli::try_parse_from(["oxia-cmd", "--compress-send", "deflate", "get", "key"])
+                .expect("deflate should be accepted when feature is enabled");
+            assert_eq!(cli.compress_send, Some(compress::ArgValue::Deflate));
+        }
+
+        #[cfg(feature = "gzip")]
+        {
+            let cli = Cli::try_parse_from(["oxia-cmd", "--compress-send", "gzip", "get", "key"])
+                .expect("gzip should be accepted when feature is enabled");
+            assert_eq!(cli.compress_send, Some(compress::ArgValue::Gzip));
+        }
+
+        #[cfg(feature = "zstd")]
+        {
+            let cli = Cli::try_parse_from(["oxia-cmd", "--compress-send", "zstd", "get", "key"])
+                .expect("zstd should be accepted when feature is enabled");
+            assert_eq!(cli.compress_send, Some(compress::ArgValue::Zstd));
+        }
+    }
+
+    #[cfg(not(all(feature = "deflate", feature = "gzip", feature = "zstd")))]
+    #[test]
+    fn compress_send_rejects_disabled_codecs_with_build_message() {
+        for (name, enabled) in [
+            ("deflate", cfg!(feature = "deflate")),
+            ("gzip", cfg!(feature = "gzip")),
+            ("zstd", cfg!(feature = "zstd")),
+        ] {
+            if enabled {
+                continue;
+            }
+            let err = Cli::try_parse_from(["oxia-cmd", "--compress-send", name, "get", "key"])
+                .err()
+                .expect("disabled codec should be rejected");
+            assert!(
+                err.to_string().contains("not implemented in this build"),
+                "unexpected error for {name}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn compress_send_rejects_unknown_codec() {
+        let err = Cli::try_parse_from(["oxia-cmd", "--compress-send", "brotli", "get", "key"])
+            .err()
+            .expect("unknown codec should be rejected");
+        assert!(
+            !err.to_string().contains("not implemented in this build"),
+            "unknown codec should fail enum parsing, got: {err}"
+        );
+    }
+
+    #[test]
+    fn compress_accept_defaults_to_auto_and_collects_repeated_flags() {
+        let default_cli =
+            Cli::try_parse_from(["oxia-cmd", "get", "key"]).expect("default args should parse");
+        assert_eq!(default_cli.compress_accept, [compress::ArgValue::Auto]);
+
+        let repeated = Cli::try_parse_from([
+            "oxia-cmd",
+            "--compress-accept",
+            "deflate",
+            "--compress-accept",
+            "gzip",
+            "--compress-accept",
+            "zstd",
+            "get",
+            "key",
+        ])
+        .expect("compress-accept should accept all enum variants regardless of enabled features");
+        assert_eq!(
+            repeated.compress_accept,
+            [
+                compress::ArgValue::Deflate,
+                compress::ArgValue::Gzip,
+                compress::ArgValue::Zstd,
+            ]
+        );
     }
 }

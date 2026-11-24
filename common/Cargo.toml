@@ -5,9 +5,14 @@ publish = false
 edition.workspace = true
 license = "Apache-2.0"
 
+[features]
+deflate = ["tonic/deflate"]
+gzip = ["tonic/gzip"]
+zstd = ["tonic/zstd"]
+
 [dependencies]
 bytes = "1.12.1"
-prost = "0.14.5"                                                       # If using Protobuf
+prost = "0.14.5"
 prost-types = "0.14.5"
 tonic = { version = "0.14.9", default-features = false, features = [
     "channel",
