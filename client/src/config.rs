@@ -16,6 +16,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bon::Builder;
+#[cfg(feature = "_compression_enabled")]
+use tonic::codec::CompressionEncoding;
 
 use crate::discovery::IntoServiceDiscovery;
 use crate::discovery::ServiceDiscovery;
@@ -56,6 +58,150 @@ impl RetryConfig {
     }
 }
 
+#[cfg(feature = "_compression_enabled")]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum CompressionCodec {
+    #[cfg(feature = "deflate")]
+    Deflate,
+    #[cfg(feature = "gzip")]
+    Gzip,
+    #[cfg(feature = "zstd")]
+    Zstd,
+}
+
+#[cfg(feature = "_compression_enabled")]
+impl CompressionCodec {
+    const ALL: &[Self] = &[
+        #[cfg(feature = "deflate")]
+        Self::Deflate,
+        #[cfg(feature = "gzip")]
+        Self::Gzip,
+        #[cfg(feature = "zstd")]
+        Self::Zstd,
+    ];
+
+    pub(crate) const fn to_proto(self) -> CompressionEncoding {
+        match self {
+            #[cfg(feature = "deflate")]
+            Self::Deflate => CompressionEncoding::Deflate,
+            #[cfg(feature = "gzip")]
+            Self::Gzip => CompressionEncoding::Gzip,
+            #[cfg(feature = "zstd")]
+            Self::Zstd => CompressionEncoding::Zstd,
+        }
+    }
+}
+
+#[cfg(feature = "_compression_enabled")]
+#[derive(Default, Copy, Clone, PartialEq, Eq)]
+pub struct CompressionCodecSet(u8);
+
+#[cfg(feature = "_compression_enabled")]
+impl std::fmt::Debug for CompressionCodecSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_set().entries(self.iter()).finish()
+    }
+}
+
+#[cfg(feature = "_compression_enabled")]
+impl CompressionCodecSet {
+    pub const EMPTY: Self = Self(0);
+    pub const ALL: Self = Self::from_slice(CompressionCodec::ALL);
+
+    #[inline]
+    pub const fn new() -> Self {
+        Self::EMPTY
+    }
+
+    #[inline]
+    pub const fn from_codec(codec: CompressionCodec) -> Self {
+        Self(Self::bit(codec))
+    }
+
+    #[inline]
+    pub const fn from_slice(codecs: &[CompressionCodec]) -> Self {
+        let mut set = Self::EMPTY;
+        let mut i = 0;
+        while i < codecs.len() {
+            set.insert(codecs[i]);
+            i += 1;
+        }
+        set
+    }
+
+    #[inline]
+    const fn bit(x: CompressionCodec) -> u8 {
+        1 << (x as u8)
+    }
+
+    #[inline]
+    pub const fn insert(&mut self, x: CompressionCodec) {
+        self.0 |= Self::bit(x);
+    }
+
+    #[inline]
+    pub const fn contains(self, x: CompressionCodec) -> bool {
+        self.0 & Self::bit(x) != 0
+    }
+
+    #[inline]
+    pub fn iter(self) -> impl Iterator<Item = CompressionCodec> {
+        CompressionCodec::ALL
+            .iter()
+            .copied()
+            .filter(move |&c| self.contains(c))
+    }
+}
+
+#[cfg(feature = "_compression_enabled")]
+const _: () = {
+    // Verify no duplicates in CompressionCodec::ALL.
+    assert!(CompressionCodec::ALL.len() == CompressionCodecSet::ALL.0.count_ones() as usize);
+
+    // Inline const blocks verify every variant is present in ALL.
+    let _ = |c: CompressionCodec| match c {
+        #[cfg(feature = "deflate")]
+        CompressionCodec::Deflate => {
+            const { assert!(CompressionCodecSet::ALL.contains(CompressionCodec::Deflate)) }
+        }
+        #[cfg(feature = "gzip")]
+        CompressionCodec::Gzip => {
+            const { assert!(CompressionCodecSet::ALL.contains(CompressionCodec::Gzip)) }
+        }
+        #[cfg(feature = "zstd")]
+        CompressionCodec::Zstd => {
+            const { assert!(CompressionCodecSet::ALL.contains(CompressionCodec::Zstd)) }
+        }
+    };
+};
+
+#[cfg(feature = "_compression_enabled")]
+impl FromIterator<CompressionCodec> for CompressionCodecSet {
+    fn from_iter<I: IntoIterator<Item = CompressionCodec>>(iter: I) -> Self {
+        let mut set = Self::EMPTY;
+        for x in iter {
+            set.insert(x);
+        }
+        set
+    }
+}
+
+#[cfg(feature = "_compression_enabled")]
+impl From<CompressionCodec> for CompressionCodecSet {
+    #[inline]
+    fn from(x: CompressionCodec) -> Self {
+        Self::from_codec(x)
+    }
+}
+
+#[cfg(feature = "_compression_enabled")]
+impl<const N: usize> From<[CompressionCodec; N]> for CompressionCodecSet {
+    #[inline]
+    fn from(xs: [CompressionCodec; N]) -> Self {
+        Self::from_slice(&xs)
+    }
+}
+
 #[derive(Builder, Clone)]
 #[builder(finish_fn(name = do_build, vis = ""))]
 #[builder(on(String, into))]
@@ -77,6 +223,11 @@ pub struct Config {
     retry_on_stale_shard_map: bool,
     #[cfg(feature = "metrics")]
     meter_provider: Option<MeterProviderHandle>,
+    #[cfg(feature = "_compression_enabled")]
+    #[builder(default = CompressionCodecSet::EMPTY)]
+    accept_compression: CompressionCodecSet,
+    #[cfg(feature = "_compression_enabled")]
+    send_compressed: Option<CompressionCodec>,
 }
 
 impl Config {
@@ -125,6 +276,18 @@ impl Config {
     pub const fn meter_provider(&self) -> Option<&MeterProviderHandle> {
         self.meter_provider.as_ref()
     }
+
+    #[cfg(feature = "_compression_enabled")]
+    #[inline]
+    pub const fn accept_compression(&self) -> CompressionCodecSet {
+        self.accept_compression
+    }
+
+    #[cfg(feature = "_compression_enabled")]
+    #[inline]
+    pub const fn send_compressed(&self) -> Option<CompressionCodec> {
+        self.send_compressed
+    }
 }
 
 impl std::fmt::Debug for Config {
@@ -139,8 +302,16 @@ impl std::fmt::Debug for Config {
             .field("request_timeout", &self.request_timeout)
             .field("retry", &self.retry)
             .field("retry_on_stale_shard_map", &self.retry_on_stale_shard_map);
+
         #[cfg(feature = "metrics")]
         debug.field("meter_provider", &self.meter_provider.is_some());
+
+        #[cfg(feature = "_compression_enabled")]
+        {
+            debug.field("accept_compression", &self.accept_compression);
+            debug.field("send_compressed", &self.send_compressed);
+        }
+
         debug.finish()
     }
 }
@@ -165,5 +336,94 @@ impl<S: config_builder::State> ConfigBuilder<S> {
         S: config_builder::IsComplete,
     {
         Arc::new(self.do_build())
+    }
+}
+
+#[cfg(all(test, feature = "_compression_enabled"))]
+mod compression_tests {
+    use super::*;
+
+    #[test]
+    fn codec_set_empty_and_default() {
+        let empty = CompressionCodecSet::EMPTY;
+        assert_eq!(empty, CompressionCodecSet::default());
+        assert_eq!(empty, CompressionCodecSet::from_slice(&[]));
+        assert_eq!(empty, CompressionCodecSet::from([]));
+        assert_eq!(empty, CompressionCodecSet::new());
+        assert_eq!(
+            empty,
+            std::iter::empty::<CompressionCodec>().collect::<CompressionCodecSet>()
+        );
+        assert_eq!(empty.iter().count(), 0);
+        for &codec in CompressionCodec::ALL {
+            assert!(!empty.contains(codec));
+        }
+    }
+
+    #[test]
+    fn codec_set_test_from_codec() {
+        CompressionCodecSet::ALL.iter().for_each(|c| {
+            let cs = CompressionCodecSet::from_codec(c);
+            assert!(cs.contains(c));
+            assert_eq!(cs.iter().count(), 1);
+        });
+    }
+
+    #[test]
+    fn codec_to_proto_maps_each_enabled_variant() {
+        #[cfg(feature = "deflate")]
+        assert_eq!(
+            CompressionCodec::Deflate.to_proto(),
+            CompressionEncoding::Deflate
+        );
+        #[cfg(feature = "gzip")]
+        assert_eq!(CompressionCodec::Gzip.to_proto(), CompressionEncoding::Gzip);
+        #[cfg(feature = "zstd")]
+        assert_eq!(CompressionCodec::Zstd.to_proto(), CompressionEncoding::Zstd);
+    }
+
+    #[test]
+    fn codec_set_single_codec_round_trip() {
+        for &codec in CompressionCodec::ALL {
+            let set = CompressionCodecSet::from(codec);
+            assert_eq!(CompressionCodecSet::from([codec]), set);
+            assert!(set.contains(codec));
+            for &other in CompressionCodec::ALL {
+                assert_eq!(set.contains(other), other == codec);
+            }
+            let iterated: Vec<_> = set.iter().collect();
+            assert_eq!(iterated, vec![codec]);
+        }
+    }
+
+    #[test]
+    fn codec_set_subsets() {
+        let count = CompressionCodec::ALL.len();
+        let all_mask = (1usize << count) - 1;
+        for mask in 0usize..=all_mask {
+            let expected: Vec<_> = CompressionCodec::ALL
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &codec)| ((mask & (1usize << i)) != 0).then_some(codec))
+                .collect();
+
+            let set = CompressionCodecSet::from_slice(&expected);
+            let from_iter: CompressionCodecSet = expected.iter().copied().collect();
+
+            assert_eq!(set, from_iter);
+            if mask == 0 {
+                assert_eq!(set, CompressionCodecSet::EMPTY);
+            }
+            if mask == all_mask {
+                assert_eq!(set, CompressionCodecSet::ALL);
+            }
+
+            for &codec in CompressionCodec::ALL {
+                assert_eq!(set.contains(codec), expected.contains(&codec));
+            }
+
+            let iterated: Vec<_> = set.iter().collect();
+            assert_eq!(iterated, expected);
+        }
     }
 }

@@ -64,6 +64,7 @@ use crate::SequenceUpdate;
 use crate::batch_get;
 use crate::config;
 use crate::create_grpc_client;
+use crate::grpc_client_from_channel;
 use crate::metrics;
 use crate::pool::ChannelPool;
 
@@ -366,7 +367,7 @@ impl Client {
     /// to the same leader reuse the existing connection.
     async fn get_grpc_client(&self) -> Result<GrpcClient> {
         let channel = self.get_channel().await?;
-        Ok(GrpcClient::new(channel).max_decoding_message_size(crate::MAX_GRPC_DECODING_SIZE))
+        Ok(grpc_client_from_channel(&self.data.config, channel))
     }
 
     /// Invalidate the cached channel for the current leader.
@@ -1729,7 +1730,7 @@ impl ShardAssignmentTask {
     async fn get_stream_from(&self, addr: &str) -> Result<Streaming<oxia_proto::ShardAssignments>> {
         debug!(addr, "attempting shard assignment stream connection");
 
-        let mut client = match create_grpc_client(addr, &self.channel_pool).await {
+        let mut client = match create_grpc_client(&self.config, addr, &self.channel_pool).await {
             Ok(c) => c,
             Err(e) => {
                 warn!(addr, ?e, "failed to create gRPC client");
