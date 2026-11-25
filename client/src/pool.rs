@@ -19,7 +19,9 @@ use tokio::sync::broadcast::Receiver;
 use tokio::sync::broadcast::Sender;
 use tonic::transport::Channel;
 use tonic::transport::Endpoint;
+use tonic::transport::Uri;
 
+use crate::ClientError;
 use crate::Error;
 use crate::Result;
 use crate::config::Config;
@@ -43,7 +45,7 @@ mod state {
         Pending(broadcast::Sender<CompletionResult>),
     }
 
-    pub type EntryMap = HashMap<String, Entry>;
+    pub type EntryMap = HashMap<Arc<str>, Entry>;
 
     pub struct Txn<'a> {
         entries: &'a ArcSwap<EntryMap>,
@@ -96,9 +98,53 @@ pub trait ChannelFactory: Clone + Send + Sync {
 #[derive(Clone, Debug)]
 pub struct DefaultChannelFactory;
 
+fn make_uri(dest: &str) -> Result<Uri> {
+    if dest.contains('#') {
+        let e = ClientError::DestinationContainsUnexpectedComponent {
+            component: "fragment".to_string(),
+        };
+        return Err(e.into());
+    }
+    // TODO: http v https
+    let dest = dest.trim_suffix('/');
+    let url = format!("http://{dest}");
+    let uri = Uri::try_from(url).map_err(|e| ClientError::InvalidDestinationFormat {
+        dest: dest.to_string(),
+        reason: e.to_string(),
+    })?;
+
+    if let Some(auth) = uri.authority() {
+        if auth.as_str().contains('@') {
+            let e = ClientError::DestinationContainsUserinfo {};
+            return Err(e.into());
+        }
+    } else {
+        let e = ClientError::DestinationMissingAuthority {};
+        return Err(e.into());
+    }
+
+    if uri.path() != "" && uri.path() != "/" {
+        let e = ClientError::DestinationContainsUnexpectedComponent {
+            component: format!("path: '{}'", uri.path()),
+        };
+        return Err(e.into());
+    }
+
+    if uri.query().is_some() {
+        return Err(Error::Client(Arc::new(
+            ClientError::DestinationContainsUnexpectedComponent {
+                component: "query string".to_string(),
+            },
+        )));
+    }
+
+    Ok(uri)
+}
+
 impl ChannelFactory for DefaultChannelFactory {
     async fn create(&self, _: &Arc<Config>, target: &str) -> Result<Channel> {
-        let endpoint: Endpoint = target.parse()?;
+        let uri = make_uri(target)?;
+        let endpoint = Endpoint::from(uri);
         endpoint.connect().await.map_err(Error::from)
     }
 }
@@ -161,7 +207,10 @@ impl<Fact: ChannelFactory> ChannelPool<Fact> {
                 {
                     let mut new_map = current.as_ref().clone();
                     if let Ok(c) = &res {
-                        new_map.insert(target.to_string(), Entry::Connected(c.clone()));
+                        let slot = new_map
+                            .get_mut(target)
+                            .expect("target should be in new_map!");
+                        *slot = Entry::Connected(c.clone());
                     } else {
                         new_map.remove(target);
                     }
@@ -172,6 +221,14 @@ impl<Fact: ChannelFactory> ChannelPool<Fact> {
                 res
             })
             .await
+    }
+
+    /// Lock-free cache-hit lookup.
+    pub(crate) fn get_cached(&self, target: &str) -> Option<Channel> {
+        match self.state.load().get(target) {
+            Some(state::Entry::Connected(c)) => Some(c.clone()),
+            _ => None,
+        }
     }
 
     pub(crate) async fn get(&self, target: &str) -> Result<Channel> {
@@ -186,8 +243,8 @@ impl<Fact: ChannelFactory> ChannelPool<Fact> {
             Prepared((Sender<CompletionResult>, F)),
         }
 
-        if let Some(Entry::Connected(c)) = self.state.load().get(target) {
-            return Ok(c.clone());
+        if let Some(c) = self.get_cached(target) {
+            return Ok(c);
         }
 
         let next = self
@@ -200,7 +257,7 @@ impl<Fact: ChannelFactory> ChannelPool<Fact> {
                     None => {
                         let (tx, _) = broadcast::channel(1);
                         let mut new_map = current.as_ref().clone();
-                        new_map.insert(target.to_string(), Entry::Pending(tx.clone()));
+                        new_map.insert(Arc::from(target), Entry::Pending(tx.clone()));
                         txn.store(new_map);
                         Next::Prepared((tx, self.create_channel(target)))
                     }
@@ -242,10 +299,69 @@ impl<Fact: ChannelFactory> ChannelPool<Fact> {
 }
 
 #[cfg(test)]
-#[cfg(not(miri))]
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_make_uri() {
+        assert!(make_uri("localhost:6648").is_ok());
+        assert!(make_uri("127.0.0.1:6648").is_ok());
+        assert!(make_uri("[::1]:6648").is_ok());
+
+        // userinfo
+        let r = make_uri("user:pass@localhost:6648");
+        assert!(matches!(
+            r,
+            Err(Error::Client(e)) if matches!(*e, ClientError::DestinationContainsUserinfo)
+        ));
+
+        let r = make_uri("user@localhost:6648");
+        assert!(matches!(
+            r,
+            Err(Error::Client(e)) if matches!(*e, ClientError::DestinationContainsUserinfo)
+        ));
+
+        // path
+        let r = make_uri("localhost:6648/path");
+        if let Err(Error::Client(e)) = r {
+            if let ClientError::DestinationContainsUnexpectedComponent { component } = e.as_ref() {
+                assert!(component.contains("path"));
+            } else {
+                panic!("Expected DestinationContainsUnexpectedComponent, got {e:?}");
+            }
+        } else {
+            panic!("Expected Error::Client, got {r:?}");
+        }
+
+        assert!(make_uri("localhost:6648/").is_ok());
+
+        // query
+        let r = make_uri("localhost:6648?query=1");
+        if let Err(Error::Client(e)) = r {
+            if let ClientError::DestinationContainsUnexpectedComponent { component } = e.as_ref() {
+                assert!(component.contains("query"));
+            } else {
+                panic!("Expected DestinationContainsUnexpectedComponent, got {e:?}");
+            }
+        } else {
+            panic!("Expected Error::Client, got {r:?}");
+        }
+
+        // Invalid formats
+        assert!(make_uri(" ").is_err());
+        let r = make_uri("localhost:6648#frag");
+        if let Err(Error::Client(e)) = r {
+            if let ClientError::DestinationContainsUnexpectedComponent { component } = e.as_ref() {
+                assert!(component.contains("fragment"));
+            } else {
+                panic!("Expected DestinationContainsUnexpectedComponent, got {e:?}");
+            }
+        } else {
+            panic!("Expected Error::Client, got {r:?}");
+        }
+    }
+
+    #[cfg(not(miri))]
     #[test_log::test(tokio::test(flavor = "current_thread"))]
     async fn test_construct() -> anyhow::Result<()> {
         let config = Config::builder().service_addr("localhost").build();
@@ -254,9 +370,11 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(not(miri))]
     #[derive(Clone)]
     struct FailDefaultChannelFactory;
 
+    #[cfg(not(miri))]
     impl ChannelFactory for FailDefaultChannelFactory {
         fn create(&self, _: &Arc<Config>, _: &str) -> impl Future<Output = Result<Channel>> {
             let result = Err(Error::Custom("not implemented".to_string()));
@@ -264,6 +382,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(miri))]
     #[test_log::test(tokio::test(flavor = "current_thread"))]
     async fn test_construct_factory() -> anyhow::Result<()> {
         let config = Config::builder().service_addr("localhost").build();

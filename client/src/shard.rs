@@ -38,6 +38,7 @@ use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tonic::Streaming;
 use tonic::metadata::MetadataValue;
+use tonic::transport::Channel;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
@@ -263,16 +264,9 @@ impl Drop for Session {
     }
 }
 
-/// Shared directory mapping shard IDs to pre-formatted leader URLs (`Arc<str>`).
+/// Shared directory mapping shard IDs to leader addresses (`Arc<str>`).
 /// Updated atomically when shard assignments change; clients look up dynamically.
-///
-/// URLs are formatted once during assignment processing, eliminating per-RPC
-/// `format!("http://...")` allocations.
 pub type LeaderDirectory = Arc<ArcSwap<ShardIdMap<Arc<str>>>>;
-
-fn format_leader_url(leader: &str) -> Option<Arc<str>> {
-    (!leader.is_empty()).then(|| Arc::from(format!("http://{leader}")))
-}
 
 fn make_leader_map(
     assignments: &[oxia_proto::ShardAssignment],
@@ -281,9 +275,17 @@ fn make_leader_map(
     let mut leaders = ShardIdMap::default();
     for assignment in assignments {
         let id = assignment.shard.into();
-        let url = format_leader_url(&assignment.leader).or_else(|| current.get(id).map(Arc::clone));
-        if let Some(url) = url {
-            leaders.insert(id, url);
+        let leader = if assignment.leader.is_empty() {
+            current.get(id).map(Arc::clone)
+        } else if let Some(prev) = current.get(id)
+            && prev.as_ref() == assignment.leader.as_str()
+        {
+            Some(Arc::clone(prev))
+        } else {
+            Some(Arc::from(assignment.leader.as_str()))
+        };
+        if let Some(leader) = leader {
+            leaders.insert(id, leader);
         }
     }
     leaders
@@ -326,9 +328,12 @@ impl ClientData {
         }
     }
 
-    /// Get the current leader address for this shard, if known.
-    fn get_leader(&self) -> Option<Arc<str>> {
-        self.leaders.load().get(self.shard_id).cloned()
+    #[inline]
+    fn no_response_error(&self) -> Error {
+        let leaders = self.leaders.load();
+        let server = leaders.get(self.shard_id).map_or("unknown", AsRef::as_ref);
+        let msg = format!("server={server} shard={}", self.shard_id);
+        Error::NoResponseFromServer(msg)
     }
 }
 
@@ -339,27 +344,41 @@ pub struct Client {
 }
 
 impl Client {
-    /// Look up current leader address from the shared leader directory.
-    fn get_leader(&self) -> Option<Arc<str>> {
-        self.data.leaders.load().get(self.data.shard_id).cloned()
+    /// Get a channel for the current leader without cloning the address on cache hits.
+    async fn get_channel(&self) -> Result<Channel> {
+        let leader = {
+            let leaders = self.data.leaders.load();
+            let leader = leaders
+                .get(self.data.shard_id)
+                .ok_or_else(|| Error::NoShardMapping(self.data.shard_id))?;
+            if let Some(channel) = self.data.channel_pool.get_cached(leader) {
+                return Ok(channel);
+            }
+            Arc::clone(leader)
+        };
+        self.data.channel_pool.get(&leader).await
     }
 
     /// Get a gRPC client for the current leader.
     ///
     /// Performs dynamic leader lookup on each call - no caching at this level.
-    /// The `ChannelPool` handles connection caching by URL, so repeated calls
+    /// The `ChannelPool` handles connection caching by address, so repeated calls
     /// to the same leader reuse the existing connection.
     async fn get_grpc_client(&self) -> Result<GrpcClient> {
-        let leader = self
-            .get_leader()
-            .ok_or_else(|| Error::NoShardMapping(self.data.shard_id))?;
-        let channel = self.data.channel_pool.get(&leader).await?;
+        let channel = self.get_channel().await?;
         Ok(GrpcClient::new(channel).max_decoding_message_size(crate::MAX_GRPC_DECODING_SIZE))
     }
 
     /// Invalidate the cached channel for the current leader.
     async fn invalidate_channel(&self) {
-        if let Some(leader) = self.get_leader() {
+        let leader = self
+            .data
+            .leaders
+            .load()
+            .get(self.data.shard_id)
+            .map(Arc::clone);
+        if let Some(leader) = leader {
+            debug!(leader = %leader, "invalidating channel");
             self.data.channel_pool.remove(&leader).await;
         }
     }
@@ -375,9 +394,6 @@ impl Client {
         if let Err(ref e) = result
             && e.is_connection_error()
         {
-            if let Some(leader) = self.get_leader() {
-                debug!(leader = %leader, "connection error, invalidating channel");
-            }
             self.invalidate_channel().await;
         }
         result
@@ -496,13 +512,6 @@ fn check_write_operation_response(
             "invalid write metrics operation: {operation:?}"
         ))),
     }
-}
-
-#[inline]
-fn no_response_error(server: Option<&str>, shard_id: ShardId) -> Error {
-    let server = server.unwrap_or("unknown");
-    let msg = format!("server={server} shard={shard_id}");
-    Error::NoResponseFromServer(msg)
 }
 
 // const INTERNAL_KEY_PREFIX: &str = "__oxia/";
@@ -866,10 +875,7 @@ impl Client {
             Some(Ok(response)) => response,
             Some(Err(err)) => return Err(err.into()),
             None => {
-                return Err(no_response_error(
-                    self.data.get_leader().as_deref(),
-                    self.data.shard_id,
-                ));
+                return Err(self.data.no_response_error());
             }
         };
 
@@ -943,10 +949,7 @@ impl Client {
                         request_count,
                         State::Failing {
                             keys_iter,
-                            err: no_response_error(
-                                context.get_leader().as_deref(),
-                                context.shard_id,
-                            ),
+                            err: context.no_response_error(),
                         },
                     )
                 }
@@ -985,10 +988,7 @@ impl Client {
                                 return None;
                             }
                             // gets exhausted early; fail remaining keys
-                            let err = no_response_error(
-                                context.get_leader().as_deref(),
-                                context.shard_id,
-                            );
+                            let err = context.no_response_error();
                             state = State::Failing { keys_iter, err };
                             continue;
                         };
@@ -1992,7 +1992,7 @@ mod tests {
     fn leader_map_retains_last_valid_leader_during_election() {
         let shard_id = ShardId::new(1);
         let mut current = ShardIdMap::default();
-        current.insert(shard_id, Arc::from("http://previous:6648"));
+        current.insert(shard_id, Arc::from("previous:6648"));
         let assignments = [oxia_proto::ShardAssignment {
             shard: shard_id.into(),
             leader: String::new(),
@@ -2003,8 +2003,25 @@ mod tests {
 
         assert_eq!(
             updated.get(shard_id).map(AsRef::as_ref),
-            Some("http://previous:6648")
+            Some("previous:6648")
         );
+    }
+
+    #[test]
+    fn leader_map_reuses_arc_for_unchanged_leader() {
+        let shard_id = ShardId::new(1);
+        let existing: Arc<str> = Arc::from("node-1:6648");
+        let mut current = ShardIdMap::default();
+        current.insert(shard_id, Arc::clone(&existing));
+        let assignments = [oxia_proto::ShardAssignment {
+            shard: shard_id.into(),
+            leader: "node-1:6648".to_string(),
+            ..Default::default()
+        }];
+
+        let updated = make_leader_map(&assignments, &current);
+
+        assert!(Arc::ptr_eq(updated.get(shard_id).unwrap(), &existing));
     }
 
     #[test]
@@ -2130,7 +2147,7 @@ mod tests {
 
         fn make_test_leaders(shard_id: ShardId, leader: &str) -> LeaderDirectory {
             let mut leaders = ShardIdMap::default();
-            leaders.insert(shard_id, Arc::from(format!("http://{leader}")));
+            leaders.insert(shard_id, Arc::from(leader));
             Arc::new(ArcSwap::from_pointee(leaders))
         }
 
@@ -2156,8 +2173,13 @@ mod tests {
 
             // Client should be able to look up its leader
             assert_eq!(
-                client.get_leader().as_deref(),
-                Some("http://localhost:1234")
+                client
+                    .data
+                    .leaders
+                    .load()
+                    .get(client.data.shard_id)
+                    .map(AsRef::as_ref),
+                Some("localhost:1234")
             );
         }
 
